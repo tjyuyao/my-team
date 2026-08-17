@@ -49,6 +49,14 @@ from my_team.executor_registry import (
 )
 from my_team.file_ops import FileOpsAuditEntry, FileOpsAuditLog
 from my_team.human_control import HumanControl
+from my_team.journal import (
+    EffectSummary,
+    IntentSummary,
+    OutboxSummary,
+    PendingOpSummary,
+    TickJournal,
+    TickRecordStatus,
+)
 from my_team.mailbox import MailSystem
 from my_team.models.activation import (
     AgentActivation,
@@ -75,7 +83,7 @@ from my_team.models.intent import (
     WritePrivateFileIntent,
 )
 from my_team.models.task import Task, TaskPriority, TaskStatus
-from my_team.outbox import Outbox, OutboxEntry
+from my_team.outbox import Outbox, OutboxEntry, OutboxStatus
 from my_team.patch_ops import PatchError, apply_patch
 from my_team.pending_ops import (
     CancellationResult,
@@ -237,7 +245,8 @@ class Simulation:
         # Initialize core subsystems
         self._mail_system = MailSystem()
         self._task_tree = TaskTree()
-        self._audit_log = AuditLog()
+        self._journal = TickJournal()
+        self._audit_log = AuditLog(journal=self._journal)
         self._file_ops_audit = FileOpsAuditLog()
         self._private_store = PrivateStore(PrivateStoreConfig(
             base_path="private",
@@ -289,6 +298,7 @@ class Simulation:
         # run_tick uses it to defer/requeue claimed wake events so the
         # rolled-back tick's activations re-trigger next tick.
         self._last_tick_rolled_back = False
+        self._last_tick_rollback_error: str | None = None
 
         # Email outbox (reliable dispatch with idempotency)
         self._outbox = Outbox(max_retries=self._config.max_retries)
@@ -1381,6 +1391,12 @@ class Simulation:
                 ],
                 "next_event_id": self._audit_log._counter,
             },
+            "tick_journal": {
+                "records": [
+                    r.model_dump(mode="json")
+                    for r in self._journal.records
+                ],
+            },
             "file_ops_audit": [
                 e.model_dump(mode="json") for e in self._file_ops_audit._entries
             ],
@@ -1511,7 +1527,19 @@ class Simulation:
         }
         self._lock_manager._lock_counter = locks["lock_counter"]
 
-        # Audit
+        # T4: Tick Journal + Audit reconstruction
+        journal_state = state.get("tick_journal", {})
+        if journal_state.get("records"):
+            from my_team.journal import TickRecord
+            self._journal._records = [
+                TickRecord.model_validate(r)
+                for r in journal_state["records"]
+            ]
+        # Always restore audit from the direct blob (includes init events
+        # that happen before any TickRecord).  The Journal is the
+        # authoritative source for tick-scoped events; the blob is the
+        # source for pre-tick events.  During execution, both are kept
+        # in sync via AuditLog.record() → Journal delegation.
         audit = state["audit"]
         self._audit_log._entries = [
             AuditEntry.model_validate(e) for e in audit["entries"]
@@ -1582,6 +1610,9 @@ class Simulation:
             "validate", "act", "commit", "publish", "audit",
         ]
 
+        # T4: start journal record for this tick
+        self._journal.start_tick(tick, self._state_epoch)
+
         # Phase 1: Ingest — collect completed external operations + deliver emails
         self._phase_ingest(tick)
         delivered = self._phase_deliver(tick)
@@ -1599,8 +1630,14 @@ class Simulation:
         # Phase 5: Decide — generate Intents (non-blocking)
         plans = self._phase_decide(tick, observations, ready)
 
+        # T4: capture intents into journal
+        self._capture_intents(plans)
+
         # Phase 6: Validate — pre-validate Intents before execution
         validated = self._phase_validate(tick, plans, ready)
+
+        # T4: capture validation results into journal
+        self._capture_validation(plans, validated)
 
         # Phase 7: Act — translate validated Intents into staged effects
         #            and registered pending operations (no application)
@@ -1614,6 +1651,19 @@ class Simulation:
 
         # Phase 10: Audit
         self._phase_audit(tick, delivered, all_results, ready)
+
+        # T4: finalize journal record for this tick
+        current_rec = self._journal.current_record
+        if current_rec is not None:
+            from my_team.tool_protocol import hash_payload
+            current_rec.snapshot_hash = hash_payload(self._last_snapshot or {})
+            if self._last_tick_rolled_back:
+                self._journal.finalize(
+                    TickRecordStatus.ABORTED,
+                    error=self._last_tick_rollback_error,
+                )
+            else:
+                self._journal.finalize(TickRecordStatus.COMMITTED)
 
         # Complete activations and clean up scheduler. On COMMIT
         # ROLLBACK the tick's state was invalidated: activations
@@ -2845,6 +2895,48 @@ class Simulation:
 
         return validated
 
+    # -- T4: Journal capture helpers ----------------------------------------
+
+    def _capture_intents(self, plans: dict[str, list[Any]]) -> None:
+        """Record intent summaries into the current TickRecord."""
+        record = self._journal.current_record
+        if record is None:
+            return
+        for agent_id, intent_list in plans.items():
+            for intent in intent_list:
+                record.intents.append(IntentSummary(
+                    intent_id=getattr(intent, "intent_id", ""),
+                    intent_type=getattr(intent, "intent_type", type(intent).__name__),
+                    agent_id=agent_id,
+                    task_id=getattr(intent, "task_id", ""),
+                ))
+
+    def _capture_validation(
+        self,
+        plans: dict[str, list[Any]],
+        validated: dict[str, list[ActionResult]],
+    ) -> None:
+        """Record validation results into the current TickRecord."""
+        record = self._journal.current_record
+        if record is None:
+            return
+        for agent_id, intent_list in plans.items():
+            results = validated.get(agent_id, [])
+            for i, intent in enumerate(intent_list):
+                success = True
+                error = None
+                if i < len(results):
+                    success = results[i].success
+                    error = results[i].error
+                record.validation.append(IntentSummary(
+                    intent_id=getattr(intent, "intent_id", ""),
+                    intent_type=getattr(intent, "intent_type", type(intent).__name__),
+                    agent_id=agent_id,
+                    task_id=getattr(intent, "task_id", ""),
+                    success=success,
+                    error=error,
+                ))
+
     def _phase_publish(
         self,
         tick: int,
@@ -3031,6 +3123,7 @@ class Simulation:
         """
         buffer = self._transaction_buffer
         self._last_tick_rolled_back = False
+        self._last_tick_rollback_error = None
         def check_task(effect: StagedEffect) -> str | None:
             """TASK_UPDATE must target an existing, live task.
 
@@ -3338,6 +3431,7 @@ class Simulation:
                 applied.append(effect)
         except Exception as e:  # noqa: BLE001 — rollback on any apply failure
             self._last_tick_rolled_back = True
+            self._last_tick_rollback_error = str(e)
             _rollback()
             # Mark the failing effect as FAILED; any committed effects
             # that were not applied (skipped by the exception) also FAIL
@@ -3363,6 +3457,18 @@ class Simulation:
                 success=False,
                 error=str(e),
             )
+            # T4: record rolled-back effects in journal
+            record = self._journal.current_record
+            if record is not None:
+                for effect in committed:
+                    record.effects.append(EffectSummary(
+                        effect_id=effect.effect_id,
+                        effect_type=effect.effect_type.value,
+                        agent_id=effect.agent_id,
+                        resource=effect.resource,
+                        status=effect.status.value,
+                        error=effect.error,
+                    ))
             return []
 
         # Outbox dispatch runs unconditionally after a successful
@@ -3402,6 +3508,39 @@ class Simulation:
                     "resource": effect.resource,
                 },
             )
+
+        # T4: record effects, pending ops, outbox in journal
+        record = self._journal.current_record
+        if record is not None:
+            for effect in committed:
+                record.effects.append(EffectSummary(
+                    effect_id=effect.effect_id,
+                    effect_type=effect.effect_type.value,
+                    agent_id=effect.agent_id,
+                    resource=effect.resource,
+                    status=effect.status.value,
+                    error=effect.error,
+                ))
+            for _aid, op in self._tick_pending_ops:
+                record.pending_ops.append(PendingOpSummary(
+                    request_id=op.request_id,
+                    op_type=op.op_type.value,
+                    agent_id=op.agent_id,
+                    created_tick=op.created_tick,
+                ))
+            # Capture outbox entries created this tick
+            for entry in self._outbox.entries_by_status(OutboxStatus.COMMITTED):
+                if (
+                    entry.effect_id
+                    and any(e.effect_id == entry.effect_id for e in committed)
+                ):
+                    record.outbox.append(OutboxSummary(
+                        entry_id=entry.entry_id,
+                        effect_id=entry.effect_id,
+                        from_agent=entry.from_agent,
+                        to=entry.to,
+                        subject=entry.subject,
+                    ))
 
         return []
 

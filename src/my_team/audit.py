@@ -113,11 +113,16 @@ class AuditLog:
 
     Provides write-once recording with query capabilities.
     All state changes should be recordable and reconstructable.
+
+    When a TickJournal reference is provided, each record() call also
+    appends the entry to the journal's current TickRecord — making the
+    journal the single source of truth for audit events.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, journal: Any | None = None) -> None:
         self._entries: list[AuditEntry] = []
         self._counter = 0
+        self._journal = journal  # TickJournal | None (Any to avoid circular import)
 
     def record(
         self,
@@ -144,6 +149,11 @@ class AuditLog:
             error=error,
         )
         self._entries.append(entry)
+        # Delegate to TickJournal if available (T4: single source of truth)
+        if self._journal is not None:
+            current = self._journal.current_record
+            if current is not None:
+                current.audit_events.append(entry)
         return entry
 
     @property
