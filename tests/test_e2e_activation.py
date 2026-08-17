@@ -153,3 +153,57 @@ class TestE2ESimulationConfig:
         )
         sim = Simulation(agent_tree=two_agent_tree, config=config)
         assert sim.scheduler.config.max_action_budget == 16
+
+
+class TestE2EStateMachineIntegration:
+    """Verify AgentStateMachine is wired as authoritative state source."""
+
+    def test_runtime_states_initialized(self, two_agent_tree):
+        """Each agent should have an AgentRuntimeState after init."""
+        sim = Simulation(agent_tree=two_agent_tree)
+        assert "agent.root" in sim._agent_runtime_states
+        assert "agent.worker" in sim._agent_runtime_states
+
+    def test_initial_state_is_idle(self, two_agent_tree):
+        """After initialization, agents should be in IDLE state."""
+        from my_team.agent_state import AgentState
+        sim = Simulation(agent_tree=two_agent_tree)
+        assert sim._agent_runtime_states["agent.root"].state == AgentState.IDLE
+        assert sim._agent_runtime_states["agent.worker"].state == AgentState.IDLE
+
+    def test_bootstrap_agent_transitions_to_processing(self, two_agent_tree):
+        """Bootstrap agent should transition IDLE → READY → PROCESSING → IDLE."""
+        from my_team.agent_state import AgentState
+        sim = Simulation(agent_tree=two_agent_tree)
+        sim.run_tick()  # tick 0: root bootstraps
+
+        root_state = sim._agent_runtime_states["agent.root"]
+        # After activation completes, should be back to IDLE
+        assert root_state.state == AgentState.IDLE
+
+    def test_worker_stays_idle_without_events(self, two_agent_tree):
+        """Worker without events should remain IDLE."""
+        from my_team.agent_state import AgentState
+        sim = Simulation(agent_tree=two_agent_tree)
+        sim.run_tick()
+
+        worker_state = sim._agent_runtime_states["agent.worker"]
+        assert worker_state.state == AgentState.IDLE
+
+    def test_get_agent_states_returns_real_states(self, two_agent_tree):
+        """_get_agent_states() should return real runtime states."""
+        from my_team.agent_state import AgentState
+        sim = Simulation(agent_tree=two_agent_tree)
+        states = sim._get_agent_states()
+        assert states["agent.root"] == AgentState.IDLE
+        assert states["agent.worker"] == AgentState.IDLE
+
+    def test_state_machine_audit_trail(self, two_agent_tree):
+        """AgentStateMachine should record transitions."""
+        sim = Simulation(agent_tree=two_agent_tree)
+        sim.run_tick()
+
+        root_sm = sim._agent_runtime_states["agent.root"].state_machine
+        # Should have transitions: CREATED → INITIALIZED → READY → IDLE (init)
+        # then IDLE → READY → PROCESSING → IDLE (activation)
+        assert root_sm.transition_count >= 4

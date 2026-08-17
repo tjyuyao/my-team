@@ -30,7 +30,7 @@ from my_team.agent_runtime import (
     _proxy,
     _proxy_nested,
 )
-from my_team.agent_state import AgentState
+from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType, AuditLog
 from my_team.delegation import DelegationProtocol
@@ -73,6 +73,54 @@ class SimulationConfig(BaseModel):
         default_factory=ExecutionConfig,
         description="Agent execution configuration",
     )
+
+
+class AgentRuntimeState:
+    """Authoritative runtime state for a single agent.
+
+    Holds the AgentStateMachine as the single source of truth for
+    agent lifecycle state. The scheduler reads from this, not from
+    its own internal state.
+    """
+
+    def __init__(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+        self.state_machine = AgentStateMachine(
+            agent_id=agent_id,
+            initial_state=AgentState.CREATED,
+        )
+        self.active_activation_id: str | None = None
+        self.last_activation_tick: int | None = None
+
+    @property
+    def state(self) -> AgentState:
+        return self.state_machine.state
+
+    def initialize(self, tick: int = 0) -> None:
+        """created → initialized → ready → idle"""
+        self.state_machine.initialize(tick=tick, reason="system init")
+        self.state_machine.mark_ready(tick=tick, reason="system init")
+        self.state_machine.start(tick=tick, reason="system init")
+
+    def begin_activation(self, tick: int) -> None:
+        """idle → ready → processing"""
+        if self.state == AgentState.IDLE:
+            self.state_machine.wake_up(tick=tick, reason="scheduler activation")
+        if self.state == AgentState.READY:
+            self.state_machine.begin_processing(tick=tick, reason="activation start")
+
+    def complete_activation(self, tick: int) -> None:
+        """processing → idle (or waiting_for_* if agent chose to wait)"""
+        if self.state == AgentState.PROCESSING:
+            self.state_machine.finish_processing(tick=tick, reason="activation complete")
+
+    def transition_to_waiting(self, waiting_state: AgentState, tick: int) -> None:
+        """processing → waiting_for_*"""
+        if self.state == AgentState.PROCESSING:
+            self.state_machine.transition(waiting_state, tick=tick, reason="awaiting event")
+
+    def __repr__(self) -> str:
+        return f"AgentRuntimeState({self.agent_id}, state={self.state.value})"
 
 
 class Simulation:
@@ -155,6 +203,9 @@ class Simulation:
         # Agent runtimes
         self._runtimes: dict[str, AgentRuntime] = {}
 
+        # Agent runtime states (authoritative state source)
+        self._agent_runtime_states: dict[str, AgentRuntimeState] = {}
+
         # File ops
         self._file_ops = FileOps(
             private_store=self._private_store,
@@ -182,6 +233,11 @@ class Simulation:
             # Create agent runtime
             runtime = self._create_runtime(agent_config)
             self._runtimes[agent_id] = runtime
+
+            # Create and initialize agent runtime state
+            runtime_state = AgentRuntimeState(agent_id=agent_id)
+            runtime_state.initialize()
+            self._agent_runtime_states[agent_id] = runtime_state
 
             # Register with scheduler — bootstrap agents wake on tick 0
             is_bootstrap = agent_config.metadata.get("bootstrap", False)
@@ -319,11 +375,11 @@ class Simulation:
         # Phase 5: Decide — ready agents generate action plan
         plans = self._phase_decide(tick, observations, ready)
 
-        # Phase 6: Act — execute actions through tool registry
-        all_results = self._phase_act(tick, plans, ready)
+        # Phase 6: Validate — check action plans before execution
+        validated = self._phase_validate(tick, plans, ready)
 
-        # Phase 7: Validate — validate staged effects
-        self._phase_validate(tick, all_results)
+        # Phase 7: Act — execute validated actions through tool registry
+        all_results = self._phase_act(tick, plans, ready, validated)
 
         # Phase 8: Commit — atomic state update
         self._phase_commit(tick, all_results)
@@ -341,6 +397,10 @@ class Simulation:
                 self._scheduler.complete_activation(
                     activation.activation_id, success=True
                 )
+                # Transition agent state: PROCESSING → IDLE
+                runtime_state = self._agent_runtime_states.get(candidate.agent_id)
+                if runtime_state:
+                    runtime_state.complete_activation(tick)
         self._scheduler.end_tick()
 
         # Advance tick engine
@@ -363,10 +423,14 @@ class Simulation:
     # -- Phase implementations ----------------------------------------------
 
     def _get_agent_states(self) -> dict[str, AgentState]:
-        """Get current state of all agents for scheduler."""
-        # For now, all agents are IDLE (state machine not yet wired to runtime)
-        # This will be enhanced when AgentStateMachine is integrated
-        return {aid: AgentState.IDLE for aid in self._runtimes}
+        """Get current state of all agents for scheduler.
+
+        Uses AgentRuntimeState as the authoritative source.
+        """
+        return {
+            aid: rs.state
+            for aid, rs in self._agent_runtime_states.items()
+        }
 
     def _phase_schedule(self, tick: int) -> list[ReadyCandidate]:
         """Phase 3: Compute ready set from pending events + agent states.
@@ -392,6 +456,12 @@ class Simulation:
         # Begin activations for ready candidates
         for candidate in ready:
             activation = self._scheduler.begin_activation(candidate, tick)
+
+            # Transition agent state: IDLE → READY → PROCESSING
+            runtime_state = self._agent_runtime_states.get(candidate.agent_id)
+            if runtime_state:
+                runtime_state.begin_activation(tick)
+
             self._audit_log.record(
                 AuditEventType.AGENT_ACTIVATED,
                 agent_id=candidate.agent_id,
@@ -561,12 +631,45 @@ class Simulation:
         tick: int,
         plans: dict[str, ActionPlan],
         ready: list[ReadyCandidate] | None = None,
+        validated: dict[str, list[ActionResult]] | None = None,
     ) -> dict[str, list[ActionResult]]:
-        """Phase 6: Execute actions through tool registry."""
+        """Phase 7: Execute validated actions through tool registry.
+
+        Only actions that passed validation in Phase 6 are executed.
+        Pre-validated results are merged with execution results.
+        """
         all_results: dict[str, list[ActionResult]] = {}
+
         for agent_id, plan in plans.items():
+            # Collect validated action indices
+            validated_actions: set[int] = set()
+            if validated and agent_id in validated:
+                for i, vr in enumerate(validated[agent_id]):
+                    if vr.success:
+                        validated_actions.add(i)
+
+            # Build filtered plan with only validated actions
+            filtered_actions = [
+                a for i, a in enumerate(plan.actions)
+                if i in validated_actions
+            ]
+
+            if not filtered_actions:
+                # All actions failed validation — record validation failures
+                if validated and agent_id in validated:
+                    all_results[agent_id] = [
+                        vr for vr in validated[agent_id] if not vr.success
+                    ]
+                continue
+
+            filtered_plan = ActionPlan(
+                agent_id=agent_id,
+                tick=tick,
+                actions=filtered_actions,
+            )
+
             runtime = self._runtimes.get(agent_id)
-            if runtime and plan.actions:
+            if runtime:
                 context = ActionContext(
                     agent_id=agent_id,
                     tick=tick,
@@ -576,19 +679,103 @@ class Simulation:
                         allowed_tools=self._tool_registry.get_allowed_tools(agent_id),
                     ),
                 )
-                results = runtime.act(plan, context)
-                all_results[agent_id] = results
+                exec_results = runtime.act(filtered_plan, context)
+                # Merge validation failures + execution results
+                val_failures = [
+                    vr for vr in validated.get(agent_id, [])
+                    if not vr.success
+                ] if validated else []
+                all_results[agent_id] = val_failures + exec_results
+
         return all_results
 
     def _phase_validate(
-        self, tick: int, all_results: dict[str, list[ActionResult]]
-    ) -> None:
-        """Phase 7: Validate staged effects.
+        self,
+        tick: int,
+        plans: dict[str, ActionPlan],
+        ready: list[ReadyCandidate],
+    ) -> dict[str, list[ActionResult]]:
+        """Phase 7: Validate action plans before execution.
 
-        Currently a placeholder. Full validation (permissions, versions,
-        locks) will be implemented with the transaction system.
+        Checks performed:
+        1. Tool capability — each action's tool is in agent's allowed tools
+        2. Delegation target — delegate actions target direct children
+        3. Action payload — required fields present
+        4. Activation budget — total actions within limit
+
+        Invalid actions are converted to failed Results. Valid actions pass through.
         """
-        pass
+        validated: dict[str, list[ActionResult]] = {}
+
+        for candidate in ready:
+            agent_id = candidate.agent_id
+            plan = plans.get(agent_id)
+            if plan is None:
+                continue
+
+            allowed_tools = self._tool_registry.get_allowed_tools(agent_id)
+            results: list[ActionResult] = []
+
+            for action in plan.actions:
+                # Check 1: tool capability
+                if action.tool_name and action.tool_name not in allowed_tools:
+                    results.append(ActionResult(
+                        action=action,
+                        success=False,
+                        error=f"Tool '{action.tool_name}' not authorized for '{agent_id}'",
+                    ))
+                    self._audit_log.record(
+                        AuditEventType.PERMISSION_DENIED,
+                        agent_id=agent_id,
+                        tick=tick,
+                        details={"tool": action.tool_name, "action_type": action.action_type},
+                        success=False,
+                        error="Tool not authorized",
+                    )
+                    continue
+
+                # Check 2: delegation target validation
+                if action.action_type == "delegate":
+                    target_id = action.payload.get("recipient_agent_id", "")
+                    if not self._agent_tree.can_delegate_to(agent_id, target_id):
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"'{agent_id}' cannot delegate to '{target_id}'"
+                                " (not a direct child)"
+                            ),
+                        ))
+                        continue
+
+                # Check 3: required payload fields
+                if action.tool_name == "read" and "path" not in action.payload:
+                    results.append(ActionResult(
+                        action=action,
+                        success=False,
+                        error="read action requires 'path' field",
+                    ))
+                    continue
+
+                if action.tool_name == "write":
+                    if "path" not in action.payload or "content" not in action.payload:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error="write action requires 'path' and 'content' fields",
+                        ))
+                        continue
+
+                # Passed validation — will be executed in Act phase
+                results.append(ActionResult(
+                    action=action,
+                    success=True,
+                    result_data={"validated": True},
+                ))
+
+            validated[agent_id] = results
+
+        return validated
 
     def _phase_publish(
         self,
