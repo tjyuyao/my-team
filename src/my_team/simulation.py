@@ -86,7 +86,11 @@ from my_team.pending_ops import (
     PendingOperationRegistry,
 )
 from my_team.persistence import SCHEMA_VERSION, SimulationStore
-from my_team.private_store import PrivateStore, PrivateStoreConfig
+from my_team.private_store import (
+    AccessDeniedError,
+    PrivateStore,
+    PrivateStoreConfig,
+)
 from my_team.python_worker import (
     DEFAULT_ALLOWED_MODULES,
     run_python_compute,
@@ -268,6 +272,12 @@ class Simulation:
         # Snapshot of the current tick (set at Freeze) — dispatch runs
         # in Publish and needs the frozen view for tool execution.
         self._last_snapshot: dict[str, Any] | None = None
+        # This-tick transaction tracking for rollback (P0-2):
+        # pending ops registered THIS tick that must be undone on rollback.
+        self._tick_pending_ops: list[tuple[str, Any]] = []
+        # Continuation snapshots BEFORE this-tick mutations, keyed by
+        # agent_id → (phase, pending_request_id, pending_request_type).
+        self._tick_continuations: dict[str, tuple[Any, str, str]] = {}
 
         # State epoch — incremented on rollback/restore. External results
         # carry the epoch they were submitted under; results from an older
@@ -388,6 +398,25 @@ class Simulation:
                 details={"role": agent_config.role, "tools": list(tools)},
             )
 
+    @staticmethod
+    def _validate_write_path(path: str) -> str | None:
+        """Reject unsafe file-write paths before staging.
+
+        Returns an error string if the path is invalid, None if ok.
+        Checks: empty path, absolute path, ``..`` segment traversal.
+        Symlink escapes and deeper containment are caught later by
+        ``PrivateStore.resolve_path`` at commit time.
+        """
+        if not path:
+            return "write path must not be empty"
+        if path.startswith("/"):
+            return f"absolute path rejected: {path}"
+        from os.path import normpath
+        parts = normpath(path).split("/")
+        if ".." in parts:
+            return f"path traversal rejected: {path}"
+        return None
+
     def _register_tool_handlers(self) -> None:
         """Register tool handlers that connect ToolRegistry to subsystems.
 
@@ -413,8 +442,16 @@ class Simulation:
                     agent_id=context.agent_id, tool_name="read",
                     tick=context.tick,
                 )
-            home = self._private_store.agent_home(context.agent_id)
-            target = home / path
+            try:
+                target = self._private_store.resolve_path(
+                    context.agent_id, path,
+                )
+            except AccessDeniedError as exc:
+                return ToolResult(
+                    success=False, error=str(exc),
+                    agent_id=context.agent_id, tool_name="read",
+                    tick=context.tick,
+                )
             if not target.exists() or not target.is_file():
                 return ToolResult(
                     success=False, error=f"File not found: {path}",
@@ -448,8 +485,18 @@ class Simulation:
                     agent_id=context.agent_id, tool_name="ls",
                     tick=context.tick,
                 )
-            home = self._private_store.agent_home(context.agent_id)
-            target = home / path if path else home
+            try:
+                target = self._private_store.resolve_path(
+                    context.agent_id, path,
+                ) if path else self._private_store.agent_home(
+                    context.agent_id,
+                )
+            except AccessDeniedError as exc:
+                return ToolResult(
+                    success=False, error=str(exc),
+                    agent_id=context.agent_id, tool_name="ls",
+                    tick=context.tick,
+                )
             if not target.exists():
                 return ToolResult(
                     success=False, error=f"Directory not found: {path}",
@@ -466,6 +513,15 @@ class Simulation:
         def handle_write(
             context: ToolContext, path: str = "", content: str = "", **_kw: Any,
         ) -> Any:
+            # Path safety: reject traversal / absolute / empty before staging
+            err = self._validate_write_path(path)
+            if err is not None:
+                return ToolResult(
+                    success=False, error=err,
+                    error_code="INVALID_ARGUMENT",
+                    agent_id=context.agent_id, tool_name="write",
+                    tick=context.tick,
+                )
             # Stage as a file write effect — committed in Phase 8
             self._transaction_buffer.stage(
                 effect_type=EffectType.FILE_WRITE,
@@ -597,6 +653,14 @@ class Simulation:
                 return ToolResult(
                     success=False, error="apply_patch requires 'path'",
                     error_code="invalid_patch", retryable=False,
+                    agent_id=context.agent_id, tool_name="apply_patch",
+                    tick=context.tick,
+                )
+            err = self._validate_write_path(path)
+            if err is not None:
+                return ToolResult(
+                    success=False, error=err,
+                    error_code="INVALID_ARGUMENT", retryable=False,
                     agent_id=context.agent_id, tool_name="apply_patch",
                     tick=context.tick,
                 )
@@ -1596,11 +1660,17 @@ class Simulation:
                     )
         self._scheduler.end_tick()
 
-        # Advance tick engine
-        results = self._tick_engine.advance(1)
-        return results[0] if results else TickResult(
+        # Advance clock only (no phase execution in TickEngine)
+        self._tick_engine.advance(1)
+
+        # P0-3: construct real TickResult from the actual 10-phase cycle
+        return TickResult(
             tick=tick,
-            phases_completed=[],
+            phases_completed=list(self._last_tick_phases),
+            committed=not rolled_back,
+            errors=[
+                {"phase": "commit", "error": "tick rolled back"}
+            ] if rolled_back else [],
         )
 
     def run(self, max_ticks: int = 100) -> list[TickResult]:
@@ -2112,6 +2182,9 @@ class Simulation:
         # include this tick's submissions), so two agents could both
         # pass; this closes the window before ops are submitted.
         submitted_llm: dict[str, int] = {}
+        # P0-2: reset this-tick tracking for rollback
+        self._tick_pending_ops.clear()
+        self._tick_continuations.clear()
 
         for agent_id, intent_list in plans.items():
             # Determine which intents passed validation
@@ -2176,12 +2249,18 @@ class Simulation:
                         },
                     )
                     if runtime_state:
-                        runtime_state.continuation.advance_to_waiting_llm(
-                            op.request_id, tick,
+                        # P0-2: snapshot continuation before mutation
+                        c = runtime_state.continuation
+                        self._tick_continuations[agent_id] = (
+                            c.phase, c.pending_request_id,
+                            c.pending_request_type,
                         )
+                        c.advance_to_waiting_llm(op.request_id, tick)
                         runtime_state.transition_to_waiting(
                             AgentState.WAITING_FOR_LLM, tick,
                         )
+                    # P0-2: track op for rollback
+                    self._tick_pending_ops.append((agent_id, op))
                     results.append(ActionResult(
                         action=action,
                         success=True,
@@ -2281,12 +2360,18 @@ class Simulation:
                                 arguments=dict(intent.arguments),
                             )
                         if runtime_state:
-                            runtime_state.continuation.advance_to_waiting_tool(
-                                op.request_id, tick,
+                            # P0-2: snapshot continuation before mutation
+                            c = runtime_state.continuation
+                            self._tick_continuations[agent_id] = (
+                                c.phase, c.pending_request_id,
+                                c.pending_request_type,
                             )
+                            c.advance_to_waiting_tool(op.request_id, tick)
                             runtime_state.transition_to_waiting(
                                 AgentState.WAITING_FOR_TOOL, tick,
                             )
+                        # P0-2: track op for rollback
+                        self._tick_pending_ops.append((agent_id, op))
                         results.append(ActionResult(
                             action=action,
                             success=True,
@@ -2364,6 +2449,13 @@ class Simulation:
 
                 # WritePrivateFileIntent → stage FILE_WRITE
                 if isinstance(intent, WritePrivateFileIntent):
+                    err = self._validate_write_path(intent.path)
+                    if err is not None:
+                        results.append(ActionResult(
+                            action=action, success=False,
+                            error=err, error_code="INVALID_ARGUMENT",
+                        ))
+                        continue
                     self._transaction_buffer.stage(
                         effect_type=EffectType.FILE_WRITE,
                         agent_id=agent_id,
@@ -3069,6 +3161,27 @@ class Simulation:
                 except Exception:  # noqa: BLE001 — rollback must not fail
                     pass
 
+            # P0-2: undo this-tick pending op registrations (and their
+            # seen_requests entries — the request_id becomes reusable).
+            for _aid, op in self._tick_pending_ops:
+                try:
+                    self._pending_ops.remove_for_rollback(op.request_id)
+                except Exception:  # noqa: BLE001 — rollback must not fail
+                    pass
+
+            # P0-2: restore agent continuations to pre-tick state
+            for aid, (phase, req_id, req_type) in (
+                self._tick_continuations.items()
+            ):
+                try:
+                    rs = self._agent_runtime_states.get(aid)
+                    if rs:
+                        rs.continuation.phase = phase
+                        rs.continuation.pending_request_id = req_id
+                        rs.continuation.pending_request_type = req_type
+                except Exception:  # noqa: BLE001 — rollback must not fail
+                    pass
+
             # Mark applied effects as rolled back
             for ap in applied:
                 ap.status = EffectStatus.ROLLED_BACK
@@ -3085,8 +3198,20 @@ class Simulation:
                     agent_id = effect.agent_id
                     path = effect.resource
                     content = effect.data.get("content", "")
-                    home = self._private_store.agent_home(agent_id)
-                    target = home / path
+
+                    # Path safety: resolve through PrivateStore to catch
+                    # traversal (../), symlink escapes, and containment
+                    # violations. This is the authoritative gate — earlier
+                    # static checks in handle_write / WritePrivateFileIntent
+                    # are defense-in-depth.
+                    try:
+                        target = self._private_store.resolve_path(
+                            agent_id, path,
+                        )
+                    except AccessDeniedError as exc:
+                        effect.status = EffectStatus.FAILED
+                        effect.error = f"path denied: {exc}"
+                        continue
 
                     # FILE_PATCH base re-check AT APPLY TIME: earlier
                     # same-tick writes are now visible on disk. If the

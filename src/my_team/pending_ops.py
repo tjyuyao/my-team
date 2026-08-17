@@ -378,8 +378,24 @@ class PendingOperationRegistry:
 
         Called after the simulation has consumed a completed result.
         Returns the removed operation, or None if not found.
+        NOTE: seen_requests is NOT cleaned up here — consumed ops must
+        remain in history to prevent replay.  Use remove_for_rollback()
+        when the op was never legitimately consumed.
         """
         return self._operations.pop(request_id, None)
+
+    def remove_for_rollback(self, request_id: str) -> PendingOperation | None:
+        """Remove an operation AND its seen_requests entry (rollback).
+
+        Used by _phase_commit._rollback() to undo this-tick registrations
+        that were never consumed — the request_id becomes reusable.
+        """
+        op = self._operations.pop(request_id, None)
+        if op is not None:
+            req = op.metadata.get("request_id")
+            if req and req in self._seen_requests:
+                del self._seen_requests[req]
+        return op
 
     def remove_completed(self) -> int:
         """Remove all completed/failed/cancelled/timed_out operations.

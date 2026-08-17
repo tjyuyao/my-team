@@ -3,6 +3,8 @@
 **Phase:** v0.9 P0
 **Source:** SPEC §7.1、§12.2；OI-003 P0-1
 **Priority:** high
+**Completed:** 2026-08-18
+**Tests:** 772 passed（+11），ruff clean，mypy clean
 
 ## 目标
 真实主路径中的文件写入不得逃逸 Agent 私有空间；`write` 工具与
@@ -25,7 +27,7 @@
   `../agent.b/...`、`/tmp/...`、symlink 逃逸均失败且不产生文件。
 
 ## 验收标准
-- [ ] `sim._phase_commit` 写入 `../agent.b/workspace/pwned.txt` 不产生文件
-- [ ] `write` 工具路径 `../agent.b/...` 返回失败（错误码 INVALID_ARGUMENT 或路径类错误码）
-- [ ] 新增测试至少 3 条且穿过 Simulation 主路径（非仅 FileOps）
-- [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过
+- [x] `sim._phase_commit` 写入 `../agent.b/workspace/pwned.txt` 不产生文件
+- [x] `write` 工具路径 `../agent.b/...` 返回失败（错误码 INVALID_ARGUMENT 或路径类错误码）
+- [x] 新增测试至少 3 条且穿过 Simulation 主路径（非仅 FileOps）— 实际新增 11 条
+- [x] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过

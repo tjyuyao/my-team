@@ -100,7 +100,7 @@ class TickResult(BaseModel):
     """Result of executing a single tick."""
 
     tick: int = Field(description="Tick number that was executed")
-    phases_completed: list[TickPhase] = Field(description="Phases that ran")
+    phases_completed: list[str] = Field(description="Phases that ran")
     agent_actions: dict[str, list[dict[str, Any]]] = Field(
         default_factory=dict,
         description="Actions produced by each agent",
@@ -134,10 +134,11 @@ PhaseHandler = Callable[[int, TickSnapshot | None, dict[str, Any]], dict[str, An
 
 
 class TickEngine:
-    """Core simulation engine that drives discrete time steps.
+    """Discrete-time clock for the simulation kernel.
 
-    Manages the tick clock, executes the 7-phase cycle, and coordinates
-    agent execution with read consistency guarantees.
+    Manages tick counter and CREATED/RUNNING/PAUSED/COMPLETED state.
+    Phase execution lives in Simulation.run_tick() — this class is
+    intentionally a pure clock with no phase logic.
     """
 
     def __init__(self, config: TickConfig | None = None) -> None:
@@ -147,28 +148,6 @@ class TickEngine:
             SimulationState.PAUSED if self._config.start_paused
             else SimulationState.CREATED
         )
-        self._tick_history: list[TickResult] = []
-        self._snapshots: dict[int, TickSnapshot] = {}
-
-        # Phase handlers: can be overridden or extended
-        self._phase_handlers: dict[TickPhase, PhaseHandler] = {
-            TickPhase.FREEZE: self._phase_freeze,
-            TickPhase.DELIVER: self._phase_deliver,
-            TickPhase.OBSERVE: self._phase_observe,
-            TickPhase.DECIDE: self._phase_decide,
-            TickPhase.ACT: self._phase_act,
-            TickPhase.COMMIT: self._phase_commit,
-            TickPhase.AUDIT: self._phase_audit,
-        }
-
-        # Shared context that phases read/write
-        self._context: dict[str, Any] = {
-            "pending_emails": [],
-            "agent_snapshots": {},
-            "agent_actions": {},
-            "committed_actions": [],
-            "audit_events": [],
-        }
 
     @property
     def current_tick(self) -> int:
@@ -181,18 +160,6 @@ class TickEngine:
     @property
     def config(self) -> TickConfig:
         return self._config
-
-    def get_snapshot(self, tick: int | None = None) -> TickSnapshot | None:
-        """Get the snapshot for a specific tick.
-
-        If tick is None, returns the most recent snapshot.
-        """
-        if tick is not None:
-            return self._snapshots.get(tick)
-        if not self._snapshots:
-            return None
-        latest_tick = max(self._snapshots.keys())
-        return self._snapshots[latest_tick]
 
     def can_advance(self) -> bool:
         """Check if the simulation can advance to the next tick."""
@@ -211,244 +178,19 @@ class TickEngine:
         if self._state == SimulationState.PAUSED:
             self._state = SimulationState.RUNNING
 
-    def advance(self, count: int = 1) -> list[TickResult]:
-        """Advance the simulation by one or more ticks.
+    def advance(self, count: int = 1) -> None:
+        """Advance the clock by one or more ticks.
 
-        Each tick runs through all 7 phases in order.
-        All agents execute within each tick with read consistency.
-
-        Args:
-            count: Number of ticks to advance.
-
-        Returns:
-            List of TickResult for each tick executed.
+        Does NOT execute any phase logic — Simulation.run_tick() owns
+        the 10-phase kernel cycle.
         """
         if not self.can_advance():
             raise RuntimeError(
                 f"Cannot advance: simulation is {self._state.value}"
             )
-
-        # Transition to running on first advance
         if self._state == SimulationState.CREATED:
             self._state = SimulationState.RUNNING
-
-        results: list[TickResult] = []
-        for _ in range(count):
-            result = self._execute_tick()
-            results.append(result)
-            self._tick_history.append(result)
-            self._current_tick += 1
-
-        return results
-
-    def _execute_tick(self) -> TickResult:
-        """Execute a single tick through all 7 phases."""
-        tick = self._current_tick
-        phases_completed: list[TickPhase] = []
-        errors: list[dict[str, Any]] = []
-        audit_events: list[dict[str, Any]] = []
-        agent_actions: dict[str, list[dict[str, Any]]] = {}
-        emails_queued: list[dict[str, Any]] = []
-
-        # Reset context for this tick
-        self._context["agent_actions"] = {}
-        self._context["committed_actions"] = []
-        self._context["audit_events"] = []
-
-        for phase in TickPhase:
-            try:
-                result = self._phase_handlers[phase](tick, self._snapshots.get(tick), self._context)
-                phases_completed.append(phase)
-
-                # Collect results from phase
-                if "agent_actions" in result:
-                    agent_actions.update(result["agent_actions"])
-                if "emails_queued" in result:
-                    emails_queued.extend(result["emails_queued"])
-                if "audit_events" in result:
-                    audit_events.extend(result["audit_events"])
-
-            except Exception as e:
-                errors.append({
-                    "tick": tick,
-                    "phase": phase.value,
-                    "error": str(e),
-                    "type": type(e).__name__,
-                })
-                # On error, skip remaining phases for this tick
-                break
-
-        return TickResult(
-            tick=tick,
-            phases_completed=phases_completed,
-            agent_actions=agent_actions,
-            emails_queued=emails_queued,
-            committed=TickPhase.COMMIT in phases_completed,
-            errors=errors,
-            audit_events=audit_events,
-        )
-
-    # -- Phase handlers -----------------------------------------------------
-
-    def _phase_freeze(
-        self, tick: int, snapshot: TickSnapshot | None, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Phase 1: Freeze - snapshot the current global state.
-
-        All agents will read from this snapshot during OBSERVE.
-        """
-        new_snapshot = TickSnapshot(
-            tick=tick,
-            agents=dict(context.get("agent_snapshots", {})),
-            emails=list(context.get("pending_emails", [])),
-            shared_kb=dict(context.get("shared_kb", {})),
-            locks=dict(context.get("locks", {})),
-            tasks=dict(context.get("tasks", {})),
-        )
-        self._snapshots[tick] = new_snapshot
-        return {"snapshot": new_snapshot}
-
-    def _phase_deliver(
-        self, tick: int, snapshot: TickSnapshot | None, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Phase 2: Deliver - deliver emails whose deliver_at_tick <= current_tick.
-
-        Emails enter target agents' inboxes.
-        """
-        if snapshot is None:
-            return {}
-
-        delivered = []
-        remaining = []
-        for email in snapshot.emails:
-            deliver_at = email.get("deliver_at_tick", 0)
-            if deliver_at <= tick:
-                delivered.append(email)
-            else:
-                remaining.append(email)
-
-        context["pending_emails"] = remaining
-        return {"emails_queued": delivered}
-
-    def _phase_observe(
-        self, tick: int, snapshot: TickSnapshot | None, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Phase 3: Observe - agents read from the frozen snapshot.
-
-        Each agent reads: new emails, task state, private workspace,
-        memory, shared KB, lock status, system notifications.
-        """
-        if snapshot is None:
-            return {}
-
-        # Create per-agent observation data from the snapshot
-        observations: dict[str, dict[str, Any]] = {}
-        for agent_id, agent_state in snapshot.agents.items():
-            observations[agent_id] = {
-                "tick": tick,
-                "agent_id": agent_id,
-                "state": agent_state,
-                "emails": [
-                    e for e in snapshot.emails
-                    if agent_id in e.get("to", [])
-                ],
-                "shared_kb": snapshot.shared_kb,
-                "locks": snapshot.locks,
-            }
-
-        context["observations"] = observations
-        return {}
-
-    def _phase_decide(
-        self, tick: int, snapshot: TickSnapshot | None, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Phase 4: Decide - agents independently generate action plans.
-
-        Each agent produces a list of planned actions based on its observations.
-        In a real system, this is where LLM inference happens.
-        """
-        # Default: no actions (agents are inert until given behavior)
-        # Subclasses or callbacks can override this
-        context["agent_actions"] = {}
-        return {"agent_actions": {}}
-
-    def _phase_act(
-        self, tick: int, snapshot: TickSnapshot | None, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Phase 5: Act - agents execute their planned actions in parallel.
-
-        Execution results are temporary and not visible to other agents
-        until COMMIT.
-        """
-        actions = context.get("agent_actions", {})
-        # In default implementation, actions are just recorded
-        # Real execution happens in subclasses
-        context["committed_actions"] = actions
-        return {"agent_actions": actions}
-
-    def _phase_commit(
-        self, tick: int, snapshot: TickSnapshot | None, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Phase 6: Commit - atomic state update.
-
-        Applies all agent actions in deterministic order:
-        1. State transitions
-        2. Email queueing
-        3. Private space writes
-        4. Lock acquire/release
-        5. Shared KB updates
-        6. Memory persistence
-        7. Task state updates
-        """
-        committed = context.get("committed_actions", {})
-        emails_queued: list[dict[str, Any]] = []
-
-        for agent_id, action_list in committed.items():
-            if not isinstance(action_list, list):
-                continue
-            for action in action_list:
-                if action.get("action_type") == "send_email":
-                    emails_queued.append(action.get("payload", {}))
-
-        # Update pending emails
-        context["pending_emails"].extend(emails_queued)
-
-        return {"emails_queued": emails_queued}
-
-    def _phase_audit(
-        self, tick: int, snapshot: TickSnapshot | None, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Phase 7: Audit - record all events for this tick.
-
-        Logs: agent inputs, actions, tool calls, emails, task changes,
-        KB versions, lock events, errors, human operations.
-        """
-        events = [
-            {
-                "tick": tick,
-                "event_type": "tick_complete",
-                "phases_executed": [p.value for p in TickPhase],
-            }
-        ]
-        context["audit_events"] = events
-        return {"audit_events": events}
-
-    def register_phase_handler(self, phase: TickPhase, handler: PhaseHandler) -> None:
-        """Override or extend a phase handler."""
-        self._phase_handlers[phase] = handler
-
-    def update_context(self, **kwargs: Any) -> None:
-        """Update the shared context (e.g., inject agent states or emails)."""
-        self._context.update(kwargs)
-
-    def get_context(self) -> dict[str, Any]:
-        """Get the current shared context."""
-        return dict(self._context)
-
-    @property
-    def history(self) -> list[TickResult]:
-        """History of all executed ticks."""
-        return list(self._tick_history)
+        self._current_tick += count
 
     def __repr__(self) -> str:
         return (
