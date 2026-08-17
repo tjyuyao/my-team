@@ -43,25 +43,28 @@ class TaskPriority(str, Enum):
 # Valid state transitions for tasks
 TASK_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.DRAFT: {TaskStatus.ASSIGNED, TaskStatus.CANCELLED},
-    TaskStatus.ASSIGNED: {TaskStatus.ACCEPTED, TaskStatus.FAILED, TaskStatus.CANCELLED},
-    TaskStatus.ACCEPTED: {TaskStatus.IN_PROGRESS, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.ASSIGNED: {TaskStatus.ACCEPTED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.EXPIRED},
+    TaskStatus.ACCEPTED: {TaskStatus.IN_PROGRESS, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.EXPIRED},
     TaskStatus.IN_PROGRESS: {
         TaskStatus.SUBMITTED,
         TaskStatus.BLOCKED,
         TaskStatus.WAITING_FOR_CHILDREN,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
+        TaskStatus.EXPIRED,
     },
     TaskStatus.BLOCKED: {
         TaskStatus.IN_PROGRESS,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
+        TaskStatus.EXPIRED,
     },
     TaskStatus.WAITING_FOR_CHILDREN: {
         TaskStatus.IN_PROGRESS,
         TaskStatus.SUBMITTED,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
+        TaskStatus.EXPIRED,
     },
     TaskStatus.SUBMITTED: {TaskStatus.REVIEWING, TaskStatus.COMPLETED, TaskStatus.FAILED},
     TaskStatus.REVIEWING: {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.IN_PROGRESS},
