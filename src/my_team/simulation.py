@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -28,6 +29,8 @@ from my_team.agent_runtime import (
     SubAgent,
     ToolContext,
     ToolRegistry,
+    _proxy,
+    _proxy_nested,
 )
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType, AuditLog
@@ -350,8 +353,11 @@ class Simulation:
                 l.resource: {
                     "owner": l.owner_agent_id,
                     "lease_until": l.lease_until_tick,
-                    "lock_token": l.lock_token,
                 }
+                for l in self._lock_manager.active_locks()
+            },
+            "lock_tokens": {
+                l.resource: l.lock_token
                 for l in self._lock_manager.active_locks()
             },
             "tasks": {
@@ -375,13 +381,22 @@ class Simulation:
         """Phase 3: Each agent observes the frozen snapshot."""
         observations: dict[str, AgentObservation] = {}
         for agent_id, runtime in self._runtimes.items():
-            # Build typed, immutable agent-specific snapshot
+            # Filter lock tokens: only the lock holder sees their token
+            agent_locks = {}
+            lock_tokens = snapshot.get("lock_tokens", {})
+            for resource, lock_info in snapshot["locks"].items():
+                entry = dict(lock_info)
+                if entry.get("owner") == agent_id and resource in lock_tokens:
+                    entry["lock_token"] = lock_tokens[resource]
+                agent_locks[resource] = entry
+
+            # Build typed, deeply immutable agent-specific snapshot
             agent_snapshot = AgentSnapshot(
                 tick=tick,
                 emails=tuple(snapshot["emails"]),
-                task_states=snapshot["tasks"],
-                shared_kb_snapshot=snapshot["shared_kb"],
-                lock_states=snapshot["locks"],
+                task_states=_proxy_nested(snapshot["tasks"]),
+                shared_kb_snapshot=_proxy(snapshot["shared_kb"]),
+                lock_states=_proxy(agent_locks),
                 private_workspace_path=str(
                     self._private_store.agent_home(agent_id)
                 ),

@@ -1,6 +1,10 @@
 """Tests for path security hardening: symlinks, traversal, absolute paths.
 
-Covers review gap: symlink/TOCTOU path hardening (SPEC §15.1).
+Covers review gap: basic path security (SPEC §15.1).
+
+NOTE: These tests verify static path checks. True TOCTOU resistance
+(replacing a symlink between check and open) requires atomic file
+operations (openat, O_NOFOLLOW) and is not yet implemented.
 """
 
 import os

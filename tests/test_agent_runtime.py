@@ -178,13 +178,30 @@ class TestAgentSnapshot:
         with pytest.raises(AttributeError):
             snap.tick = 2  # type: ignore[misc]
 
+    def test_snapshot_deeply_immutable(self):
+        """Nested dicts cannot be mutated through the snapshot."""
+        from types import MappingProxyType
+        snap = AgentSnapshot(
+            tick=1,
+            task_states={"t1": {"status": "assigned"}},
+            shared_kb_snapshot={"paths": ["report.md"]},
+        )
+        # Outer is frozen dataclass — can't reassign
+        with pytest.raises(AttributeError):
+            snap.task_states = {}  # type: ignore[misc]
+        # Inner MappingProxyType — can't mutate values
+        with pytest.raises(TypeError):
+            snap.task_states["t1"]["status"] = "hacked"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            snap.shared_kb_snapshot["new_key"] = "value"  # type: ignore[index]
+
     def test_snapshot_defaults(self):
         snap = AgentSnapshot()
         assert snap.tick == 0
         assert snap.emails == ()
-        assert snap.task_states == {}
-        assert snap.shared_kb_snapshot == {}
-        assert snap.lock_states == {}
+        assert len(snap.task_states) == 0
+        assert len(snap.shared_kb_snapshot) == 0
+        assert len(snap.lock_states) == 0
         assert snap.private_workspace_path == ""
 
     def test_snapshot_equality(self):
@@ -201,6 +218,11 @@ class TestAgentSnapshot:
         snap = AgentSnapshot(emails=({"subject": "hello"},))
         assert isinstance(snap.emails, tuple)
 
+    def test_snapshot_task_states_are_mapping(self):
+        from types import MappingProxyType
+        snap = AgentSnapshot(task_states={"t1": {"s": 1}})
+        assert isinstance(snap.task_states, MappingProxyType)
+
 
 # ---------------------------------------------------------------------------
 # AgentRuntime protocol
@@ -208,19 +230,22 @@ class TestAgentSnapshot:
 
 class TestAgentRuntime:
     def test_base_agent_observe(self, tool_registry):
+        from types import MappingProxyType
         agent = BaseAgent(agent_id="agent.a", tool_registry=tool_registry)
         snapshot = AgentSnapshot(
             tick=5,
             emails=({"subject": "hello"},),
-            task_states={"t1": {"status": "assigned"}},
-            shared_kb_snapshot={"paths": ["report.md"]},
-            lock_states={},
+            task_states=MappingProxyType({"t1": MappingProxyType({"status": "assigned"})}),
+            shared_kb_snapshot=MappingProxyType({"paths": ["report.md"]}),
+            lock_states=MappingProxyType({}),
             private_workspace_path="/private/agent.a",
         )
         obs = agent.observe(snapshot)
         assert obs.agent_id == "agent.a"
         assert obs.tick == 5
         assert len(obs.emails) == 1
+        # AgentObservation converts to plain dicts
+        assert obs.task_states == {"t1": {"status": "assigned"}}
 
     def test_base_agent_decide_empty(self, tool_registry):
         agent = BaseAgent(agent_id="agent.a", tool_registry=tool_registry)

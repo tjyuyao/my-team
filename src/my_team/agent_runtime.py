@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from types import MappingProxyType
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -213,6 +214,16 @@ class AgentObservation(BaseModel):
     )
 
 
+def _proxy(d: dict[str, Any]) -> MappingProxyType[str, Any]:
+    """Wrap a dict in MappingProxyType for deep immutability."""
+    return MappingProxyType(d)
+
+
+def _proxy_nested(d: dict[str, dict[str, Any]]) -> MappingProxyType[str, MappingProxyType[str, Any]]:
+    """Wrap a nested dict in MappingProxyType for deep immutability."""
+    return MappingProxyType({k: MappingProxyType(v) for k, v in d.items()})
+
+
 @dataclass(frozen=True)
 class AgentSnapshot:
     """Immutable per-agent view of the simulation state at tick boundary.
@@ -221,16 +232,42 @@ class AgentSnapshot:
     to each agent's observe() method. Agents should read from this
     snapshot and produce an AgentObservation.
 
-    The snapshot is frozen (immutable) to prevent agents from modifying
-    the simulation state during observation.
+    All fields are deeply immutable:
+    - Frozen dataclass prevents field reassignment
+    - emails is a tuple of dicts (tuple is immutable)
+    - task_states, shared_kb_snapshot, lock_states use MappingProxyType
+      to prevent mutation of nested values
     """
 
     tick: int = 0
     emails: tuple[dict[str, Any], ...] = ()
-    task_states: dict[str, dict[str, Any]] = field(default_factory=dict)
-    shared_kb_snapshot: dict[str, Any] = field(default_factory=dict)
-    lock_states: dict[str, Any] = field(default_factory=dict)
+    task_states: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    shared_kb_snapshot: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    lock_states: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     private_workspace_path: str = ""
+
+    def __post_init__(self) -> None:
+        """Wrap mutable fields in MappingProxyType for deep immutability."""
+        # Frozen dataclass allows mutation in __post_init__ via object.__setattr__
+        if not isinstance(self.task_states, MappingProxyType):
+            object.__setattr__(
+                self, "task_states",
+                MappingProxyType({k: MappingProxyType(v) for k, v in self.task_states.items()})
+            )
+        if not isinstance(self.shared_kb_snapshot, MappingProxyType):
+            object.__setattr__(
+                self, "shared_kb_snapshot", MappingProxyType(self.shared_kb_snapshot)
+            )
+        if not isinstance(self.lock_states, MappingProxyType):
+            object.__setattr__(
+                self, "lock_states", MappingProxyType(self.lock_states)
+            )
 
 
 class AgentAction(BaseModel):
@@ -364,9 +401,9 @@ class BaseAgent:
             agent_id=self._agent_id,
             tick=snapshot.tick,
             emails=list(snapshot.emails),
-            task_states=snapshot.task_states,
-            shared_kb_snapshot=snapshot.shared_kb_snapshot,
-            lock_states=snapshot.lock_states,
+            task_states=dict(snapshot.task_states),
+            shared_kb_snapshot=dict(snapshot.shared_kb_snapshot),
+            lock_states=dict(snapshot.lock_states),
             private_workspace_path=snapshot.private_workspace_path,
         )
 
