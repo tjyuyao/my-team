@@ -446,6 +446,8 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         requires_network=True,  # test code MAY use the network — declare
         max_runtime_ms=60_000,
         max_output_bytes=200_000,
+        supports_cancel=True,   # physical kill of the process group
+                                # (v0.8.0 P2-10)
     )
     git_diff = ToolManifest(
         name="git_diff",
@@ -475,10 +477,65 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         max_runtime_ms=10_000,
         max_output_bytes=200_000,
     )
+    # v0.8.0 P1-7: python execution levels L0/L1 (SPEC §8.7 执行等级).
+    # Honest classification: LOCAL_PROCESS — capability reduction +
+    # process isolation prevent ACCIDENTS (hallucinated code, wrong
+    # arguments, infinite loops), NOT malicious escapes. possible_
+    # side_effects disclose the residual surface ("possible_fs_access":
+    # introspection can in principle reach interpreter internals).
+    python_compute = ToolManifest(
+        name="python_compute",
+        version="1.0.0",
+        execution_class=ExecutionClass.LOCAL_PROCESS,
+        input_schema={
+            "code": {"type": "string"},
+            "inputs": {"type": "object"},
+            "allowed_modules": {"type": "array"},
+        },
+        output_schema={"result": {"type": "object"}},
+        capabilities=("python:compute",),
+        effect_types=(),
+        possible_side_effects=("possible_fs_access", "possible_process_spawn"),
+        filesystem_scopes=("none",),
+        deterministic=False,
+        idempotent=True,
+        reversible=True,
+        requires_network=False,
+        max_runtime_ms=10_000,
+        max_output_bytes=200_000,
+        supports_cancel=True,
+    )
+    python_transform = ToolManifest(
+        name="python_transform",
+        version="1.0.0",
+        execution_class=ExecutionClass.LOCAL_PROCESS,
+        input_schema={
+            "code": {"type": "string"},
+            "inputs": {"type": "object"},
+            "input_files": {"type": "object"},
+            "allowed_modules": {"type": "array"},
+        },
+        output_schema={
+            "result": {"type": "object"},
+            "artifacts": {"type": "array"},
+        },
+        capabilities=("python:transform",),
+        effect_types=(),
+        possible_side_effects=("file_write_local", "possible_fs_access"),
+        filesystem_scopes=("workspace",),
+        deterministic=False,
+        idempotent=False,
+        reversible=True,
+        requires_network=False,
+        max_runtime_ms=30_000,
+        max_output_bytes=200_000,
+        supports_cancel=True,
+    )
     return {
         m.name: m
         for m in (
             read, ls, write, kb_write, send_email, delegate,
             apply_patch, run_tests, git_diff, git_status,
+            python_compute, python_transform,
         )
     }

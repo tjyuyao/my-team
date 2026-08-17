@@ -20,7 +20,7 @@ import os
 import signal
 import subprocess
 import time
-from typing import Any
+from typing import Any, Callable
 
 _TRUNC_MARKER = "\n...[truncated {} bytes]"
 
@@ -37,12 +37,19 @@ def run_sandboxed_process(
     timeout_ms: int = 30_000,
     max_output_bytes: int = 200_000,
     cwd: str | None = None,
+    on_start: Callable[[subprocess.Popen], None] | None = None,
+    on_end: Callable[[subprocess.Popen], None] | None = None,
 ) -> dict[str, Any]:
     """Run cmd with timeout + output truncation, killing the process
     group on timeout. Returns a dict suitable for ToolResult.data.
 
     Result keys: success, timed_out, exit_code (None on timeout),
     stdout, stderr, duration_ms.
+
+    on_start / on_end (v0.8.0 P2-10): called with the Popen when it
+    spawns and when it finishes — the simulation registers the live
+    process per request so cancel_operation can physically kill it.
+    on_end fires on every exit path (normal, timeout, external kill).
     """
     # MUST be a list: subprocess.Popen treats a str command with shell
     # semantics — that path is forbidden here.
@@ -53,6 +60,7 @@ def run_sandboxed_process(
     ):
         raise ValueError("cmd must be a non-empty list of strings")
 
+    proc: subprocess.Popen | None = None
     started = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -72,6 +80,8 @@ def run_sandboxed_process(
             "stderr": f"spawn failed: {e}",
             "duration_ms": 0,
         }
+    if on_start is not None:
+        on_start(proc)
 
     timed_out = False
     try:
@@ -85,6 +95,9 @@ def run_sandboxed_process(
         except (ProcessLookupError, PermissionError):
             pass
         stdout, stderr = proc.communicate()
+    finally:
+        if on_end is not None:
+            on_end(proc)
 
     duration_ms = int((time.monotonic() - started) * 1000)
     return {

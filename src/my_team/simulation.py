@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +87,11 @@ from my_team.pending_ops import (
 )
 from my_team.persistence import SCHEMA_VERSION, SimulationStore
 from my_team.private_store import PrivateStore, PrivateStoreConfig
+from my_team.python_worker import (
+    DEFAULT_ALLOWED_MODULES,
+    run_python_compute,
+    run_python_transform,
+)
 from my_team.reliability import TimeoutChecker
 from my_team.sandbox_tools import run_sandboxed_process
 from my_team.scheduler import AgentScheduler, QueuedEvent
@@ -253,6 +260,14 @@ class Simulation:
         # Pending operation registry (v0.6.0 — async LLM/tool tracking)
         self._pending_ops = PendingOperationRegistry()
         self._executors = ExecutorRegistry()
+        # Live subprocesses of in-process-executed ops (v0.8.0 P2-10):
+        # request_id → Popen. cancel_operation kills the process group
+        # for a physical cancel; dispatch registers/unregisters via
+        # on_start/on_end.
+        self._active_processes: dict[str, Any] = {}
+        # Snapshot of the current tick (set at Freeze) — dispatch runs
+        # in Publish and needs the frozen view for tool execution.
+        self._last_snapshot: dict[str, Any] | None = None
 
         # State epoch — incremented on rollback/restore. External results
         # carry the epoch they were submitted under; results from an older
@@ -668,6 +683,16 @@ class Simulation:
                 timeout_ms=timeout_ms,
                 max_output_bytes=max_output,
                 cwd=str(Path.cwd()),
+                on_start=(
+                    lambda proc: self._active_processes.__setitem__(
+                        context.request_id, proc,
+                    ) if context.request_id else None
+                ),
+                on_end=(
+                    lambda proc: self._active_processes.pop(
+                        context.request_id, None,
+                    ) if context.request_id else None
+                ),
             )
             if res["timed_out"]:
                 self._audit_log.record(
@@ -689,6 +714,125 @@ class Simulation:
                 error_code="tool_timeout" if res["timed_out"] else None,
                 retryable=not res["timed_out"],
                 agent_id=context.agent_id, tool_name="run_tests",
+                tick=context.tick,
+            )
+
+        def handle_python_compute(
+            context: ToolContext, code: str = "",
+            inputs: dict[str, Any] | None = None,
+            allowed_modules: list[str] | None = None,
+            **_kw: Any,
+        ) -> Any:
+            """L0 python_compute: pure computation in a subprocess.
+
+            Restricted builtins + import allowlist + `-I` isolated
+            mode. NO filesystem / network / child processes by design.
+            Honest classification (SPEC §8.7): LOCAL_PROCESS —
+            accident prevention, NOT a security boundary.
+            """
+            manifest = self._tool_registry.get_manifest("python_compute")
+            assert manifest is not None  # builtin, registered at startup
+            res = run_python_compute(
+                code=code,
+                inputs=dict(inputs or {}),
+                allowed_modules=tuple(
+                    allowed_modules or DEFAULT_ALLOWED_MODULES,
+                ),
+                timeout_ms=manifest.max_runtime_ms or 10_000,
+                max_output_bytes=manifest.max_output_bytes or 200_000,
+                on_start=(
+                    lambda proc: self._active_processes.__setitem__(
+                        context.request_id, proc,
+                    ) if context.request_id else None
+                ),
+                on_end=(
+                    lambda proc: self._active_processes.pop(
+                        context.request_id, None,
+                    ) if context.request_id else None
+                ),
+            )
+            return ToolResult(
+                success=res["success"],
+                data=res,
+                error=(
+                    None if res["success"]
+                    else res.get("error", "python_compute failed")
+                ),
+                error_code="tool_timeout" if res["timed_out"] else None,
+                retryable=not res["timed_out"],
+                agent_id=context.agent_id, tool_name="python_compute",
+                tick=context.tick,
+            )
+
+        def handle_python_transform(
+            context: ToolContext, code: str = "",
+            inputs: dict[str, Any] | None = None,
+            input_files: dict[str, str] | None = None,
+            allowed_modules: list[str] | None = None,
+            **_kw: Any,
+        ) -> Any:
+            """L1 python_transform: temp sandbox workspace.
+
+            input_files (relpath → content) are read from the FROZEN
+            view (never the live filesystem) and copied read-only into
+            the sandbox input/ dir. Outputs land in output/ and come
+            back as an artifact manifest (path/hash/size/content).
+            Artifacts enter the real workspace only through the agent's
+            own staged writes (apply_patch / write — base-hash
+            checked). No network, no child processes.
+            """
+            manifest = self._tool_registry.get_manifest("python_transform")
+            assert manifest is not None  # builtin, registered at startup
+            view = (context.read_view or {}).get("files", {})
+            resolved: dict[str, str] = {}
+            missing: list[str] = []
+            for rel in (input_files or {}):
+                if rel in view:
+                    resolved[rel] = view[rel]
+                else:
+                    missing.append(rel)
+            if missing:
+                return ToolResult(
+                    success=False,
+                    data={},
+                    error=(
+                        "input_files not in frozen workspace view: "
+                        + ", ".join(sorted(missing))
+                    ),
+                    error_code="invalid_argument",
+                    agent_id=context.agent_id, tool_name="python_transform",
+                    tick=context.tick,
+                )
+            res = run_python_transform(
+                code=code,
+                inputs=dict(inputs or {}),
+                input_files=resolved,
+                allowed_modules=tuple(
+                    allowed_modules or DEFAULT_ALLOWED_MODULES,
+                ),
+                timeout_ms=manifest.max_runtime_ms or 30_000,
+                max_output_bytes=manifest.max_output_bytes or 200_000,
+                on_start=(
+                    lambda proc: self._active_processes.__setitem__(
+                        context.request_id, proc,
+                    ) if context.request_id else None
+                ),
+                on_end=(
+                    lambda proc: self._active_processes.pop(
+                        context.request_id, None,
+                    ) if context.request_id else None
+                ),
+            )
+            return ToolResult(
+                success=res["success"],
+                data=res,
+                error=(
+                    None if res["success"]
+                    else res.get("error", "python_transform failed")
+                ),
+                error_code="tool_timeout" if res["timed_out"] else None,
+                retryable=not res["timed_out"],
+                agent_id=context.agent_id, tool_name="python_transform",
                 tick=context.tick,
             )
 
@@ -790,13 +934,21 @@ class Simulation:
             "git_status", handle_git_status,
             manifest=manifests["git_status"],
         )
+        self._tool_registry.register_handler(
+            "python_compute", handle_python_compute,
+            manifest=manifests["python_compute"],
+        )
+        self._tool_registry.register_handler(
+            "python_transform", handle_python_transform,
+            manifest=manifests["python_transform"],
+        )
 
         # Executor registration (v0.8.0 P1-4/5): LOCAL_PROCESS tools are
         # dispatched to a TRUSTED_IN_PROCESS executor (host subprocess
         # with timeout/truncation — sandbox_tools). Remote tools are
         # admitted by UNTRUSTED_OUT_OF_PROCESS executors registered by
         # the harness (tests/tool_helpers.py).
-        for tool in ("run_tests",):
+        for tool in ("run_tests", "python_compute", "python_transform"):
             self._executors.register(
                 tool,
                 tier=ExecutorTier.TRUSTED_IN_PROCESS,
@@ -963,6 +1115,23 @@ class Simulation:
                        "(terminal/completed)",
             )
 
+        # PHYSICAL cancel (v0.8.0 P2-10): if an in-process executor is
+        # running a subprocess for this op (LOCAL_PROCESS tools like
+        # python_compute / run_tests), kill the whole process group.
+        # The dispatch loop is blocked in communicate(); the kill makes
+        # it return, and the op is already CANCELLED — the late result
+        # is fenced (complete_tool ignores terminal ops).
+        executor_cancel_requested = False
+        executor_cancel_confirmed = False
+        proc = self._active_processes.get(request_id)
+        if proc is not None:
+            executor_cancel_requested = True
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+                executor_cancel_confirmed = True
+            except (ProcessLookupError, PermissionError):
+                executor_cancel_confirmed = False
+
         self._audit_log.record(
             AuditEventType.OP_CANCELLED,
             agent_id=op.agent_id,
@@ -1005,12 +1174,11 @@ class Simulation:
             request_id=request_id,
             op_type=op.op_type,
             result_fenced=True,
-            # No in-kernel executor exists for remote ops — the external
-            # harness cannot be signaled from here.
-            executor_cancel_requested=False,
-            executor_cancel_confirmed=False,
+            executor_cancel_requested=executor_cancel_requested,
+            executor_cancel_confirmed=executor_cancel_confirmed,
             # The op may already have produced external side effects
-            # (provider processing/cost/logs) that cannot be undone.
+            # (provider processing/cost/logs, files written before the
+            # kill) that cannot be undone.
             external_effects_possible=True,
         )
 
@@ -1374,6 +1542,7 @@ class Simulation:
 
         # Phase 2: Freeze — snapshot global state
         snapshot = self._build_snapshot(tick)
+        self._last_snapshot = snapshot
 
         # Phase 3: Schedule — determine which agents activate
         ready = self._phase_schedule(tick)
@@ -2642,10 +2811,19 @@ class Simulation:
             tier = self._executors.tier(tool_name)
             if tier == ExecutorTier.TRUSTED_IN_PROCESS:
                 # In-process executor: run now (manifest-bounded).
+                # request_id lets the handler register its live
+                # subprocess for physical cancel (P2-10); read_view
+                # gives file tools the frozen snapshot.
                 context = ToolContext(
                     agent_id=op.agent_id,
                     tick=tick,
                     allowed_tools=self._tool_context_allowed(op.agent_id),
+                    request_id=op.request_id,
+                    read_view=(
+                        (self._last_snapshot or {})
+                        .get("private_files", {})
+                        .get(op.agent_id)
+                    ),
                 )
                 tr = self._tool_registry.execute(
                     context=context,
@@ -2667,6 +2845,11 @@ class Simulation:
                         state_epoch=op.state_epoch,
                     ),
                 )
+                # A concurrently cancelled op was removed by
+                # cancel_operation — the result is fenced; do not
+                # record an "executed" audit for it.
+                if registry.get_by_id(op.request_id) is None:
+                    continue
                 self._audit_log.record(
                     AuditEventType.TOOL_DISPATCHED,
                     agent_id=op.agent_id,

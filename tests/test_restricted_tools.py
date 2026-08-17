@@ -422,4 +422,5 @@ class TestBuiltinRegistration:
         assert names == {
             "read", "ls", "write", "kb_write", "send_email", "delegate",
             "apply_patch", "run_tests", "git_diff", "git_status",
+            "python_compute", "python_transform",
         }

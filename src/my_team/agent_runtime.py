@@ -55,6 +55,10 @@ class ToolContext:
     # {"files": {relpath: content}, "dirs": [relpaths]}. Read-only tools
     # execute against this view instead of the live filesystem.
     read_view: dict[str, Any] | None = field(default=None)
+    # Pending-op correlation id (v0.8.0 P2-10): set when a dispatched
+    # op runs an in-process executor — the handler registers its live
+    # subprocess under this id so cancel_operation can kill it.
+    request_id: str = field(default="")
 
 
 class ToolPermissionError(Exception):
