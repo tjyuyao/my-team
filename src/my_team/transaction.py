@@ -5,6 +5,14 @@ Per SPEC §8.2 Phase 6, §13.2:
 - Commit phase validates preconditions, resolves conflicts, and atomically applies
 - Partial failures are rolled back or explicitly marked
 - Deterministic conflict resolution (not dependent on execution order)
+
+Atomicity guarantees:
+- In-memory effects (KB writes, lock changes, task updates) are applied
+  atomically during commit and reversed during rollback.
+- External side effects (email delivery, file writes) are classified via
+  side_effect=True and staged in an outbox during commit. They should be
+  delivered/executed ONLY after the commit succeeds. On rollback, the
+  outbox is cleared — side effects are discarded.
 """
 
 from __future__ import annotations
@@ -31,6 +39,17 @@ class EffectType(str, Enum):
     TASK_CREATE = "task_create"
     TASK_UPDATE = "task_update"
     STATE_TRANSITION = "state_transition"
+
+
+# Effect types that have external (non-in-memory) side effects.
+# These are staged in the outbox during commit and delivered after
+# the commit succeeds. On rollback, they are discarded.
+_EXTERNAL_EFFECT_TYPES: frozenset[EffectType] = frozenset({
+    EffectType.EMAIL_SEND,
+    EffectType.EMAIL_DELIVER,
+    EffectType.FILE_WRITE,
+    EffectType.FILE_DELETE,
+})
 
 
 class EffectStatus(str, Enum):
@@ -61,6 +80,11 @@ class StagedEffect(BaseModel):
     )
     status: EffectStatus = Field(default=EffectStatus.STAGED)
     error: str | None = Field(default=None, description="Error if failed")
+    side_effect: bool = Field(
+        default=False,
+        description="True if this effect has external side effects "
+                    "(file writes, email delivery) that cannot be undone in-memory",
+    )
 
 
 class ConflictResolution(BaseModel):
@@ -88,6 +112,7 @@ class TransactionBuffer:
         self._counter = 0
         self._committed: list[StagedEffect] = []
         self._conflict_resolutions: list[ConflictResolution] = []
+        self._outbox: list[StagedEffect] = []  # side effects staged for out-of-band delivery
 
     def stage(
         self,
@@ -108,6 +133,7 @@ class TransactionBuffer:
             data=data or {},
             expected_version=expected_version,
             lock_token=lock_token,
+            side_effect=effect_type in _EXTERNAL_EFFECT_TYPES,
         )
         self._effects[effect.effect_id] = effect
         return effect
@@ -222,6 +248,10 @@ class TransactionBuffer:
     def commit(self) -> list[StagedEffect]:
         """Atomically apply all validated effects.
 
+        Side effects (side_effect=True) are added to the outbox for
+        out-of-band delivery AFTER commit succeeds. The caller should
+        process the outbox after commit.
+
         Returns list of successfully committed effects.
         """
         committed: list[StagedEffect] = []
@@ -233,14 +263,16 @@ class TransactionBuffer:
             effect.status = EffectStatus.COMMITTED
             committed.append(effect)
             self._committed.append(effect)
+            if effect.side_effect:
+                self._outbox.append(effect)
 
         return committed
 
     def rollback(self) -> list[StagedEffect]:
-        """Rollback all committed effects (on partial failure).
+        """Rollback all committed effects and clear the outbox.
 
-        In a real system, this would undo file writes, email deliveries, etc.
-        For now, it marks effects as rolled back.
+        In-memory effects are marked as ROLLED_BACK. Side effects in the
+        outbox are discarded — the caller should record audit events.
         """
         rolled_back: list[StagedEffect] = []
 
@@ -249,6 +281,7 @@ class TransactionBuffer:
             rolled_back.append(effect)
 
         self._committed.clear()
+        self._outbox.clear()
         return rolled_back
 
     def clear(self) -> None:
@@ -256,6 +289,22 @@ class TransactionBuffer:
         self._effects.clear()
         self._committed.clear()
         self._conflict_resolutions.clear()
+        self._outbox.clear()
+
+    def get_outbox(self) -> list[StagedEffect]:
+        """Get side effects staged for out-of-band delivery after commit."""
+        return list(self._outbox)
+
+    def clear_outbox(self) -> list[StagedEffect]:
+        """Clear and return outbox contents (after delivery)."""
+        items = list(self._outbox)
+        self._outbox.clear()
+        return items
+
+    @property
+    def outbox_count(self) -> int:
+        """Number of side effects waiting for out-of-band delivery."""
+        return len(self._outbox)
 
     @property
     def has_pending(self) -> bool:

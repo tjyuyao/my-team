@@ -77,6 +77,10 @@ class AuditEventType(str, Enum):
     # General
     CUSTOM = "custom"
 
+    # Transaction
+    TRANSACTION_COMMIT = "transaction.commit"
+    TRANSACTION_ROLLBACK = "transaction.rollback"
+
 
 class AuditEntry(BaseModel):
     """A single audit log entry."""
