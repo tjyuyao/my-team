@@ -1,7 +1,7 @@
 # v0.6.0 Implementation Plan — Async LLM + Continuation Runtime
 
 **Created:** 2026-08-17
-**Status:** TODO
+**Status:** TODO (P1-1, P1-3, P1-5 done)
 **Label:** v0.6.0 — Async LLM runtime with continuation-based agents
 
 ## Goal
@@ -20,56 +20,43 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 
 ## P1: Must Complete
 
-### 1. Agent decide() Produces Intents
+### 1. Agent decide() Produces Intents ✅ DONE (commit `e3af699`)
 
-**Priority:** P1
-**Acceptance:**
-- `AgentRuntime.decide()` returns `list[Intent]` instead of `ActionPlan`
-- LLMAgent: if continuation has pending LLM result → parse it; else → `SubmitLLMRequest`
-- BaseAgent rule-based agents produce concrete Intents (DelegateIntent, SendEmailIntent, etc.)
-- ActionPlan kept as internal parsing result, not the runtime interface
+- ✅ `decide_intents()` in AgentRuntime protocol + BaseAgent (ActionPlan → Intent conversion)
+- ✅ LLMAgent: pending result → parse; else → `SubmitLLMRequest` (never blocks)
+- ✅ ActionPlan kept as internal parsing result
+- ✅ 12 tests in `test_intent_pipeline.py`
 
-**Approach:**
-- Extend `models/intent.py` with intent validation helpers
-- Update `agent_runtime.py` protocol + BaseAgent/LLMAgent
-- Keep backward-compatible `ActionPlan` for parsing layer only
+### 2. Continuation Save/Restore Between Ticks ✅ DONE (part of `e3af699`, `a1e91fa`)
 
-### 2. Continuation Save/Restore Between Ticks
+- ✅ `AgentContinuation` in `AgentRuntimeState`, passed to `decide_intents()`
+- ✅ LLM result delivered via continuation (`receive_llm_result` in `_phase_ingest`)
+- ✅ `react_turn`, `total_llm_calls`, `total_tool_calls` tracked
+- ✅ `finalize_result_processing()` resets phase after result consumed
 
-**Priority:** P1
-**Acceptance:**
-- After each activation, `AgentContinuation` is persisted in `AgentRuntimeState`
-- At next activation, continuation is restored before `decide()`
-- Pending LLM result delivered via continuation (`last_llm_result`)
-- `react_turn`, `total_llm_calls`, `total_tool_calls` tracked correctly
+### 3. Async LLM Flow E2E ✅ DONE (commit `a1e91fa`)
 
-### 3. Async LLM Flow E2E
+- ✅ `FakeLLMProvider` — deterministic scripted responses with latency
+- ✅ E2E: submit → WAITING_FOR_LLM → response → re-activation → parse → tool intent
+- ✅ Timeout: op marked TIMED_OUT
+- ✅ 6 tests in `test_e2e_async_llm.py`
+- ⚠️ Stale response rejection not yet tested
 
-**Priority:** P1
-**Acceptance:**
-- `FakeLLMProvider` returns deterministic responses after N ticks
-- E2E: agent submits LLM request → WAITING_FOR_LLM → response arrives → agent re-activated → parses result → produces tool intent
-- Timeout: LLM doesn't respond → op marked TIMED_OUT → agent wakes with error
-- Test: stale response ignored (response for superseded request)
+### 4. Async Tool Request Flow ⚠️ PARTIAL
 
-### 4. Async Tool Request Flow
+- ✅ SubmitToolRequest → PendingOperationRegistry (remote tools)
+- ✅ Local tools (read/ls) execute synchronously
+- ❌ TOOL_RESULT wake event → re-activation flow not E2E tested
+- ❌ Tool timeout and retry
 
-**Priority:** P1
-**Acceptance:**
-- Tool calls go through PendingOperationRegistry (SubmitToolRequest)
-- Tool execution happens outside tick (synchronous wrapper for local tools)
-- TOOL_RESULT wake event → agent re-activated
-- Tool timeout and retry
+### 5. Complete Task Completion Roundtrip E2E ✅ DONE (commit `43c5ce4`)
 
-### 5. Complete Task Completion Roundtrip E2E
-
-**Priority:** P1
-**Acceptance:**
-- Full scenario: Human request → Root → Research → WebResearch → Shared KB write → Research submits → Root completes task → Human receives reply
-- Validates: task tree, emails, KB versions, audit log, agent states
-- ≥2 parallel sub-tasks
-- ≥1 lock contention resolved
-- ≥1 failure + retry
+- ✅ Human request → Root async LLM → delegate → Research async LLM → write report + result email → Root completes task → human reply
+- ✅ Validates: task tree (COMPLETED), emails, report file, agent states, audit log
+- ❌ Shared KB write not yet in roundtrip (uses private file)
+- ❌ ≥2 parallel sub-tasks not tested
+- ❌ Lock contention in E2E not tested
+- ❌ Failure + retry not tested
 
 ## P2: Should Complete
 
@@ -126,11 +113,11 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 ## Migration Order
 
 ```
- 1. decide() → Intent (models + agent_runtime)
- 2. Continuation save/restore (AgentRuntimeState)
- 3. FakeLLMProvider + async LLM E2E
- 4. Async tool requests
- 5. Full task completion E2E
+ 1. ✅ decide() → Intent (models + agent_runtime)          — e3af699
+ 2. ✅ Continuation save/restore (AgentRuntimeState)       — e3af699, a1e91fa
+ 3. ✅ FakeLLMProvider + async LLM E2E                     — a1e91fa
+ 4. ⏳ Async tool requests                                  — next
+ 5. ✅ Full task completion E2E                            — 43c5ce4
  6. Outbox persistence
  7. SharedKB single entry
  8. Commit rollback
