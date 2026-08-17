@@ -950,13 +950,21 @@ class Simulation:
             return current == expected
 
         def check_lock(resource: str, agent_id: str) -> bool:
-            lock = self._lock_manager.get_lock(resource)
-            return lock is not None and lock.owner_agent_id == agent_id
+            # Private workspace writes don't need locks.
+            # Only enforce lock checks for shared KB resources.
+            if resource.startswith(("shared-kb/", "project/")):
+                lock = self._lock_manager.get_lock(resource)
+                return lock is not None and lock.owner_agent_id == agent_id
+            return True
 
         def check_permission(agent_id: str, resource: str, op: str) -> bool:
-            return self._permission_engine.check(
-                principal=agent_id, path=resource, operation=op,
-            )
+            # Private workspace writes don't need KB permission checks.
+            # Only check permissions for shared KB operations.
+            if op in {"kb_write", "kb_create", "kb_delete"}:
+                return self._permission_engine.check(
+                    principal=agent_id, path=resource, operation=op,
+                )
+            return True
 
         buffer.validate(
             check_version=check_version,
@@ -999,7 +1007,7 @@ class Simulation:
                 committed_emails.append(email)
 
             elif effect.effect_type == EffectType.TASK_CREATE:
-                from my_team.models.task import TaskPriority
+                from my_team.models.task import TaskPriority, TaskStatus
                 data = effect.data
                 self._task_tree.create(
                     task_id=data.get("task_id", effect.resource),
@@ -1009,6 +1017,7 @@ class Simulation:
                     owner_agent_id=data.get("owner_agent_id", ""),
                     parent_task_id=data.get("parent_task_id"),
                     priority=TaskPriority.NORMAL,
+                    status=TaskStatus.ASSIGNED,
                     tick=tick,
                 )
 
