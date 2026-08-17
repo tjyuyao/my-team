@@ -167,6 +167,19 @@ class Outbox:
             self._idempotency_keys.discard(entry.idempotency_key)
             del self._entries[entry_id]
 
+    def rollback_committed(self, entry_id: str) -> None:
+        """Remove a committed-but-undispatched entry (tick rollback).
+
+        Called when the tick that staged the entry rolled back: the
+        email never happened, so the entry must not be delivered by a
+        later dispatch. Already-DISPATCHED entries are untouched —
+        their email was created and the tick rollback handles it.
+        """
+        entry = self._entries.get(entry_id)
+        if entry and entry.status == OutboxStatus.COMMITTED:
+            self._idempotency_keys.discard(entry.idempotency_key)
+            del self._entries[entry_id]
+
     def get(self, entry_id: str) -> OutboxEntry | None:
         return self._entries.get(entry_id)
 

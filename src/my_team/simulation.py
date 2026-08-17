@@ -2545,7 +2545,9 @@ class Simulation:
         # Step 4: Apply committed effects to subsystems.
         # If any effect fails during application, previously applied
         # effects in this tick are rolled back (in-memory reversal).
-        committed_emails: list[Email] = []
+        # Outbox entries staged+committed by THIS tick's EMAIL_SEND
+        # effects — discarded on rollback (the email never happened).
+        staged_outbox_ids: list[str] = []
         applied: list[StagedEffect] = []
         created_email_ids: list[str] = []
         created_task_ids: list[str] = []
@@ -2567,12 +2569,13 @@ class Simulation:
                 except Exception:  # noqa: BLE001 — rollback must not fail
                     pass
 
-            # Remove created emails (in reverse creation order)
-            for email_id in reversed(created_email_ids):
+            # Discard this tick's committed-but-undispatched outbox
+            # entries (rollback = the email never happened). Emails are
+            # only created by the post-commit dispatch, which never runs
+            # on a rolled-back tick.
+            for eid in staged_outbox_ids:
                 try:
-                    email = self._mail_system._all_emails.pop(email_id, None)
-                    if email is not None and email in self._mail_system._pending:
-                        self._mail_system._pending.remove(email)
+                    self._outbox.rollback_committed(eid)
                 except Exception:  # noqa: BLE001 — rollback must not fail
                     pass
 
@@ -2656,9 +2659,12 @@ class Simulation:
                     target.write_text(content, encoding="utf-8")
 
                 elif effect.effect_type == EffectType.EMAIL_SEND:
-                    from my_team.models.email import EmailType
                     data = effect.data
-                    # Stage in outbox, then dispatch to MailSystem
+                    # Stage + commit in the outbox. Dispatch is a single
+                    # post-commit loop (below) — it must run even on
+                    # ticks with no new email effect so that leftover
+                    # COMMITTED entries (restart continuation, retry
+                    # backoff) are still delivered.
                     entry = self._outbox.stage(
                         from_agent=data.get("from_agent", effect.agent_id),
                         to=data.get("to", []),
@@ -2669,31 +2675,7 @@ class Simulation:
                         effect_id=effect.effect_id,
                     )
                     self._outbox.commit(entry.entry_id)
-
-                    def _deliver(entry: Any) -> None:
-                        self._mail_system.create_email(
-                            from_agent=entry.from_agent,
-                            to=entry.to,
-                            subject=entry.subject,
-                            body=entry.body,
-                            email_type=EmailType(entry.email_type),
-                            tick=tick,
-                            deliver_at_tick=tick
-                            + self._config.email_delivery_latency_ticks,
-                            task_id=entry.task_id,
-                        )
-                    dispatched, _failed = self._outbox.dispatch(
-                        _deliver, current_tick=tick,
-                    )
-                    # Track created email ids for rollback
-                    for d in dispatched:
-                        for _eid, _e in self._mail_system._all_emails.items():
-                            if (
-                                _e.subject == d.subject
-                                and _e.from_agent == d.from_agent
-                                and _eid not in created_email_ids
-                            ):
-                                created_email_ids.append(_eid)
+                    staged_outbox_ids.append(entry.entry_id)
 
                 elif effect.effect_type == EffectType.TASK_CREATE:
                     data = effect.data
@@ -2790,6 +2772,27 @@ class Simulation:
             )
             return []
 
+        # Outbox dispatch runs unconditionally after a successful
+        # commit: entries committed THIS tick plus leftover COMMITTED
+        # entries (restart continuation, retry backoff) are delivered
+        # here. Emails are created only after the full commit
+        # succeeded — a rolled-back tick never creates emails.
+        from my_team.models.email import EmailType
+
+        def _deliver(entry: Any) -> None:
+            self._mail_system.create_email(
+                from_agent=entry.from_agent,
+                to=entry.to,
+                subject=entry.subject,
+                body=entry.body,
+                email_type=EmailType(entry.email_type),
+                tick=tick,
+                deliver_at_tick=tick
+                + self._config.email_delivery_latency_ticks,
+                task_id=entry.task_id,
+            )
+        self._outbox.dispatch(_deliver, current_tick=tick)
+
         # Record audit for committed effects (apply-time failures such
         # as a stale FILE_PATCH are marked FAILED — not audited as
         # commits)
@@ -2807,7 +2810,7 @@ class Simulation:
                 },
             )
 
-        return committed_emails
+        return []
 
     def _phase_audit(
         self,
