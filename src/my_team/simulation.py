@@ -67,7 +67,11 @@ from my_team.models.intent import (
     WritePrivateFileIntent,
 )
 from my_team.outbox import Outbox
-from my_team.pending_ops import OpType, PendingOperationRegistry
+from my_team.pending_ops import (
+    OpType,
+    PendingOperation,
+    PendingOperationRegistry,
+)
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
 from my_team.scheduler import AgentScheduler
@@ -91,6 +95,12 @@ class SimulationConfig(BaseModel):
     email_delivery_latency_ticks: int = Field(default=1)
     default_lock_lease_ticks: int = Field(default=4)
     max_retries: int = Field(default=3)
+    max_concurrent_llm_requests: int = Field(
+        default=4,
+        ge=1,
+        description="Per-agent cap on in-flight LLM requests "
+                    "(defense-in-depth; agents naturally wait while one is pending)",
+    )
     private_storage_limit_mb: int = Field(default=512)
     execution: ExecutionConfig = Field(
         default_factory=ExecutionConfig,
@@ -220,6 +230,14 @@ class Simulation:
         # Pending operation registry (v0.6.0 — async LLM/tool tracking)
         self._pending_ops = PendingOperationRegistry()
 
+        # State epoch — incremented on rollback/restore. External results
+        # carry the epoch they were submitted under; results from an older
+        # epoch are stale and discarded (fencing).
+        self._state_epoch = 0
+
+        # Phase order of the last tick (kernel protocol observability)
+        self._last_tick_phases: list[str] = []
+
         # Email outbox (reliable dispatch with idempotency)
         self._outbox = Outbox(max_retries=self._config.max_retries)
 
@@ -333,8 +351,25 @@ class Simulation:
         Write tools (write, send_email, delegate) stage effects in the
         TransactionBuffer. Read tools (read, ls) execute directly.
         """
-        # Read-only tools — execute directly
+        # Read-only tools — execute against the FROZEN per-agent file
+        # view captured at Freeze (SPEC §2.3 / v0.6.0 review §四.3).
+        # context.read_view is None only for direct calls made outside
+        # a tick; those fall back to the live filesystem.
         def handle_read(context: ToolContext, path: str = "", **_kw: Any) -> Any:
+            view = context.read_view
+            if view is not None:
+                content = view["files"].get(path)
+                if content is None:
+                    return ToolResult(
+                        success=False, error=f"File not found: {path}",
+                        agent_id=context.agent_id, tool_name="read",
+                        tick=context.tick,
+                    )
+                return ToolResult(
+                    success=True, data={"content": content},
+                    agent_id=context.agent_id, tool_name="read",
+                    tick=context.tick,
+                )
             home = self._private_store.agent_home(context.agent_id)
             target = home / path
             if not target.exists() or not target.is_file():
@@ -351,6 +386,25 @@ class Simulation:
             )
 
         def handle_ls(context: ToolContext, path: str = "", **_kw: Any) -> Any:
+            view = context.read_view
+            if view is not None:
+                prefix = f"{path.rstrip('/')}/" if path else ""
+                entries: set[str] = set()
+                for f in view["files"]:
+                    if f.startswith(prefix):
+                        rest = f[len(prefix):]
+                        if rest and "/" not in rest:
+                            entries.add(rest)
+                for d in view["dirs"]:
+                    if d.startswith(prefix):
+                        rest = d[len(prefix):]
+                        if rest and "/" not in rest:
+                            entries.add(rest)
+                return ToolResult(
+                    success=True, data={"entries": sorted(entries)},
+                    agent_id=context.agent_id, tool_name="ls",
+                    tick=context.tick,
+                )
             home = self._private_store.agent_home(context.agent_id)
             target = home / path if path else home
             if not target.exists():
@@ -359,9 +413,9 @@ class Simulation:
                     agent_id=context.agent_id, tool_name="ls",
                     tick=context.tick,
                 )
-            entries = sorted(p.name for p in target.iterdir())
+            live_entries = sorted(p.name for p in target.iterdir())
             return ToolResult(
-                success=True, data={"entries": entries},
+                success=True, data={"entries": live_entries},
                 agent_id=context.agent_id, tool_name="ls",
                 tick=context.tick,
             )
@@ -551,6 +605,25 @@ class Simulation:
         return self._tick_engine.current_tick
 
     @property
+    def state_epoch(self) -> int:
+        """State epoch — incremented on rollback/restore.
+
+        External operations are stamped with the epoch at submission;
+        results whose epoch does not match the current one are stale
+        and discarded by Ingest (fencing).
+        """
+        return self._state_epoch
+
+    @property
+    def last_tick_phases(self) -> list[str]:
+        """Phase names executed in the most recent tick, in order."""
+        return list(self._last_tick_phases)
+
+    def _bump_state_epoch(self) -> None:
+        """Invalidate all in-flight results from the previous epoch."""
+        self._state_epoch += 1
+
+    @property
     def is_paused(self) -> bool:
         """Check if the simulation is paused."""
         return self._tick_engine.state.value == "paused"
@@ -584,22 +657,32 @@ class Simulation:
     # -- Tick execution (10 phases) -----------------------------------------
 
     def run_tick(self) -> TickResult:
-        """Execute one complete tick through the 9-phase kernel cycle.
+        """Execute one complete tick through the 10-phase kernel cycle.
 
         Per SPEC §8.6: Tick is the kernel's state commit unit, NOT the
         agent's ReAct cycle. Each phase is finite and non-blocking.
 
+        Responsibility split (per the v0.6.0 review, 方案 B):
+          Validate — Pre-Validate(Intent): may the agent even attempt this?
+          Act      — translate validated Intents into staged effects /
+                     registered pending operations (no application)
+          Commit   — Commit-Validate(Effect/PendingOp) then apply;
+                     rollback + state-epoch bump on failure
+
         Phases:
-        1. Ingest   — collect completed external events (LLM, tool, human)
-                      + deliver emails whose deliver_at_tick <= current_tick
-        2. Freeze   — snapshot global state
-        3. Schedule — compute ready set from events + agent states
-        4. Resume   — restore agent continuation, read new events
-        5. Decide   — generate Intents (non-blocking, no sync LLM/tool)
-        6. Validate — validate Intents before execution
-        7. Commit   — apply staged effects, register pending operations
-        8. Publish  — dispatch pending ops, generate wake events; timeouts
-        9. Audit    — record all events
+         1. Ingest   — collect completed external events (LLM, tool, human),
+                       fence stale/superseded results, wake timed-out agents,
+                       deliver emails whose deliver_at_tick <= current_tick
+         2. Freeze   — snapshot global state (incl. per-agent private file view)
+         3. Schedule — compute ready set from events + agent states
+         4. Resume   — restore agent continuation, read new events
+         5. Decide   — generate Intents (non-blocking, no sync LLM/tool)
+         6. Validate — pre-validate Intents (tool capability, delegation,
+                       payload, LLM budget, duplicate request_id)
+         7. Act      — translate Intents: stage effects, register pending ops
+         8. Commit   — commit-validate + apply staged effects; rollback on failure
+         9. Publish  — dispatch pending ops, generate wake events; timeouts
+        10. Audit    — record all events
         """
         if self.is_paused:
             raise RuntimeError(
@@ -608,6 +691,10 @@ class Simulation:
             )
 
         tick = self._tick_engine.current_tick
+        self._last_tick_phases = [
+            "ingest", "freeze", "schedule", "observe", "decide",
+            "validate", "act", "commit", "publish", "audit",
+        ]
 
         # Phase 1: Ingest — collect completed external operations + deliver emails
         self._phase_ingest(tick)
@@ -625,18 +712,20 @@ class Simulation:
         # Phase 5: Decide — generate Intents (non-blocking)
         plans = self._phase_decide(tick, observations, ready)
 
-        # Phase 6: Validate — check Intents before execution
+        # Phase 6: Validate — pre-validate Intents before execution
         validated = self._phase_validate(tick, plans, ready)
 
-        # Phase 7: Commit — apply staged effects, register pending ops
-        all_results = self._phase_act(tick, plans, ready, validated)
+        # Phase 7: Act — translate validated Intents into staged effects
+        #            and registered pending operations (no application)
+        all_results = self._phase_act(tick, plans, ready, validated, snapshot)
+        # Phase 8: Commit — apply staged effects, register pending ops
         self._phase_commit(tick, all_results)
         self._transaction_buffer.clear()
 
-        # Phase 8: Publish — dispatch pending ops, generate wake events
+        # Phase 9: Publish — dispatch pending ops, generate wake events
         self._phase_publish(tick, delivered, all_results, ready)
 
-        # Phase 9: Audit
+        # Phase 10: Audit
         self._phase_audit(tick, delivered, all_results, ready)
 
         # Complete activations and clean up scheduler
@@ -674,8 +763,15 @@ class Simulation:
     def _phase_ingest(self, tick: int) -> None:
         """Phase 1: Collect completed external operations.
 
-        Checks the PendingOperationRegistry for completed operations
-        and publishes them as WakeEvents for the current tick.
+        For each operation whose result has arrived:
+          1. Fence — discard stale-epoch results and results for
+             superseded requests (agent no longer waiting on them)
+          2. Deliver the result to the agent's continuation
+          3. Publish a wake event for re-activation
+
+        Timed-out operations are removed and the waiting agent is woken
+        with a structured error (the agent decides retry / fail /
+        escalate).
         """
         # Check for timed-out operations
         expired = self._pending_ops.timeout_expired(tick)
@@ -688,53 +784,127 @@ class Simulation:
                     "request_id": op.request_id,
                     "status": "timed_out",
                     "op_type": op.op_type.value,
+                    "state_epoch": op.state_epoch,
                 },
                 success=False,
                 error=f"Operation timed out at tick {tick}",
             )
 
+            # Wake the waiting agent with a structured timeout error.
+            runtime_state = self._agent_runtime_states.get(op.agent_id)
+            if (
+                runtime_state is not None
+                and runtime_state.continuation.pending_request_id == op.request_id
+            ):
+                error_result: dict[str, Any] = {
+                    "error": f"Operation timed out at tick {tick}",
+                    "timed_out": True,
+                    "request_id": op.request_id,
+                }
+                if op.op_type == OpType.LLM_REQUEST:
+                    runtime_state.receive_llm_result(error_result, tick)
+                elif op.op_type == OpType.TOOL_REQUEST:
+                    runtime_state.receive_tool_result(error_result, tick)
+                self._enqueue_result_wake(op, tick, result=error_result)
+
+            self._pending_ops.remove(op.request_id)
+
         # Collect completed operations eligible for this tick
         completed = self._pending_ops.collect_completed(tick)
         for op in completed:
-            # Deliver the result to the agent's continuation
             runtime_state = self._agent_runtime_states.get(op.agent_id)
-            if runtime_state:
-                if op.op_type == OpType.LLM_REQUEST:
-                    runtime_state.receive_llm_result(op.result, tick)
-                elif op.op_type == OpType.TOOL_REQUEST:
-                    runtime_state.receive_tool_result(op.result, tick)
 
+            # Fence 1: result from an older state epoch (post-rollback /
+            # restore) is stale — the state it was computed against no
+            # longer exists.
+            if op.state_epoch != self._state_epoch:
+                self._audit_log.record(
+                    AuditEventType.STALE_RESULT,
+                    agent_id=op.agent_id,
+                    tick=tick,
+                    details={
+                        "request_id": op.request_id,
+                        "op_type": op.op_type.value,
+                        "reason": "epoch_mismatch",
+                        "op_epoch": op.state_epoch,
+                        "current_epoch": self._state_epoch,
+                    },
+                    success=False,
+                    error="Result belongs to a superseded state epoch",
+                )
+                self._pending_ops.remove(op.request_id)
+                continue
+
+            # Fence 2: the agent is no longer waiting for this request
+            # (it moved on, e.g. resubmitted after a timeout) — the
+            # result belongs to a superseded operation.
+            if (
+                runtime_state is None
+                or runtime_state.continuation.pending_request_id != op.request_id
+            ):
+                self._audit_log.record(
+                    AuditEventType.STALE_RESULT,
+                    agent_id=op.agent_id,
+                    tick=tick,
+                    details={
+                        "request_id": op.request_id,
+                        "op_type": op.op_type.value,
+                        "reason": "superseded",
+                        "pending_request_id": (
+                            runtime_state.continuation.pending_request_id
+                            if runtime_state else ""
+                        ),
+                    },
+                    success=False,
+                    error="Result for superseded operation discarded",
+                )
+                self._pending_ops.remove(op.request_id)
+                continue
+
+            # Deliver the result to the agent's continuation
             if op.op_type == OpType.LLM_REQUEST:
-                # LLM result ready → publish LLM_RESULT wake event
-                self._scheduler.enqueue_event(WakeupEvent(
-                    event_type=WakeEventType.TOOL_RESULT,  # reuse TOOL_RESULT for now
-                    target_agent_id=op.agent_id,
-                    tick=tick,
-                    source_agent_id="llm_gateway",
-                    task_id=op.task_id,
-                    details={
-                        "request_id": op.request_id,
-                        "result_type": "llm_result",
-                        "result": op.result,
-                    },
-                ))
+                runtime_state.receive_llm_result(op.result, tick)
             elif op.op_type == OpType.TOOL_REQUEST:
-                # Tool result ready → publish TOOL_RESULT wake event
-                self._scheduler.enqueue_event(WakeupEvent(
-                    event_type=WakeEventType.TOOL_RESULT,
-                    target_agent_id=op.agent_id,
-                    tick=tick,
-                    source_agent_id="tool_executor",
-                    task_id=op.task_id,
-                    details={
-                        "request_id": op.request_id,
-                        "result_type": "tool_result",
-                        "result": op.result,
-                    },
-                ))
+                runtime_state.receive_tool_result(op.result, tick)
+
+            self._enqueue_result_wake(op, tick, result=op.result)
 
             # Remove the consumed operation so it is not re-delivered
             self._pending_ops.remove(op.request_id)
+
+    def _enqueue_result_wake(
+        self,
+        op: PendingOperation,
+        tick: int,
+        result: dict[str, Any],
+    ) -> None:
+        """Publish a TOOL_RESULT wake event for a delivered op result."""
+        if op.op_type == OpType.LLM_REQUEST:
+            self._scheduler.enqueue_event(WakeupEvent(
+                event_type=WakeEventType.TOOL_RESULT,  # reuse TOOL_RESULT
+                target_agent_id=op.agent_id,
+                tick=tick,
+                source_agent_id="llm_gateway",
+                task_id=op.task_id,
+                details={
+                    "request_id": op.request_id,
+                    "result_type": "llm_result",
+                    "result": result,
+                },
+            ))
+        elif op.op_type == OpType.TOOL_REQUEST:
+            self._scheduler.enqueue_event(WakeupEvent(
+                event_type=WakeEventType.TOOL_RESULT,
+                target_agent_id=op.agent_id,
+                tick=tick,
+                source_agent_id="tool_executor",
+                task_id=op.task_id,
+                details={
+                    "request_id": op.request_id,
+                    "result_type": "tool_result",
+                    "result": result,
+                },
+            ))
 
     def _get_agent_states(self) -> dict[str, AgentState]:
         """Get current state of all agents for scheduler.
@@ -810,6 +980,28 @@ class Simulation:
                 },
             }
 
+        # Frozen per-agent private file view (v0.6.0 review §四.3):
+        # read/ls in Phase 7 execute against THIS view, never the live
+        # filesystem. Files staged by WritePrivateFileIntent in this tick
+        # are applied only in Phase 8 (Commit) and thus invisible here.
+        private_files: dict[str, dict[str, Any]] = {}
+        for agent_config in self._agent_tree:
+            agent_id = agent_config.agent_id
+            home = self._private_store.agent_home(agent_id)
+            files: dict[str, str] = {}
+            dirs: list[str] = []
+            if home.exists():
+                for p in sorted(home.rglob("*")):
+                    rel = p.relative_to(home).as_posix()
+                    if p.is_file():
+                        try:
+                            files[rel] = p.read_text(encoding="utf-8")
+                        except UnicodeDecodeError:
+                            continue  # binary files are not readable via the view
+                    else:
+                        dirs.append(rel)
+            private_files[agent_id] = {"files": files, "dirs": dirs}
+
         # Get pending emails
         pending_emails = []
         for mailbox in [self._mail_system.get_mailbox(aid) for aid in self._agent_tree.all_ids]:
@@ -857,6 +1049,7 @@ class Simulation:
                 }
                 for t in self._task_tree
             },
+            "private_files": private_files,
         }
 
     def _phase_deliver(self, tick: int) -> list[Email]:
@@ -957,15 +1150,20 @@ class Simulation:
         plans: dict[str, list[Intent]],
         ready: list[ReadyCandidate] | None = None,
         validated: dict[str, list[ActionResult]] | None = None,
+        snapshot: dict[str, Any] | None = None,
     ) -> dict[str, list[ActionResult]]:
         """Phase 7: Convert validated Intents into staged effects.
+
+        Act REGISTERS and STAGES but never applies: effects are applied
+        in Phase 8 (Commit), pending ops are submitted to the registry.
 
         Only intents that passed validation in Phase 6 are processed.
         Each intent type maps to:
 
         - SubmitLLMRequest   → register PendingOperation, agent → WAITING_FOR_LLM
-        - SubmitToolRequest  → local tools (read/ls) execute directly;
-                               remote tools register PendingOperation
+        - SubmitToolRequest  → local tools (read/ls) execute against the
+                               frozen snapshot view; remote tools register
+                               PendingOperation
         - SendEmailIntent    → stage EMAIL_SEND effect
         - DelegateIntent     → stage TASK_CREATE + EMAIL_SEND effects
         - WritePrivateFileIntent → stage FILE_WRITE effect
@@ -1006,6 +1204,7 @@ class Simulation:
                         eligible_tick=tick + 1,
                         deadline_tick=tick + intent.timeout_ticks,
                         task_id=intent.task_id,
+                        state_epoch=self._state_epoch,
                         metadata={
                             "request_id": intent.request_id,
                             "model": intent.model,
@@ -1031,13 +1230,19 @@ class Simulation:
                 # SubmitToolRequest → local tools execute, remote register
                 if isinstance(intent, SubmitToolRequest):
                     if intent.tool_name in {"read", "ls", "kb_write", "kb_create"}:
-                        # Local tools execute synchronously
+                        # Local tools execute synchronously against the
+                        # frozen per-agent file view (Freeze snapshot).
                         runtime = self._runtimes.get(agent_id)
                         if runtime:
                             tool_context = ToolContext(
                                 agent_id=agent_id,
                                 tick=tick,
                                 allowed_tools=self._tool_context_allowed(agent_id),
+                                read_view=(
+                                    snapshot["private_files"].get(agent_id)
+                                    if snapshot is not None
+                                    else None
+                                ),
                             )
                             tr = self._tool_registry.execute(
                                 context=tool_context,
@@ -1064,6 +1269,7 @@ class Simulation:
                             eligible_tick=tick + 1,
                             deadline_tick=tick + intent.timeout_ticks,
                             task_id=intent.task_id,
+                            state_epoch=self._state_epoch,
                             metadata={
                                 "request_id": intent.request_id,
                                 "tool_name": intent.tool_name,
@@ -1246,6 +1452,9 @@ class Simulation:
 
             allowed_tools = self._tool_registry.get_allowed_tools(agent_id)
             results: list[ActionResult] = []
+            # request_ids seen in THIS plan — catches duplicates within
+            # a single decide() (registry catches cross-tick duplicates)
+            seen_request_ids: set[str] = set()
 
             for intent in intent_list:
                 # Build a synthetic AgentAction for the result record
@@ -1275,6 +1484,72 @@ class Simulation:
                             error="Tool not authorized",
                         )
                         continue
+
+                # Check 1b: LLM request budget — per-agent cap on
+                # in-flight LLM requests (defense in depth; the agent
+                # state machine already serializes activations).
+                if isinstance(intent, SubmitLLMRequest):
+                    in_flight_llm = self._pending_ops.count_in_flight(
+                        agent_id, op_type=OpType.LLM_REQUEST,
+                    )
+                    if in_flight_llm >= self._config.max_concurrent_llm_requests:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"LLM budget exceeded for '{agent_id}': "
+                                f"{in_flight_llm} in flight, max "
+                                f"{self._config.max_concurrent_llm_requests}"
+                            ),
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.PERMISSION_DENIED,
+                            agent_id=agent_id,
+                            tick=tick,
+                            details={
+                                "intent": intent.intent_type.value,
+                                "reason": "llm_budget_exceeded",
+                            },
+                            success=False,
+                            error="LLM request budget exceeded",
+                        )
+                        continue
+
+                # Check 1c: duplicate request_id — an agent cannot
+                # reuse a request_id that is already in flight (registry)
+                # or appears twice in the same plan (seen_request_ids).
+                if isinstance(intent, (SubmitLLMRequest, SubmitToolRequest)):
+                    if (
+                        intent.request_id
+                        and (
+                            intent.request_id in seen_request_ids
+                            or self._pending_ops.find_in_flight_request_id(
+                                agent_id, intent.request_id,
+                            ) is not None
+                        )
+                    ):
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"Duplicate request_id '{intent.request_id}' "
+                                f"for '{agent_id}'"
+                            ),
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.PERMISSION_DENIED,
+                            agent_id=agent_id,
+                            tick=tick,
+                            details={
+                                "intent": intent.intent_type.value,
+                                "request_id": intent.request_id,
+                                "reason": "duplicate_request_id",
+                            },
+                            success=False,
+                            error="Duplicate request_id rejected",
+                        )
+                        continue
+                    seen_request_ids.add(intent.request_id)
 
                 # Check 2: delegation target validation
                 if isinstance(intent, DelegateIntent):
@@ -1408,6 +1683,10 @@ class Simulation:
         applied: list[StagedEffect] = []
         created_email_ids: list[str] = []
         created_task_ids: list[str] = []
+        # Absolute path → previous content (None = file did not exist)
+        file_previous: dict[str, str | None] = {}
+        # KB path → (resource or None, version info or None) before apply
+        kb_state_before: dict[str, tuple[Any, Any]] = {}
 
         def _rollback() -> None:
             """Reverse applied effects in reverse order."""
@@ -1431,6 +1710,31 @@ class Simulation:
                 except Exception:  # noqa: BLE001 — rollback must not fail
                     pass
 
+            # Restore file contents (reverse write order)
+            for target_str, prev in file_previous.items():
+                try:
+                    target = Path(target_str)
+                    if prev is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        target.write_text(prev, encoding="utf-8")
+                except Exception:  # noqa: BLE001 — rollback must not fail
+                    pass
+
+            # Restore shared KB resource + version metadata
+            for path, (res, ver) in kb_state_before.items():
+                try:
+                    if res is None:
+                        self._shared_kb._resources.pop(path, None)
+                    else:
+                        self._shared_kb._resources[path] = res
+                    if ver is None:
+                        self._shared_kb.versions._versions.pop(path, None)
+                    else:
+                        self._shared_kb.versions._versions[path] = ver
+                except Exception:  # noqa: BLE001 — rollback must not fail
+                    pass
+
             # Mark applied effects as rolled back
             for ap in applied:
                 ap.status = EffectStatus.ROLLED_BACK
@@ -1438,13 +1742,20 @@ class Simulation:
         try:
             for effect in committed:
                 if effect.effect_type == EffectType.FILE_WRITE:
-                    # Write to private workspace
+                    # Write to private workspace (previous content
+                    # captured so rollback can restore it)
                     agent_id = effect.agent_id
                     path = effect.resource
                     content = effect.data.get("content", "")
                     home = self._private_store.agent_home(agent_id)
                     target = home / path
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.exists():
+                        file_previous[str(target)] = target.read_text(
+                            encoding="utf-8",
+                        )
+                    else:
+                        file_previous[str(target)] = None
                     target.write_text(content, encoding="utf-8")
 
                 elif effect.effect_type == EffectType.EMAIL_SEND:
@@ -1525,6 +1836,14 @@ class Simulation:
                     # (permission/lock/version already validated in Phase 6-8)
                     data = effect.data
                     path = effect.resource
+                    # Snapshot prior KB state for rollback (content + version)
+                    if path not in kb_state_before:
+                        res = self._shared_kb._resources.get(path)
+                        ver = self._shared_kb.versions.get_info(path)
+                        kb_state_before[path] = (
+                            res.model_copy(deep=True) if res is not None else None,
+                            ver.model_copy(deep=True) if ver is not None else None,
+                        )
                     if effect.effect_type == EffectType.KB_WRITE:
                         self._shared_kb._apply_committed(
                             path=path,
@@ -1558,12 +1877,17 @@ class Simulation:
             if failing is not None and failing.status == EffectStatus.ROLLED_BACK:
                 failing.status = EffectStatus.FAILED
                 failing.error = str(e)
+            # Rollback invalidates the state the tick was computed
+            # against: bump the state epoch so in-flight external
+            # results from the old epoch are fenced as stale.
+            self._bump_state_epoch()
             self._audit_log.record(
                 AuditEventType.TRANSACTION_ROLLBACK,
                 tick=tick,
                 details={
                     "error": str(e),
                     "rolled_back": [ap.effect_id for ap in applied],
+                    "new_state_epoch": self._state_epoch,
                 },
                 success=False,
                 error=str(e),

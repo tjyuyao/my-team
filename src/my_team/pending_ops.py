@@ -77,6 +77,11 @@ class PendingOperation(BaseModel):
     error: str = Field(default="", description="Error message (set on failure)")
     retry_count: int = Field(default=0, ge=0, description="Number of retries")
     max_retries: int = Field(default=3, ge=0, description="Maximum retries")
+    state_epoch: int = Field(
+        default=0,
+        description="State epoch at submission — results from an older "
+                    "epoch are stale and discarded by Ingest (fencing)",
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Additional operation metadata",
@@ -110,8 +115,14 @@ class PendingOperationRegistry:
         task_id: str = "",
         activation_id: str = "",
         metadata: dict[str, Any] | None = None,
+        state_epoch: int = 0,
     ) -> PendingOperation:
-        """Register a new pending operation."""
+        """Register a new pending operation.
+
+        state_epoch: the simulation's state epoch at submission. If the
+        epoch advances (rollback/restore) before the result arrives, the
+        result is stale and Ingest discards it.
+        """
         op = PendingOperation(
             op_type=op_type,
             agent_id=agent_id,
@@ -121,6 +132,7 @@ class PendingOperationRegistry:
             task_id=task_id,
             activation_id=activation_id,
             metadata=metadata or {},
+            state_epoch=state_epoch,
         )
         self._operations[op.request_id] = op
         return op
@@ -130,10 +142,20 @@ class PendingOperationRegistry:
         request_id: str,
         result: dict[str, Any] | None = None,
     ) -> PendingOperation | None:
-        """Mark an operation as completed."""
+        """Mark an operation as completed.
+
+        Terminal statuses (CANCELLED, TIMED_OUT, FAILED) are never
+        overridden — a late result for a dead operation is ignored.
+        """
         op = self._operations.get(request_id)
         if op is None:
             return None
+        if op.status in {
+            OpStatus.CANCELLED,
+            OpStatus.TIMED_OUT,
+            OpStatus.FAILED,
+        }:
+            return op
         op.status = OpStatus.COMPLETED
         op.result = result or {}
         return op
@@ -166,11 +188,15 @@ class PendingOperationRegistry:
         self,
         current_tick: int,
     ) -> list[PendingOperation]:
-        """Find operations that have exceeded their deadline."""
+        """Find operations that have exceeded their deadline.
+
+        SUBMITTED ops are included: the deadline applies from
+        submission, regardless of whether dispatch ever picked the op up.
+        """
         expired: list[PendingOperation] = []
         for op in self._operations.values():
             if (
-                op.status == OpStatus.PENDING
+                op.status in {OpStatus.SUBMITTED, OpStatus.PENDING}
                 and op.deadline_tick is not None
                 and current_tick > op.deadline_tick
             ):
@@ -214,6 +240,41 @@ class PendingOperationRegistry:
     ) -> PendingOperation | None:
         """Get an operation by its request ID."""
         return self._operations.get(request_id)
+
+    def count_in_flight(
+        self,
+        agent_id: str,
+        op_type: OpType | None = None,
+    ) -> int:
+        """Number of SUBMITTED/PENDING operations for an agent.
+
+        Used by Phase 6 (Validate) to enforce per-agent budgets.
+        """
+        return sum(
+            1 for op in self._operations.values()
+            if op.agent_id == agent_id
+            and op.status in {OpStatus.SUBMITTED, OpStatus.PENDING}
+            and (op_type is None or op.op_type == op_type)
+        )
+
+    def find_in_flight_request_id(
+        self,
+        agent_id: str,
+        request_id: str,
+    ) -> PendingOperation | None:
+        """Find an in-flight op whose intent request_id matches.
+
+        Prevents an agent from reusing a request_id that is already in
+        flight (Phase 6 Validate).
+        """
+        for op in self._operations.values():
+            if (
+                op.agent_id == agent_id
+                and op.status in {OpStatus.SUBMITTED, OpStatus.PENDING}
+                and op.metadata.get("request_id") == request_id
+            ):
+                return op
+        return None
 
     def remove(self, request_id: str) -> PendingOperation | None:
         """Remove a single operation from the registry.

@@ -86,6 +86,9 @@ class AuditEventType(str, Enum):
     TRANSACTION_COMMIT = "transaction.commit"
     TRANSACTION_ROLLBACK = "transaction.rollback"
 
+    # Result fencing (v0.6.0 hardening)
+    STALE_RESULT = "result.stale"
+
 
 class AuditEntry(BaseModel):
     """A single audit log entry."""

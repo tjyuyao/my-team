@@ -6,12 +6,18 @@ previously applied effects in the same tick are rolled back:
   TASK_CREATE succeeds
   EMAIL_SEND / later effect fails
   → task removed, email removed, audit records TRANSACTION_ROLLBACK
+
+Also (v0.6.0 hardening): FILE_WRITE content restored, shared KB
+resource + version restored, rolled-back emails produce no wake
+events, and the rollback bumps the state epoch.
 """
 
 from __future__ import annotations
 
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType
+from my_team.models.activation import WakeEventType
+from my_team.shared_kb import PermissionRule
 from my_team.simulation import Simulation
 from my_team.transaction import EffectStatus, EffectType
 
@@ -229,3 +235,114 @@ class TestCommitRollback:
         # First task rolled back — only the pre-existing one remains
         assert not sim.task_tree.exists("task.first")
         assert sim.task_tree.exists("task.conflict")  # pre-existing, untouched
+
+
+class TestRollbackCompleteness:
+    """Rollback covers file/KB state and leaves no orphan wake events."""
+
+    def test_kb_write_rollback_restores_previous_version(self) -> None:
+        """A KB_WRITE applied in a tick that rolls back is undone:
+        previous content and version restored."""
+        sim = _make_sim()
+        sim._permission_engine.add_rules([
+            PermissionRule(
+                scope="project/research/*",
+                principal="agent.root",
+                allow=["read", "create", "write", "kb_write", "lock", "unlock"],
+            ),
+        ])
+        # Prior state: KB resource at v1
+        sim._shared_kb.create(
+            path="project/research/notes.md",
+            agent_id="agent.root",
+            content="v1",
+            tick=0,
+        )
+        assert sim._shared_kb.versions.get_version("project/research/notes.md") == 1
+
+        # This tick: KB_WRITE (v1 → v2), then a failing TASK_CREATE
+        lock = sim._lock_manager.acquire(
+            "project/research/notes.md", "agent.root", current_tick=1,
+        )
+        sim.task_tree.create(
+            task_id="task.dup",
+            title="Existing",
+            creator_agent_id="agent.root",
+            owner_agent_id="agent.research",
+        )
+        sim._transaction_buffer.stage(
+            EffectType.KB_WRITE,
+            "agent.root",
+            "project/research/notes.md",
+            data={"content": "v2", "expected_version": 1},
+            expected_version=1,
+            lock_token=lock.lock_token,
+        )
+        sim._transaction_buffer.stage(
+            EffectType.TASK_CREATE,
+            "agent.root",
+            "task.dup",  # already exists → create() raises
+            data={
+                "task_id": "task.dup",
+                "title": "Dup",
+                "creator_agent_id": "agent.root",
+                "owner_agent_id": "agent.research",
+            },
+        )
+
+        sim._phase_commit(1, {})
+
+        # KB restored: content and version back to v1
+        resource = sim._shared_kb.read("project/research/notes.md", "agent.root")
+        assert resource.content == "v1"
+        assert resource.version == 1
+        assert sim._shared_kb.versions.get_version("project/research/notes.md") == 1
+        rollbacks = sim.audit_log.for_event_type(AuditEventType.TRANSACTION_ROLLBACK)
+        assert len(rollbacks) >= 1
+
+    def test_rolled_back_email_produces_no_wake_event(self) -> None:
+        """A rolled-back email never generates a NEW_EMAIL wake event."""
+        sim = _make_sim()
+
+        # Stage EMAIL_SEND then failing TASK_CREATE (duplicate id)
+        sim.task_tree.create(
+            task_id="task.conflict",
+            title="Existing",
+            creator_agent_id="agent.root",
+            owner_agent_id="agent.research",
+        )
+        sim._transaction_buffer.stage(
+            EffectType.EMAIL_SEND,
+            "agent.root",
+            "email:agent.root",
+            data={
+                "from_agent": "agent.root",
+                "to": ["agent.research"],
+                "subject": "Doomed email",
+                "body": "will roll back",
+            },
+        )
+        sim._transaction_buffer.stage(
+            EffectType.TASK_CREATE,
+            "agent.root",
+            "task.conflict",  # duplicate → raises
+            data={
+                "task_id": "task.conflict",
+                "title": "Dup",
+                "creator_agent_id": "agent.root",
+                "owner_agent_id": "agent.research",
+            },
+        )
+
+        sim._phase_commit(0, {})
+        assert len(sim._mail_system._all_emails) == 0
+
+        # The email was never delivered, so no NEW_EMAIL event exists —
+        # and a subsequent tick delivers nothing / wakes nobody
+        new_email_events = [
+            qe for qe in sim._scheduler._events
+            if qe.event.event_type == WakeEventType.NEW_EMAIL
+        ]
+        assert new_email_events == []
+        sim.run_tick()
+        assert len(sim._mail_system._all_emails) == 0

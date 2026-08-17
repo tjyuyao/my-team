@@ -1,8 +1,8 @@
 # v0.6.0 Implementation Plan — Async LLM + Continuation Runtime
 
 **Created:** 2026-08-17
-**Status:** TODO (P1 + P2 done)
-**Label:** v0.6.0 — Async LLM runtime with continuation-based agents
+**Status:** DONE (P1 + P2 + P3-9/10 + post-review hardening; P3-11 SQLite → v0.7.0)
+**Label:** v0.6.0 — Async LLM/tool runtime prototype with continuation-based agents
 
 ## Goal
 
@@ -91,21 +91,24 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 
 ## P3: Nice to Have
 
-### 9. Pause at Commit Boundary
+### 9. Pause at Commit Boundary ✅ DONE (commit `7e99368`)
 
 **Priority:** P3
 **Acceptance:**
-- pause request → effective at next commit boundary
-- No new activations scheduled
-- External ops continue, results enter quarantine
+- ✅ pause request → effective at next commit boundary
+- ✅ No new activations scheduled
+- ✅ External ops continue, results enter quarantine
+- ✅ 4 tests in `test_pause_async.py`
 
-### 10. LLM Budget + Rate Limiting
+### 10. LLM Budget + Rate Limiting ⚠️ PARTIAL
 
 **Priority:** P3
 **Acceptance:**
-- Per-agent max concurrent LLM requests
-- Provider 429/5xx handling with retry
-- Token/cost budget per agent, task, simulation
+- ✅ Per-agent max concurrent LLM requests (`max_concurrent_llm_requests`,
+  enforced in Phase 6 Validate; tested in `test_op_hardening.py`)
+- ❌ Provider 429/5xx handling with retry — retry is agent-driven after
+  timeout errors; provider-level backoff not implemented
+- ❌ Token/cost budget per agent, task, simulation
 
 ### 11. Persistence (SQLite)
 
@@ -113,6 +116,33 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 **Acceptance:**
 - Save/load: simulation, agents, tasks, emails, wake events, transactions, outbox, KB versions, locks, audit, LLM invocations
 - Crash recovery: pause → shutdown → restart → resume
+
+---
+
+## Post-Review Hardening (2026-08-17, applied to v0.6.0)
+
+Per the v0.6.0 review (P0 + P1). Report, SPEC §8.6, and KANBAN updated.
+
+| Item | Status |
+|------|--------|
+| 10-phase cycle with Act restored | ✅ — phase tracking + 4 tests (`test_phase_semantics.py`) |
+| Frozen snapshot read view (read/ls) | ✅ — per-agent file view at Freeze; 2 tests |
+| FILE_WRITE rollback (content restore) | ✅ — 2 tests (`test_snapshot_views.py`) |
+| Shared KB rollback (content + version) | ✅ — 1 test (`test_commit_rollback.py`) |
+| state_epoch + stale response fencing | ✅ — epoch mismatch + superseded; 3 tests (`test_epoch_fencing.py`) |
+| Rollback increments state epoch | ✅ |
+| Timeout → wake with structured error | ✅ — agent decides retry/fail/escalate; 2 tests |
+| Timeout retry creates NEW request_id | ✅ |
+| Duplicate request_id rejected | ✅ — intra-plan + cross-tick |
+| Pending op cannot escape agent scope | ✅ |
+| Cancelled op late result discarded | ✅ — `complete()` never resurrects terminal ops |
+| LLM budget enforced in Validate | ✅ — per-agent max concurrent |
+| Rolled-back email → no wake events | ✅ — 1 test |
+
+**Remaining (v0.7.0):** SQLite persistence + crash recovery, provider
+429/5xx retry, token/cost budget, ToolManifest/OperationPolicy + tool
+contract, sandboxed tool execution, typed AgentSnapshot views,
+BoundedMicroLoop re-observation.
 
 ## Migration Order
 
@@ -126,6 +156,6 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
  7. ✅ SharedKB single entry                               — 8e6b386
  8. ✅ Commit rollback                                     — 79209cd
  9. ✅ Pause at commit boundary                            — 7e99368
-10. LLM budget                                            — next (P3)
-11. SQLite persistence
+10. ✅ LLM budget (concurrency)                            — post-review hardening
+11. SQLite persistence                                    — next (v0.7.0)
 ```

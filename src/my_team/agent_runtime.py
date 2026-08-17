@@ -46,6 +46,10 @@ class ToolContext:
     simulation_id: str = ""
     tick: int = 0
     allowed_tools: frozenset[str] = field(default_factory=frozenset)
+    # Frozen per-agent file view captured at Freeze (v0.6.0 hardening):
+    # {"files": {relpath: content}, "dirs": [relpaths]}. Read-only tools
+    # execute against this view instead of the live filesystem.
+    read_view: dict[str, Any] | None = field(default=None)
 
 
 class ToolPermissionError(Exception):

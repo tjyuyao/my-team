@@ -990,15 +990,20 @@ Task                  跨多个 ReAct Turn 的长期工作
 每个 Tick 是一次有限的系统内核推进：
 
 ```text
-Phase 1: Ingest     — 收集已完成的外部事件（LLM、工具、人类）
-Phase 2: Freeze     — 生成当前全局状态快照
-Phase 3: Schedule   — 根据 WakeEvent 选择有限 Agent
-Phase 4: Resume     — 恢复 Agent continuation，读取新事件
-Phase 5: Decide     — 只允许有限、非阻塞的决策动作
-Phase 6: Validate   — 验证 Intent 或 ExternalRequest
-Phase 7: Commit     — 提交状态变化和请求登记
-Phase 8: Publish    — 发布下一 Tick 可见的事件
-Phase 9: Audit      — 记录所有变化
+Phase 1:  Ingest     — 收集已完成的外部事件（LLM、工具、人类）；
+                       fence 过期/被取代的结果，超时唤醒 Agent
+Phase 2:  Freeze     — 生成当前全局状态快照（含 Agent 私人文件只读视图）
+Phase 3:  Schedule   — 根据 WakeEvent 选择有限 Agent
+Phase 4:  Resume     — 恢复 Agent continuation，读取新事件
+Phase 5:  Decide     — 只允许有限、非阻塞的决策动作
+Phase 6:  Validate   — 预验证 Intent：工具能力、委派目标、payload、
+                       LLM 预算、request_id 唯一性（不产生副作用）
+Phase 7:  Act        — 将验证通过的 Intent 翻译为 staged effect /
+                       注册 pending operation（只登记，不应用）
+Phase 8:  Commit     — 提交时验证并应用 staged effects；失败时回滚
+                       （含文件/KB/任务/邮件）并递增 state epoch
+Phase 9:  Publish    — 发布下一 Tick 可见的事件；超时检查
+Phase 10: Audit      — 记录所有变化
 ```
 
 **关键规则：Phase 5 不允许同步等待 LLM 或外部工具。**
