@@ -1,7 +1,7 @@
 # v0.7.0 Implementation Plan — Snapshot-Consistent, Policy-Controlled Tool Runtime
 
 **Created:** 2026-08-17
-**Status:** P1 DONE + review round (f77846f..be4765e) — P2 dispositioned, open for v0.8+
+**Status:** P1 DONE + review round (f77846f..5908324) — P2 dispositioned, open for v0.8+
 **Label:** v0.7.0 — Manifest-based policy-controlled tool runtime **prototype**
 **Milestone:** KANBAN/MILESTONE/2026-08-17-v0.7.0.md
 
@@ -16,6 +16,9 @@
 - scheduler claim 回滚 requeue
 - cancel_operation → CancellationResult（逻辑取消语义 + LLM 措辞修正）
 - v0.8.0 计划建立（KANBAN/TODO/2026-08-17-v080-implementation-plan.md）
+- **3db1301（设计评审，v0.8 规划期）**：sandboxed_python 拆分为执行
+  等级 L0–L4（SPEC §8.7「执行等级」）——L0/L1 → v0.8.0 P1-7；
+  本条 P1-3 第 7 项（sandboxed_python）被取代
 
 ## Goal
 
