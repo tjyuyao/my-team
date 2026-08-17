@@ -23,8 +23,11 @@ the actual staged effects.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cached_property
 from typing import Any
 
 from my_team.transaction import EffectType
@@ -167,6 +170,24 @@ class ToolManifest:
     def declares_effect(self, effect_type: EffectType) -> bool:
         """Whether this manifest declares a given effect type."""
         return effect_type in self.effect_types
+
+    @cached_property
+    def manifest_hash(self) -> str:
+        """sha256 over the canonical JSON of the full contract.
+
+        Stable per manifest content: a version bump or any contract
+        field change produces a different hash. ToolRequests carry it;
+        it enters the audit trail and replay context (v0.8.0 P1-3).
+        """
+        payload = json.dumps(
+            {
+                name: getattr(self, name)
+                for name in self.__dataclass_fields__
+            },
+            sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

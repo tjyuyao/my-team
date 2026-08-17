@@ -27,6 +27,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from my_team.tool_protocol import ToolRequest, ToolResultContract
+
 
 class OpStatus(str, Enum):
     """Lifecycle status of a pending operation."""
@@ -105,6 +107,12 @@ class PendingOperation(BaseModel):
         description="State epoch at submission — results from an older "
                     "epoch are stale and discarded by Ingest (fencing)",
     )
+    tool_request: ToolRequest | None = Field(
+        default=None,
+        description="System-built tool contract for TOOL_REQUEST ops "
+                    "(v0.8.0 P1-3); None for non-tool ops or legacy "
+                    "submissions",
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Additional operation metadata",
@@ -181,6 +189,35 @@ class PendingOperationRegistry:
             return op
         op.status = OpStatus.COMPLETED
         op.result = result or {}
+        return op
+
+    def complete_tool(
+        self,
+        request_id: str,
+        result: ToolResultContract,
+    ) -> PendingOperation | None:
+        """Complete a TOOL_REQUEST op with a structured contract result.
+
+        Correlation: result.request_id must match the op. The contract
+        fields (output_hash, effects disclosure, cancel confirmation)
+        are recorded on the op for audit. Terminal ops (cancelled /
+        timed out / failed) never accept a late result — the op's
+        lifecycle stays authoritative over result.status.
+        """
+        op = self._operations.get(request_id)
+        if op is None:
+            return None
+        if op.status in {
+            OpStatus.CANCELLED,
+            OpStatus.TIMED_OUT,
+            OpStatus.FAILED,
+        }:
+            return op
+        if result.request_id != request_id:
+            return op
+        op.status = OpStatus.COMPLETED
+        op.result = result.data
+        op.metadata["tool_result"] = result.model_dump(mode="json")
         return op
 
     def fail(

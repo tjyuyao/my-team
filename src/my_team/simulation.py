@@ -94,6 +94,7 @@ from my_team.shared_kb import (
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import SimulationState, TickConfig, TickEngine, TickResult
 from my_team.tool_manifest import builtin_manifests
+from my_team.tool_protocol import ToolRequest, hash_payload
 from my_team.transaction import EffectStatus, EffectType, StagedEffect, TransactionBuffer
 
 
@@ -1531,6 +1532,37 @@ class Simulation:
 
             self._enqueue_result_wake(op, tick, result=op.result)
 
+            # Audit the delivered tool result with the contract fields
+            # (manifest_hash / tool_version / input_hash / output_hash
+            # enter the replay context — v0.8.0 P1-3)
+            if op.op_type == OpType.TOOL_REQUEST:
+                tr = op.tool_request
+                contract = op.metadata.get("tool_result")
+                details: dict[str, Any] = {
+                    "request_id": op.request_id,
+                    "tool_name": (
+                        tr.tool_name if tr is not None
+                        else op.metadata.get("tool_name", "")
+                    ),
+                    "state_epoch": op.state_epoch,
+                }
+                if tr is not None:
+                    details["tool_version"] = tr.tool_version
+                    details["manifest_hash"] = tr.manifest_hash
+                    details["input_hash"] = tr.input_hash
+                if isinstance(contract, dict):
+                    details["output_hash"] = contract.get("output_hash", "")
+                    details["result_status"] = contract.get("status", "")
+                    details["executor_cancel_confirmed"] = contract.get(
+                        "executor_cancel_confirmed", False,
+                    )
+                self._audit_log.record(
+                    AuditEventType.TOOL_RESULT,
+                    agent_id=op.agent_id,
+                    tick=tick,
+                    details=details,
+                )
+
             # Remove the consumed operation so it is not re-delivered
             self._pending_ops.remove(op.request_id)
 
@@ -1664,6 +1696,16 @@ class Simulation:
                         dirs.append(rel)
             private_files[agent_id] = {"files": files, "dirs": dirs}
 
+        # Per-agent workspace version (v0.8.0 P1-3): hash of the frozen
+        # file view. A ToolRequest records the version it was based on;
+        # apply-time FILE_PATCH base-hash checks remain the enforcement.
+        workspace_versions: dict[str, str] = {}
+        for agent_config in self._agent_tree:
+            agent_id = agent_config.agent_id
+            workspace_versions[agent_id] = hash_payload(
+                private_files[agent_id]["files"],
+            )
+
         # Get pending emails
         pending_emails = []
         for mailbox in [self._mail_system.get_mailbox(aid) for aid in self._agent_tree.all_ids]:
@@ -1684,6 +1726,7 @@ class Simulation:
             "tick": tick,
             "agents": agent_states,
             "emails": pending_emails,
+            "workspace_versions": workspace_versions,
             "shared_kb": {
                 "paths": self._shared_kb.all_paths(),
                 "versions": {
@@ -1951,7 +1994,11 @@ class Simulation:
                                 error=f"No runtime for '{agent_id}'",
                             ))
                     else:
-                        # Remote tool → register pending operation
+                        # Remote tool → register pending operation with
+                        # a system-built ToolRequest (v0.8.0 P1-3). All
+                        # identity/version/hash/epoch fields are
+                        # injected by the kernel here — an executor or
+                        # plugin never supplies them.
                         op = self._pending_ops.submit(
                             op_type=OpType.TOOL_REQUEST,
                             agent_id=agent_id,
@@ -1966,6 +2013,28 @@ class Simulation:
                                 "arguments": intent.arguments,
                             },
                         )
+                        manifest = self._tool_registry.get_manifest(
+                            intent.tool_name,
+                        )
+                        if manifest is not None:
+                            op.tool_request = ToolRequest(
+                                request_id=op.request_id,
+                                agent_id=agent_id,
+                                task_id=intent.task_id,
+                                tool_name=intent.tool_name,
+                                tool_version=manifest.version,
+                                manifest_hash=manifest.manifest_hash,
+                                input_hash=hash_payload(intent.arguments),
+                                state_epoch=self._state_epoch,
+                                workspace_version=(
+                                    (snapshot or {})
+                                    .get("workspace_versions", {})
+                                    .get(agent_id, "0")
+                                ),
+                                created_tick=tick,
+                                deadline_tick=tick + intent.timeout_ticks,
+                                arguments=dict(intent.arguments),
+                            )
                         if runtime_state:
                             runtime_state.continuation.advance_to_waiting_tool(
                                 op.request_id, tick,
@@ -2549,7 +2618,6 @@ class Simulation:
         # effects — discarded on rollback (the email never happened).
         staged_outbox_ids: list[str] = []
         applied: list[StagedEffect] = []
-        created_email_ids: list[str] = []
         created_task_ids: list[str] = []
         # Absolute path → previous content (None = file did not exist)
         file_previous: dict[str, str | None] = {}
