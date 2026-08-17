@@ -20,6 +20,9 @@ build/
 .pytest_cache/
 .coverage
 
+# Project
+tmp/
+
 # Runtime
 /private/
 /shared-kb/
