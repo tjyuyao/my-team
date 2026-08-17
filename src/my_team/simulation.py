@@ -30,16 +30,25 @@ from my_team.agent_runtime import (
     _proxy,
     _proxy_nested,
 )
+from my_team.agent_state import AgentState
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType, AuditLog
 from my_team.delegation import DelegationProtocol
 from my_team.file_ops import FileOps, FileOpsAuditLog
 from my_team.human_control import HumanControl
 from my_team.mailbox import MailSystem
+from my_team.models.activation import (
+    ExecutionConfig,
+    ReadyCandidate,
+    WakeCondition,
+    WakeEventType,
+    WakeupEvent,
+)
 from my_team.models.agent import AgentConfig
 from my_team.models.email import Email
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
+from my_team.scheduler import AgentScheduler
 from my_team.shared_kb import LockManager, PermissionEngine, SharedKB
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import TickConfig, TickEngine, TickResult
@@ -60,6 +69,10 @@ class SimulationConfig(BaseModel):
     default_lock_lease_ticks: int = Field(default=4)
     max_retries: int = Field(default=3)
     private_storage_limit_mb: int = Field(default=512)
+    execution: ExecutionConfig = Field(
+        default_factory=ExecutionConfig,
+        description="Agent execution configuration",
+    )
 
 
 class Simulation:
@@ -136,6 +149,9 @@ class Simulation:
             audit_log=self._audit_log,
         )
 
+        # Agent scheduler (event-driven activation)
+        self._scheduler = AgentScheduler(config=self._config.execution)
+
         # Agent runtimes
         self._runtimes: dict[str, AgentRuntime] = {}
 
@@ -149,7 +165,7 @@ class Simulation:
         self._initialize()
 
     def _initialize(self) -> None:
-        """Set up all agents: mailboxes, private spaces, runtimes, tool registry."""
+        """Set up all agents: mailboxes, private spaces, runtimes, tool registry, scheduler."""
         for agent_config in self._agent_tree:
             agent_id = agent_config.agent_id
 
@@ -166,6 +182,25 @@ class Simulation:
             # Create agent runtime
             runtime = self._create_runtime(agent_config)
             self._runtimes[agent_id] = runtime
+
+            # Register with scheduler — bootstrap agents wake on tick 0
+            is_bootstrap = agent_config.metadata.get("bootstrap", False)
+            wake_types: set[WakeEventType] = set()
+            if is_bootstrap:
+                wake_types.add(WakeEventType.BOOTSTRAP)
+            # All agents can be woken by emails and human messages
+            wake_types.update({
+                WakeEventType.NEW_EMAIL,
+                WakeEventType.HUMAN_MESSAGE,
+                WakeEventType.TOOL_RESULT,
+                WakeEventType.CHILD_TASK_CHANGE,
+                WakeEventType.DEADLINE_APPROACHING,
+            })
+            initial_condition = WakeCondition(
+                event_types=wake_types,
+                wake_at_tick=0,
+            )
+            self._scheduler.register_agent(agent_id, initial_condition)
 
             # Audit
             self._audit_log.record(
@@ -227,6 +262,10 @@ class Simulation:
         return self._delegation
 
     @property
+    def scheduler(self) -> AgentScheduler:
+        return self._scheduler
+
+    @property
     def audit_log(self) -> AuditLog:
         return self._audit_log
 
@@ -246,12 +285,22 @@ class Simulation:
 
         return cls(agent_tree=agent_tree, config=sim_config)
 
-    # -- Tick execution (7 phases) ------------------------------------------
+    # -- Tick execution (10 phases) -----------------------------------------
 
     def run_tick(self) -> TickResult:
-        """Execute one complete tick through all 7 phases.
+        """Execute one complete tick through all 10 phases.
 
-        This is the core integration point where all subsystems interact.
+        Phases:
+        1. Freeze   — snapshot global state
+        2. Deliver  — deliver emails, generate NEW_EMAIL wake events
+        3. Schedule — compute ready set from events + agent states
+        4. Observe  — ready agents read snapshot
+        5. Decide   — ready agents generate action plan
+        6. Act      — ready agents execute actions, stage effects
+        7. Validate — validate staged effects
+        8. Commit   — atomic commit of all staged effects
+        9. Publish  — generate wake events from committed effects; timeouts
+        10. Audit   — record all events
         """
         tick = self._tick_engine.current_tick
 
@@ -261,24 +310,38 @@ class Simulation:
         # Phase 2: Deliver — deliver emails
         delivered = self._phase_deliver(tick)
 
-        # Phase 3: Observe — each agent reads from snapshot
-        observations = self._phase_observe(tick, snapshot)
+        # Phase 3: Schedule — determine which agents activate
+        ready = self._phase_schedule(tick)
 
-        # Phase 4: Decide — each agent generates action plan
-        plans = self._phase_decide(tick, observations)
+        # Phase 4: Observe — ready agents read from snapshot
+        observations = self._phase_observe(tick, snapshot, ready)
 
-        # Phase 5: Act — execute actions through tool registry
-        all_results = self._phase_act(tick, plans)
+        # Phase 5: Decide — ready agents generate action plan
+        plans = self._phase_decide(tick, observations, ready)
 
-        # Phase 6: Commit — atomic state update
+        # Phase 6: Act — execute actions through tool registry
+        all_results = self._phase_act(tick, plans, ready)
+
+        # Phase 7: Validate — validate staged effects
+        self._phase_validate(tick, all_results)
+
+        # Phase 8: Commit — atomic state update
         self._phase_commit(tick, all_results)
 
-        # Phase 6.5: Timeout check — post-Commit, pre-Audit
-        self._timeout_checker.check_task_timeouts(tick)
-        self._timeout_checker.check_lock_timeouts(tick)
+        # Phase 9: Publish — wake events + timeouts
+        self._phase_publish(tick, delivered, all_results, ready)
 
-        # Phase 7: Audit
-        self._phase_audit(tick, delivered, all_results)
+        # Phase 10: Audit
+        self._phase_audit(tick, delivered, all_results, ready)
+
+        # Complete activations and clean up scheduler
+        for candidate in ready:
+            activation = self._scheduler._activations_this_tick.get(candidate.agent_id)
+            if activation:
+                self._scheduler.complete_activation(
+                    activation.activation_id, success=True
+                )
+        self._scheduler.end_tick()
 
         # Advance tick engine
         results = self._tick_engine.advance(1)
@@ -298,6 +361,49 @@ class Simulation:
         return results
 
     # -- Phase implementations ----------------------------------------------
+
+    def _get_agent_states(self) -> dict[str, AgentState]:
+        """Get current state of all agents for scheduler."""
+        # For now, all agents are IDLE (state machine not yet wired to runtime)
+        # This will be enhanced when AgentStateMachine is integrated
+        return {aid: AgentState.IDLE for aid in self._runtimes}
+
+    def _phase_schedule(self, tick: int) -> list[ReadyCandidate]:
+        """Phase 3: Compute ready set from pending events + agent states.
+
+        For bootstrap tick (tick 0), enqueue BOOTSTRAP events for agents
+        that have bootstrap=True in their config.
+        """
+        # Bootstrap: enqueue events on first tick
+        if tick == 0:
+            for agent_config in self._agent_tree:
+                is_bootstrap = agent_config.metadata.get("bootstrap", False)
+                if is_bootstrap:
+                    self._scheduler.enqueue_event(WakeupEvent(
+                        event_type=WakeEventType.BOOTSTRAP,
+                        target_agent_id=agent_config.agent_id,
+                        tick=tick,
+                        source_agent_id="system",
+                    ))
+
+        agent_states = self._get_agent_states()
+        ready = self._scheduler.compute_ready_set(tick, agent_states)
+
+        # Begin activations for ready candidates
+        for candidate in ready:
+            activation = self._scheduler.begin_activation(candidate, tick)
+            self._audit_log.record(
+                AuditEventType.AGENT_ACTIVATED,
+                agent_id=candidate.agent_id,
+                tick=tick,
+                details={
+                    "activation_id": activation.activation_id,
+                    "event_count": len(candidate.events),
+                    "event_types": [e.event_type.value for e in candidate.events],
+                },
+            )
+
+        return ready
 
     def _build_snapshot(self, tick: int) -> dict[str, Any]:
         """Build a frozen snapshot of the global state."""
@@ -370,15 +476,42 @@ class Simulation:
         }
 
     def _phase_deliver(self, tick: int) -> list[Email]:
-        """Phase 2: Deliver emails whose deliver_at_tick <= current_tick."""
-        return self._mail_system.deliver(tick)
+        """Phase 2: Deliver emails and generate NEW_EMAIL wake events.
+
+        Wake events are enqueued for tick+1 visibility.
+        """
+        delivered = self._mail_system.deliver(tick)
+        # Generate wake events for recipients — visible in tick+1
+        for email in delivered:
+            for recipient in email.to:
+                self._scheduler.enqueue_event(WakeupEvent(
+                    event_type=WakeEventType.NEW_EMAIL,
+                    target_agent_id=recipient,
+                    tick=tick,  # produced at tick t, visible at tick t+1
+                    source_agent_id=email.from_agent,
+                    task_id=email.task_id or "",
+                    thread_id=email.thread_id or "",
+                    details={"email_id": email.email_id},
+                ))
+        return delivered
 
     def _phase_observe(
-        self, tick: int, snapshot: dict[str, Any]
+        self,
+        tick: int,
+        snapshot: dict[str, Any],
+        ready: list[ReadyCandidate] | None = None,
     ) -> dict[str, AgentObservation]:
-        """Phase 3: Each agent observes the frozen snapshot."""
+        """Phase 4: Ready agents observe the frozen snapshot."""
         observations: dict[str, AgentObservation] = {}
+        # Determine which agents to observe
+        if ready is not None:
+            active_ids = {c.agent_id for c in ready}
+        else:
+            active_ids = set(self._runtimes.keys())
+
         for agent_id, runtime in self._runtimes.items():
+            if agent_id not in active_ids:
+                continue
             # Filter lock tokens: only the lock holder sees their token
             agent_locks = {}
             lock_tokens = snapshot.get("lock_tokens", {})
@@ -403,20 +536,33 @@ class Simulation:
         return observations
 
     def _phase_decide(
-        self, tick: int, observations: dict[str, AgentObservation]
+        self,
+        tick: int,
+        observations: dict[str, AgentObservation],
+        ready: list[ReadyCandidate] | None = None,
     ) -> dict[str, ActionPlan]:
-        """Phase 4: Each agent generates an action plan."""
+        """Phase 5: Ready agents generate an action plan."""
         plans: dict[str, ActionPlan] = {}
+        if ready is not None:
+            active_ids = {c.agent_id for c in ready}
+        else:
+            active_ids = set(self._runtimes.keys())
+
         for agent_id, runtime in self._runtimes.items():
+            if agent_id not in active_ids:
+                continue
             obs = observations.get(agent_id)
             if obs:
                 plans[agent_id] = runtime.decide(obs)
         return plans
 
     def _phase_act(
-        self, tick: int, plans: dict[str, ActionPlan]
+        self,
+        tick: int,
+        plans: dict[str, ActionPlan],
+        ready: list[ReadyCandidate] | None = None,
     ) -> dict[str, list[ActionResult]]:
-        """Phase 5: Execute actions through tool registry."""
+        """Phase 6: Execute actions through tool registry."""
         all_results: dict[str, list[ActionResult]] = {}
         for agent_id, plan in plans.items():
             runtime = self._runtimes.get(agent_id)
@@ -433,6 +579,31 @@ class Simulation:
                 results = runtime.act(plan, context)
                 all_results[agent_id] = results
         return all_results
+
+    def _phase_validate(
+        self, tick: int, all_results: dict[str, list[ActionResult]]
+    ) -> None:
+        """Phase 7: Validate staged effects.
+
+        Currently a placeholder. Full validation (permissions, versions,
+        locks) will be implemented with the transaction system.
+        """
+        pass
+
+    def _phase_publish(
+        self,
+        tick: int,
+        delivered: list[Email],
+        all_results: dict[str, list[ActionResult]],
+        ready: list[ReadyCandidate],
+    ) -> None:
+        """Phase 9: Generate wake events from committed effects; timeout checks.
+
+        Events generated here are only visible in tick+1.
+        """
+        # Timeout checks
+        self._timeout_checker.check_task_timeouts(tick)
+        self._timeout_checker.check_lock_timeouts(tick)
 
     def _phase_commit(
         self, tick: int, all_results: dict[str, list[ActionResult]]
@@ -455,8 +626,9 @@ class Simulation:
         tick: int,
         delivered: list[Email],
         all_results: dict[str, list[ActionResult]],
+        ready: list[ReadyCandidate] | None = None,
     ) -> None:
-        """Phase 7: Record audit events for this tick."""
+        """Phase 10: Record audit events for this tick."""
         # Record delivered emails
         for email in delivered:
             self._audit_log.record(

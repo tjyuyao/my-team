@@ -27,17 +27,36 @@ class AgentState(str, Enum):
     # Running sub-states
     IDLE = "idle"
     PROCESSING = "processing"
-    WAITING = "waiting"
+    WAITING = "waiting"  # kept for backward compat; prefer granular WAITING_FOR_*
+    # Granular waiting sub-states per SPEC §9.1
+    WAITING_FOR_LLM = "waiting_for_llm"
+    WAITING_FOR_TOOL = "waiting_for_tool"
+    WAITING_FOR_CHILD = "waiting_for_child"
+    WAITING_FOR_MAIL = "waiting_for_mail"
+    WAITING_FOR_LOCK = "waiting_for_lock"
+    WAITING_FOR_HUMAN = "waiting_for_human"
     BLOCKED = "blocked"
     PAUSED = "paused"
     FAILED = "failed"
     TERMINATED = "terminated"
 
 
+# All granular waiting states
+WAITING_STATES = {
+    AgentState.WAITING,
+    AgentState.WAITING_FOR_LLM,
+    AgentState.WAITING_FOR_TOOL,
+    AgentState.WAITING_FOR_CHILD,
+    AgentState.WAITING_FOR_MAIL,
+    AgentState.WAITING_FOR_LOCK,
+    AgentState.WAITING_FOR_HUMAN,
+}
+
 # Top-level categories for grouping
 PHASE_LIFECYCLE = {AgentState.CREATED, AgentState.INITIALIZED, AgentState.READY}
 PHASE_RUNNING = {
-    AgentState.IDLE, AgentState.PROCESSING, AgentState.WAITING,
+    AgentState.IDLE, AgentState.PROCESSING,
+    *WAITING_STATES,
     AgentState.BLOCKED, AgentState.PAUSED, AgentState.FAILED,
 }
 PHASE_TERMINAL = {AgentState.TERMINATED}
@@ -74,45 +93,97 @@ TRANSITION_TABLE: dict[AgentState, set[AgentState]] = {
     # Lifecycle progression
     AgentState.CREATED: {AgentState.INITIALIZED},
     AgentState.INITIALIZED: {AgentState.READY},
-    AgentState.READY: {AgentState.IDLE, AgentState.TERMINATED},
+    AgentState.READY: {AgentState.IDLE, AgentState.PROCESSING, AgentState.TERMINATED},
     # Running sub-states
     AgentState.IDLE: {
-        AgentState.PROCESSING,   #收到新邮件或任务
-        AgentState.PAUSED,       # 系统暂停
-        AgentState.FAILED,       # 执行异常
-        AgentState.TERMINATED,   # 正常终止
+        AgentState.READY,        # wake event matched (event-driven scheduling)
+        AgentState.PROCESSING,   # direct activation (legacy path)
+        AgentState.PAUSED,       # system pause
+        AgentState.FAILED,       # execution error
+        AgentState.TERMINATED,   # normal termination
     },
     AgentState.PROCESSING: {
-        AgentState.WAITING,      # 需要等待外部响应
-        AgentState.BLOCKED,      # 无法自行解决
-        AgentState.IDLE,         # 处理完成，回到空闲
-        AgentState.FAILED,       # 执行异常
-        AgentState.PAUSED,       # 系统暂停
+        AgentState.WAITING,              # generic wait (legacy)
+        AgentState.WAITING_FOR_LLM,      # LLM call in flight
+        AgentState.WAITING_FOR_TOOL,     # tool call in flight
+        AgentState.WAITING_FOR_CHILD,    # waiting for child task result
+        AgentState.WAITING_FOR_MAIL,     # waiting for specific email
+        AgentState.WAITING_FOR_LOCK,     # waiting for shared KB lock
+        AgentState.WAITING_FOR_HUMAN,    # waiting for human decision
+        AgentState.BLOCKED,              # cannot self-resolve
+        AgentState.IDLE,                 # done, back to idle
+        AgentState.FAILED,               # execution error
+        AgentState.PAUSED,               # system pause
     },
+    # Generic waiting (legacy)
     AgentState.WAITING: {
-        AgentState.PROCESSING,   # 收到响应，继续处理
-        AgentState.BLOCKED,      # 等待超时或资源不足
-        AgentState.FAILED,       # 执行异常
-        AgentState.PAUSED,       # 系统暂停
+        AgentState.PROCESSING,   # response received
+        AgentState.BLOCKED,      # timeout or resource exhausted
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
+    },
+    # Granular waiting sub-states
+    AgentState.WAITING_FOR_LLM: {
+        AgentState.PROCESSING,   # LLM result arrived
+        AgentState.BLOCKED,      # LLM call failed permanently
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
+    },
+    AgentState.WAITING_FOR_TOOL: {
+        AgentState.PROCESSING,   # tool result arrived
+        AgentState.BLOCKED,      # tool call failed permanently
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
+    },
+    AgentState.WAITING_FOR_CHILD: {
+        AgentState.PROCESSING,   # child task completed
+        AgentState.BLOCKED,      # child timed out or failed
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
+    },
+    AgentState.WAITING_FOR_MAIL: {
+        AgentState.PROCESSING,   # email arrived
+        AgentState.BLOCKED,      # mail timeout
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
+    },
+    AgentState.WAITING_FOR_LOCK: {
+        AgentState.PROCESSING,   # lock acquired
+        AgentState.BLOCKED,      # lock unavailable
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
+    },
+    AgentState.WAITING_FOR_HUMAN: {
+        AgentState.PROCESSING,   # human response arrived
+        AgentState.BLOCKED,      # human timeout
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
     },
     AgentState.BLOCKED: {
-        AgentState.IDLE,         # 上级介入解决
-        AgentState.PROCESSING,   # 阻塞解除，继续处理
-        AgentState.FAILED,       # 无法恢复
-        AgentState.TERMINATED,   # 放弃
+        AgentState.IDLE,         # resolved by上级
+        AgentState.PROCESSING,   # blockage resolved
+        AgentState.FAILED,       # unrecoverable
+        AgentState.TERMINATED,   # give up
     },
     AgentState.PAUSED: {
-        AgentState.IDLE,         # 恢复
-        AgentState.PROCESSING,   # 恢复到处理中
-        AgentState.WAITING,      # 恢复到等待中
-        AgentState.BLOCKED,      # 恢复到阻塞
-        AgentState.FAILED,       # 恢复后发现异常
-        AgentState.TERMINATED,   # 恢复后终止
+        AgentState.IDLE,         # resume to idle
+        AgentState.PROCESSING,   # resume to processing
+        AgentState.READY,        # resume to ready (scheduler will re-evaluate)
+        AgentState.WAITING,      # resume to waiting
+        AgentState.WAITING_FOR_LLM,
+        AgentState.WAITING_FOR_TOOL,
+        AgentState.WAITING_FOR_CHILD,
+        AgentState.WAITING_FOR_MAIL,
+        AgentState.WAITING_FOR_LOCK,
+        AgentState.WAITING_FOR_HUMAN,
+        AgentState.BLOCKED,      # resume to blocked
+        AgentState.FAILED,       # resume then discover failure
+        AgentState.TERMINATED,   # resume then terminate
     },
     AgentState.FAILED: {
-        AgentState.IDLE,         # 重试成功
-        AgentState.TERMINATED,   # 重试耗尽
-        AgentState.PROCESSING,   # 直接重试
+        AgentState.IDLE,         # retry succeeded
+        AgentState.TERMINATED,   # retry exhausted
+        AgentState.PROCESSING,   # direct retry
     },
     # Terminal state: no transitions out
     AgentState.TERMINATED: set(),
@@ -291,6 +362,34 @@ class AgentStateMachine:
     def wait(self, **kwargs: Any) -> AuditEntry:
         """processing → waiting"""
         return self.transition(AgentState.WAITING, **kwargs)
+
+    def wait_for_llm(self, **kwargs: Any) -> AuditEntry:
+        """processing → waiting_for_llm"""
+        return self.transition(AgentState.WAITING_FOR_LLM, **kwargs)
+
+    def wait_for_tool(self, **kwargs: Any) -> AuditEntry:
+        """processing → waiting_for_tool"""
+        return self.transition(AgentState.WAITING_FOR_TOOL, **kwargs)
+
+    def wait_for_child(self, **kwargs: Any) -> AuditEntry:
+        """processing → waiting_for_child"""
+        return self.transition(AgentState.WAITING_FOR_CHILD, **kwargs)
+
+    def wait_for_mail(self, **kwargs: Any) -> AuditEntry:
+        """processing → waiting_for_mail"""
+        return self.transition(AgentState.WAITING_FOR_MAIL, **kwargs)
+
+    def wait_for_lock(self, **kwargs: Any) -> AuditEntry:
+        """processing → waiting_for_lock"""
+        return self.transition(AgentState.WAITING_FOR_LOCK, **kwargs)
+
+    def wait_for_human(self, **kwargs: Any) -> AuditEntry:
+        """processing → waiting_for_human"""
+        return self.transition(AgentState.WAITING_FOR_HUMAN, **kwargs)
+
+    def wake_up(self, **kwargs: Any) -> AuditEntry:
+        """idle → ready (wake event matched)"""
+        return self.transition(AgentState.READY, **kwargs)
 
     def block(self, **kwargs: Any) -> AuditEntry:
         """processing/waiting → blocked"""

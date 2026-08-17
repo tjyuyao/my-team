@@ -794,6 +794,135 @@ Phase 7: Audit
 - 错误和超时
 - 人类控制操作
 
+## 8.3 Tick 语义澄清
+
+**`tick` 是模拟世界推进一次的最小离散时间单位。**
+
+以下概念不等价于一个 tick：
+
+| 概念 | 含义 | 与 tick 的关系 |
+|------|------|---------------|
+| API 请求 | 一次原始 LLM/API 调用 | 可能在 tick 内完成，也可能跨越 tick |
+| LLM 调用 | 一次模型推理 | 可能立即返回，也可能延迟数 tick |
+| 工具调用 | 一次工具执行 | 可能在同 tick 返回，也可能异步返回 |
+| Agent 完整响应 | Agent 对用户请求的最终结果 | 可能跨越数十个 tick |
+| 用户请求 | 人类发起的顶层请求 | 可能跨越多个任务和数十个 tick |
+
+一个用户请求的典型生命周期：
+
+```text
+用户请求
+  ↓ tick 0
+Root Agent 第一次思考
+  ↓ tick 1
+委派 Research Agent
+  ↓ tick 2
+Research Agent 收到委派
+  ↓ tick 3
+Research Agent 调用工具
+  ↓ tick 4
+工具响应到达
+  ↓ tick 5
+Research Agent 再次思考
+  ↓ tick 6
+Research Agent 返回结果
+  ↓ tick 7
+Root Agent 汇总
+  ↓ tick 8
+Root Agent 最终回复用户
+```
+
+Agent 的一次完整响应可以跨越多个 tick，并包含多次 LLM 调用、工具调用、E-mail 交互和等待。
+
+## 8.4 Agent 激活模型
+
+每个 tick 中，Agent 的行为被限制为**一次有限的 activation**：
+
+```text
+一次 Observe
+→ 一次 Decide
+→ 一批有限 Actions
+→ 一次 Commit
+```
+
+### 核心概念
+
+| 概念 | 含义 |
+|------|------|
+| Agent Activation | 某个 Agent 被唤醒并执行一次决策周期 |
+| LLM Invocation | 一次调用模型 API |
+| Tool Invocation | 一次工具调用 |
+| Wake Event | 触发 Agent 唤醒的事件 |
+
+### 激活约束
+
+- 每个 Agent 在每个 tick 内最多完成一次 activation
+- 每次 activation 最多进行有限次 LLM 调用（默认 1 次，可配置）
+- 每次 activation 最多执行有限次工具调用（默认 8 次，可配置）
+- 不允许在同一个 tick 内无限执行 `LLM → tool → LLM → tool → ...` 循环
+
+### 唤醒条件
+
+Agent 只有在满足以下条件时才被调度执行：
+
+```text
+agent.status == READY
+AND (
+    收到新 E-mail
+    OR 收到工具结果
+    OR 子任务状态变化
+    OR 锁可用
+    OR 重试时间到达
+    OR 人类消息到达
+    OR 任务 deadline 临近
+    OR 定时器到期
+)
+```
+
+如果唤醒条件不满足，Agent 保持 `IDLE` 或 `WAITING` 状态，不调用 LLM。
+
+## 8.5 执行模式
+
+系统支持两种执行模式，通过配置选择：
+
+### 模式 A：离散异步模式（默认）
+
+每次 LLM 或工具动作都是可观察的事件，下一轮在后续 tick 执行。
+
+```text
+tick 10: Agent 调用 LLM，LLM 请求 read("a.md")
+tick 11: ToolExecutor 执行 read，生成 ToolResult
+tick 12: Agent 被唤醒，读取 ToolResult，再次调用 LLM
+tick 13: LLM 请求 write("b.md")，执行 write
+tick 14: Agent 再次被唤醒，判断任务完成，发送 result
+```
+
+优点：并行语义清楚、可暂停、成本可控、易于审计和重放。
+
+### 模式 B：有界微循环模式
+
+一个 Agent activation 内部允许有限次 `LLM → Tool → LLM` 循环。
+
+```python
+execution_mode = "bounded_micro_loop"
+max_rounds = 3  # 最多 3 轮 LLM → Tool
+```
+
+优点：对简单场景端到端响应更快。
+
+缺点：暂停粒度粗、成本上限不透明、事务边界更复杂。
+
+### 配置
+
+```json
+{
+  "execution_mode": "discrete_async",
+  "max_llm_calls_per_activation": 1,
+  "max_tool_calls_per_activation": 8,
+  "max_action_budget": 32
+}
+```
+
 ---
 
 # 9. Agent 生命周期
@@ -803,44 +932,116 @@ created
   ↓
 initialized
   ↓
-ready
-  ↓
-running
-  ├── idle
-  ├── processing
-  ├── waiting
-  ├── blocked
-  ├── paused
-  └── failed
+idle ←──────────────────────────────┐
+  ↓ event                           │
+ready                               │
+  ↓ scheduler                       │
+observing                           │
+  ↓                                 │
+deciding                            │
+  ↓                                 │
+acting                              │
+  ├── waiting_for_tool ─────────────┤
+  ├── waiting_for_child ────────────┤
+  ├── waiting_for_mail ─────────────┤
+  ├── waiting_for_lock ─────────────┤
+  ├── waiting_for_human ────────────┤
+  ├── blocked (需要介入)            │
+  └── idle (任务完成) ──────────────┘
+  ↓ unrecoverable
+failed
   ↓
 terminated
 ```
 
-## 9.1 主要状态
+## 9.1 状态定义
 
 ### `idle`
 
-没有待处理任务，但仍可接收 E-mail。
+Agent 没有待处理工作。不调用 LLM，不执行 observe/decide/act。
 
-### `processing`
+触发条件（idle → ready）：
+- 收到新 E-mail
+- 收到工具结果
+- 子任务状态变化
+- 锁可用
+- 重试时间到达
+- 人类消息到达
+- 定时器到期
 
-正在处理当前时间步中的输入。
+### `ready`
 
-### `waiting`
+Agent 有待处理工作，等待调度器分配 activation。
 
-等待子 Agent、E-mail、锁或外部事件。
+### `observing`
+
+Agent 正在执行 Phase 3（Observe），读取快照。
+
+### `deciding`
+
+Agent 正在执行 Phase 4（Decide），生成动作计划。
+
+### `acting`
+
+Agent 正在执行 Phase 5（Act），执行工具调用。
+
+### `waiting_for_tool`
+
+Agent 已提交工具调用请求，等待工具结果在后续 tick 到达。
+
+### `waiting_for_child`
+
+Agent 已委派子任务，等待子 Agent 返回结果。
+
+### `waiting_for_mail`
+
+Agent 等待特定 E-mail（如人类回复、审查结果）。
+
+### `waiting_for_lock`
+
+Agent 等待获取共享资源的互斥锁。
+
+### `waiting_for_human`
+
+Agent 需要人类决策才能继续。
 
 ### `blocked`
 
-无法继续执行，需要上级或人类介入。
+无法继续执行，需要上级或系统介入。
 
 ### `paused`
 
-由于系统暂停、Agent 暂停或策略原因暂时停止执行。
+系统暂停状态。不推进时间，不执行 Agent 推理。
 
 ### `failed`
 
-本时间步执行失败，但系统可以根据策略重试或恢复。
+Agent 执行失败，且不可恢复。系统可以根据策略重试或终止。
+
+## 9.2 唤醒条件
+
+每个 Agent 维护一个 `WakeCondition`：
+
+```text
+event_types: 触发唤醒的事件类型集合
+wake_at_tick: 最早唤醒时间
+task_ids: 关联的任务 ID
+resources: 关联的共享资源
+```
+
+Agent 只在满足唤醒条件时被调度。`IDLE` 和各种 `WAITING_*` 状态不会触发 LLM 调用，显著降低计算成本。
+
+## 9.3 调度策略
+
+系统维护一个 ready queue：
+
+```text
+每个 tick 只调度满足以下条件的 Agent：
+- agent.status ∈ {ready, waiting_for_* 中事件已到达的状态}
+- wake_at_tick <= current_tick
+- 有新的可见事件
+```
+
+对于 `IDLE` Agent：不创建 activation，不调用 LLM，只推进模拟时间。
 
 ---
 
