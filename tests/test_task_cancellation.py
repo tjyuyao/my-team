@@ -8,18 +8,13 @@ Covers review gaps:
 import pytest
 
 from my_team.agent_runtime import (
-    AgentSnapshot,
     ROOT_TOOLS,
-    MANAGER_TOOLS,
+    RootAgent,
     ToolPermissionError,
     ToolRegistry,
-    BaseAgent,
-    RootAgent,
 )
-from my_team.agent_tree import AgentTree
-from my_team.models.task import TaskPriority, TaskStatus
+from my_team.models.task import TaskStatus
 from my_team.task_tree import TaskTree
-
 
 # ---------------------------------------------------------------------------
 # Task Cancellation Cascade

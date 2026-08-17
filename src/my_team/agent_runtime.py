@@ -16,7 +16,6 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # ToolContext — identity binding for every tool call
 # ---------------------------------------------------------------------------
@@ -219,7 +218,9 @@ def _proxy(d: dict[str, Any]) -> MappingProxyType[str, Any]:
     return MappingProxyType(d)
 
 
-def _proxy_nested(d: dict[str, dict[str, Any]]) -> MappingProxyType[str, MappingProxyType[str, Any]]:
+def _proxy_nested(
+    d: dict[str, dict[str, Any]],
+) -> MappingProxyType[str, MappingProxyType[str, Any]]:
     """Wrap a nested dict in MappingProxyType for deep immutability."""
     return MappingProxyType({k: MappingProxyType(v) for k, v in d.items()})
 
@@ -397,11 +398,15 @@ class BaseAgent:
 
     def observe(self, snapshot: AgentSnapshot) -> AgentObservation:
         """Default observe: extract relevant data from snapshot."""
+        # Convert MappingProxyType back to plain dicts for AgentObservation
+        task_states = {
+            k: dict(v) for k, v in snapshot.task_states.items()
+        }
         return AgentObservation(
             agent_id=self._agent_id,
             tick=snapshot.tick,
             emails=list(snapshot.emails),
-            task_states=dict(snapshot.task_states),
+            task_states=task_states,
             shared_kb_snapshot=dict(snapshot.shared_kb_snapshot),
             lock_states=dict(snapshot.lock_states),
             private_workspace_path=snapshot.private_workspace_path,

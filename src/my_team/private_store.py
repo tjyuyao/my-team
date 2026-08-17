@@ -9,10 +9,8 @@ Per SPEC §5:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # Default subdirectories for each agent's private space
 PRIVATE_SUBDIRS = ["inbox", "outbox", "workspace", "memory", "task_state", "logs"]

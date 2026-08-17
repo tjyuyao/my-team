@@ -9,10 +9,7 @@ Per SPEC §15.1, §15.2, §18.10:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
-
-from pydantic import BaseModel, Field
 
 from my_team.agent_runtime import ToolContext, ToolPermissionError, ToolRegistry
 

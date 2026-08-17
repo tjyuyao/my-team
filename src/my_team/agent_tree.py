@@ -232,6 +232,7 @@ class AgentTree:
     @property
     def root(self) -> AgentConfig:
         """Root agent configuration."""
+        assert self._root_id is not None, "No root agent set"
         return self._agents[self._root_id]
 
     def get(self, agent_id: str) -> AgentConfig:
@@ -287,22 +288,21 @@ class AgentTree:
         """Check if ancestor_id is an ancestor of descendant_id."""
         self.get(ancestor_id)
         self.get(descendant_id)
-        current = descendant_id
+        current: str | None = descendant_id
         while current is not None:
             if current == ancestor_id:
                 return True
-            par = self._parent_map.get(current)
-            current = par
+            current = self._parent_map.get(current)
         return False
 
     def depth(self, agent_id: str) -> int:
         """Depth from root (root = 0)."""
         self.get(agent_id)
         d = 0
-        current = agent_id
-        while self._parent_map.get(current) is not None:
+        current: str | None = agent_id
+        while current is not None and self._parent_map.get(current) is not None:
             d += 1
-            current = self._parent_map[current]
+            current = self._parent_map.get(current)
         return d
 
     def can_delegate_to(self, delegator_id: str, target_id: str) -> bool:

@@ -8,13 +8,14 @@ import json
 import pytest
 
 from my_team.agent_runtime import (
+    MANAGER_TOOLS,
+    ROOT_TOOLS,
+    WORKER_TOOLS,
+    ActionContext,
+    ActionPlan,
     AgentObservation,
     AgentRuntime,
     AgentSnapshot,
-    ActionResult,
-    ActionContext,
-    ActionPlan,
-    AgentAction,
     BaseAgent,
     ManagerAgent,
     RootAgent,
@@ -23,13 +24,9 @@ from my_team.agent_runtime import (
     ToolPermissionError,
     ToolRegistry,
     ToolResult,
-    MANAGER_TOOLS,
-    ROOT_TOOLS,
-    WORKER_TOOLS,
 )
 from my_team.agent_tree import AgentTree
-from my_team.simulation import Simulation, SimulationConfig
-
+from my_team.simulation import Simulation
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -142,11 +139,11 @@ class TestRootAgentRestrictions:
         assert root.tool_context.allowed_tools == ROOT_TOOLS
 
     def test_root_cannot_send_email(self, tool_registry):
-        root = RootAgent(agent_id="agent.root", tool_registry=tool_registry)
+        RootAgent(agent_id="agent.root", tool_registry=tool_registry)
         assert not tool_registry.can_use("agent.root", "send_email")
 
     def test_root_can_read_write_ls_delegate(self, tool_registry):
-        root = RootAgent(agent_id="agent.root", tool_registry=tool_registry)
+        RootAgent(agent_id="agent.root", tool_registry=tool_registry)
         for tool in ["read", "write", "ls", "delegate"]:
             assert tool_registry.can_use("agent.root", tool)
 
@@ -180,7 +177,6 @@ class TestAgentSnapshot:
 
     def test_snapshot_deeply_immutable(self):
         """Nested dicts cannot be mutated through the snapshot."""
-        from types import MappingProxyType
         snap = AgentSnapshot(
             tick=1,
             task_states={"t1": {"status": "assigned"}},

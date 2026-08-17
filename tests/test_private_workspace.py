@@ -12,7 +12,6 @@ from my_team.private_store import (
     PrivateStoreConfig,
 )
 
-
 # ---------------------------------------------------------------------------
 # PrivateStore
 # ---------------------------------------------------------------------------
@@ -155,7 +154,8 @@ class TestFileOpsWrite:
         result = ops.write("agent.test", "workspace/output.md", "content here")
 
         assert result.success
-        assert (store.agent_home("agent.test") / "workspace" / "output.md").read_text() == "content here"
+        output_path = store.agent_home("agent.test") / "workspace" / "output.md"
+        assert output_path.read_text() == "content here"
 
     def test_write_creates_parent_dirs(self, tmp_path):
         store = PrivateStore(PrivateStoreConfig(base_path=str(tmp_path)))

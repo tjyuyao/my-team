@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from my_team.models.task import Task, TaskArtifact, TaskPriority, TaskStatus
+from my_team.models.task import Task, TaskPriority, TaskStatus
 
 
 class TaskTreeError(Exception):
@@ -259,7 +259,7 @@ class TaskTree:
         """Check if ancestor_id is an ancestor of descendant_id."""
         if ancestor_id not in self._tasks or descendant_id not in self._tasks:
             return False
-        current = descendant_id
+        current: str | None = descendant_id
         while current is not None:
             if current == ancestor_id:
                 return True

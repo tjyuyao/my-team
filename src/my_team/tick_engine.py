@@ -130,7 +130,7 @@ class AgentAction(BaseModel):
 
 
 # Type alias for phase handlers
-PhaseHandler = Callable[[int, TickSnapshot, dict[str, Any]], dict[str, Any]]
+PhaseHandler = Callable[[int, TickSnapshot | None, dict[str, Any]], dict[str, Any]]
 
 
 class TickEngine:

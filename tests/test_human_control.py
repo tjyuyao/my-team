@@ -7,13 +7,12 @@ import pytest
 
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType, AuditLog
-from my_team.human_control import CommandResult, HumanCommand, HumanControl
+from my_team.human_control import HumanCommand, HumanControl
 from my_team.mailbox import MailSystem
 from my_team.models.email import EmailType
 from my_team.shared_kb import SharedKB
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import SimulationState, TickEngine
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

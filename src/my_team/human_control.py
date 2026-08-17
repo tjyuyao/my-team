@@ -18,9 +18,9 @@ from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType, AuditLog
 from my_team.mailbox import MailSystem
 from my_team.models.email import EmailPriority, EmailType
-from my_team.shared_kb import LockManager, SharedKB
+from my_team.shared_kb import SharedKB
 from my_team.task_tree import TaskTree
-from my_team.tick_engine import SimulationState, TickConfig, TickEngine
+from my_team.tick_engine import SimulationState, TickEngine
 
 
 class HumanCommand(BaseModel):

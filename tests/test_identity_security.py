@@ -6,29 +6,27 @@ Covers review gaps §8.3 (identity), §8.13 (Pydantic model mutability).
 import pytest
 
 from my_team.agent_runtime import (
+    MANAGER_TOOLS,
+    ROOT_TOOLS,
+    WORKER_TOOLS,
     ToolContext,
     ToolPermissionError,
     ToolRegistry,
-    ROOT_TOOLS,
-    MANAGER_TOOLS,
-    WORKER_TOOLS,
 )
+from my_team.file_ops import FileOps
 from my_team.identity import (
     ConfigModificationError,
     IdentityEnforcer,
-    SpoofedSenderError,
     IdentityError,
+    SpoofedSenderError,
 )
-from my_team.mailbox import MailSystem, EmailType
+from my_team.mailbox import EmailType, MailSystem
 from my_team.private_store import PrivateStore, PrivateStoreConfig
-from my_team.file_ops import FileOps, FileOpsAuditLog
 from my_team.shared_kb import (
     PermissionEngine,
     PermissionRule,
     SharedKB,
-    LockManager,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

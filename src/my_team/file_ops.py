@@ -9,7 +9,6 @@ Per SPEC §4.1, §4.2, §4.3:
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -17,7 +16,6 @@ from pydantic import BaseModel, Field
 from my_team.private_store import (
     AccessDeniedError,
     PrivateStore,
-    PrivateStoreConfig,
 )
 
 

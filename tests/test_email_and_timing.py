@@ -6,11 +6,9 @@ Covers review gaps:
 - Timeout checker phase binding (post-Commit, pre-Audit)
 """
 
-import pytest
 
 from my_team.mailbox import MailSystem
 from my_team.models.email import EmailPriority, EmailType
-
 
 # ---------------------------------------------------------------------------
 # Email Deadline Sorting (§13.3)
@@ -147,7 +145,7 @@ class TestEmailDeliveryTiming:
         ms = MailSystem()
         ms.register_agent("agent.a")
 
-        email = ms.create_email(
+        ms.create_email(
             from_agent="agent.b",
             to=["agent.a"],
             subject="Test",

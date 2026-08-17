@@ -9,7 +9,6 @@ from my_team.audit import AuditEventType, AuditLog
 from my_team.models.task import TaskStatus
 from my_team.reliability import (
     DeterministicReplay,
-    FailureRecord,
     FailureType,
     RetryManager,
     RetryPolicy,
@@ -17,7 +16,6 @@ from my_team.reliability import (
 )
 from my_team.shared_kb import LockManager
 from my_team.task_tree import TaskTree
-
 
 # ---------------------------------------------------------------------------
 # RetryManager
@@ -115,7 +113,8 @@ class TestTimeoutChecker:
         task_tree = TaskTree()
         lock_manager = LockManager()
         audit_log = AuditLog()
-        return TimeoutChecker(task_tree, lock_manager, audit_log), task_tree, lock_manager, audit_log
+        checker = TimeoutChecker(task_tree, lock_manager, audit_log)
+        return checker, task_tree, lock_manager, audit_log
 
     def test_check_task_timeouts(self, checker):
         tc, task_tree, _, _ = checker

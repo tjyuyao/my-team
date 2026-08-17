@@ -3,16 +3,12 @@
 Covers review gap §8.4 (atomic commit).
 """
 
-import pytest
 
 from my_team.transaction import (
-    ConflictResolution,
     EffectStatus,
     EffectType,
-    StagedEffect,
     TransactionBuffer,
 )
-
 
 # ---------------------------------------------------------------------------
 # Staging effects
@@ -86,7 +82,7 @@ class TestValidation:
 
     def test_validate_version_fail(self):
         buf = TransactionBuffer()
-        effect = buf.stage(
+        buf.stage(
             EffectType.KB_WRITE, "agent.a", "report.md",
             expected_version=1,
         )
@@ -101,7 +97,7 @@ class TestValidation:
 
     def test_validate_lock_fail(self):
         buf = TransactionBuffer()
-        effect = buf.stage(
+        buf.stage(
             EffectType.KB_WRITE, "agent.a", "report.md",
         )
 
@@ -114,7 +110,7 @@ class TestValidation:
 
     def test_validate_permission_fail(self):
         buf = TransactionBuffer()
-        effect = buf.stage(
+        buf.stage(
             EffectType.KB_WRITE, "agent.a", "report.md",
         )
 
@@ -170,8 +166,8 @@ class TestConflictResolution:
         winners = []
         for _ in range(10):
             buf = TransactionBuffer()
-            e1 = buf.stage(EffectType.KB_WRITE, "agent.z", "report.md")
-            e2 = buf.stage(EffectType.KB_WRITE, "agent.a", "report.md")
+            buf.stage(EffectType.KB_WRITE, "agent.z", "report.md")
+            buf.stage(EffectType.KB_WRITE, "agent.a", "report.md")
             buf.validate()
             resolutions = buf.resolve_conflicts()
             winners.append(resolutions[0].winner)
@@ -207,8 +203,8 @@ class TestCommitRollback:
 
     def test_commit_skips_failed(self):
         buf = TransactionBuffer()
-        e1 = buf.stage(EffectType.KB_WRITE, "agent.a", "report.md", expected_version=1)
-        e2 = buf.stage(EffectType.KB_WRITE, "agent.b", "plan.md")
+        buf.stage(EffectType.KB_WRITE, "agent.a", "report.md", expected_version=1)
+        buf.stage(EffectType.KB_WRITE, "agent.b", "plan.md")
 
         # e1 fails version check
         buf.validate(check_version=lambda r, v: r != "report.md")

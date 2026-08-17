@@ -11,14 +11,12 @@ from my_team.shared_kb import (
     LockManager,
     LockStatus,
     PermissionEngine,
-    PermissionOp,
     PermissionRule,
     SharedKB,
     SharedKBWriteError,
     VersionConflictError,
     VersionControl,
 )
-
 
 # ---------------------------------------------------------------------------
 # Permission Engine
@@ -34,7 +32,11 @@ class TestPermissionEngine:
 
     def test_wildcard_match(self):
         engine = PermissionEngine([
-            PermissionRule(scope="project/research/*", principal="agent.a", allow=["read", "write"]),
+            PermissionRule(
+                scope="project/research/*",
+                principal="agent.a",
+                allow=["read", "write"],
+            ),
         ])
         assert engine.check("agent.a", "project/research/report.md", "read")
         assert engine.check("agent.a", "project/research/data.csv", "write")
@@ -188,7 +190,7 @@ class TestLockManager:
         lock_a = lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=2)
         # A's lease expires at tick 2
         lm.check_expired(current_tick=3)
-        lock_b = lm.acquire("resource/a", "agent.b", current_tick=3)
+        lm.acquire("resource/a", "agent.b", current_tick=3)
         # A tries to release with stale token — should raise
         with pytest.raises(LockTokenError):
             lm.release("resource/a", "agent.a", lock_a.lock_token)
@@ -200,7 +202,7 @@ class TestLockManager:
         from my_team.shared_kb import LockTokenError
 
         lm = LockManager()
-        lock = lm.acquire("resource/a", "agent.a", current_tick=0)
+        lm.acquire("resource/a", "agent.a", current_tick=0)
         with pytest.raises(LockTokenError):
             lm.release("resource/a", "agent.a", "forged_token_12345")
 
@@ -208,7 +210,7 @@ class TestLockManager:
         from my_team.shared_kb import LockTokenError
 
         lm = LockManager()
-        lock = lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=4)
+        lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=4)
         with pytest.raises(LockTokenError):
             lm.renew("resource/a", "agent.a", current_tick=1, lock_token="forged_token_12345")
 

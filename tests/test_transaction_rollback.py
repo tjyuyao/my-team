@@ -3,14 +3,12 @@
 Covers review gap §8.4: transaction boundary clarification.
 """
 
-import pytest
 
 from my_team.transaction import (
+    _EXTERNAL_EFFECT_TYPES,
     EffectStatus,
     EffectType,
-    StagedEffect,
     TransactionBuffer,
-    _EXTERNAL_EFFECT_TYPES,
 )
 
 
@@ -134,7 +132,7 @@ class TestTransactionalEmailFlow:
     def test_email_only_delivered_after_commit(self):
         """Emails should not be 'delivered' until outbox is processed."""
         buf = TransactionBuffer()
-        email_effect = buf.stage(
+        buf.stage(
             EffectType.EMAIL_SEND, "agent.a", "email:report",
             data={"to": "agent.b", "subject": "Report"},
         )

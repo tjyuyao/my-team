@@ -7,7 +7,6 @@ NOTE: These tests verify static path checks. True TOCTOU resistance
 operations (openat, O_NOFOLLOW) and is not yet implemented.
 """
 
-import os
 import tempfile
 from pathlib import Path
 

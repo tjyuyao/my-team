@@ -13,7 +13,6 @@ from typing import Any
 
 from my_team.models.email import Email, EmailPriority, EmailStatus, EmailType
 
-
 # Email ordering priority (lower = higher priority in sort)
 _PRIORITY_ORDER = {
     EmailPriority.URGENT: 0,

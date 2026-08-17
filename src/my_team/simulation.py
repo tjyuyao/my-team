@@ -11,19 +11,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from my_team.agent_runtime import (
+    ActionContext,
+    ActionPlan,
+    ActionResult,
     AgentObservation,
     AgentRuntime,
     AgentSnapshot,
-    ActionResult,
-    ActionContext,
-    ActionPlan,
-    BaseAgent,
     ManagerAgent,
     RootAgent,
     SubAgent,
@@ -39,12 +37,12 @@ from my_team.file_ops import FileOps, FileOpsAuditLog
 from my_team.human_control import HumanControl
 from my_team.mailbox import MailSystem
 from my_team.models.agent import AgentConfig
-from my_team.models.email import Email, EmailType
+from my_team.models.email import Email
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
-from my_team.shared_kb import LockManager, PermissionEngine, PermissionRule, SharedKB
+from my_team.shared_kb import LockManager, PermissionEngine, SharedKB
 from my_team.task_tree import TaskTree
-from my_team.tick_engine import TickEngine, TickConfig, TickPhase, TickResult, TickSnapshot
+from my_team.tick_engine import TickConfig, TickEngine, TickResult
 
 
 class SimulationConfig(BaseModel):
@@ -273,11 +271,11 @@ class Simulation:
         all_results = self._phase_act(tick, plans)
 
         # Phase 6: Commit — atomic state update
-        committed_emails = self._phase_commit(tick, all_results)
+        self._phase_commit(tick, all_results)
 
         # Phase 6.5: Timeout check — post-Commit, pre-Audit
-        expired_tasks = self._timeout_checker.check_task_timeouts(tick)
-        expired_locks = self._timeout_checker.check_lock_timeouts(tick)
+        self._timeout_checker.check_task_timeouts(tick)
+        self._timeout_checker.check_lock_timeouts(tick)
 
         # Phase 7: Audit
         self._phase_audit(tick, delivered, all_results)
@@ -350,15 +348,15 @@ class Simulation:
                 },
             },
             "locks": {
-                l.resource: {
-                    "owner": l.owner_agent_id,
-                    "lease_until": l.lease_until_tick,
+                lock.resource: {
+                    "owner": lock.owner_agent_id,
+                    "lease_until": lock.lease_until_tick,
                 }
-                for l in self._lock_manager.active_locks()
+                for lock in self._lock_manager.active_locks()
             },
             "lock_tokens": {
-                l.resource: l.lock_token
-                for l in self._lock_manager.active_locks()
+                lock.resource: lock.lock_token
+                for lock in self._lock_manager.active_locks()
             },
             "tasks": {
                 t.task_id: {

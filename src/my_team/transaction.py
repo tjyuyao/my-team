@@ -17,9 +17,8 @@ Atomicity guarantees:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
@@ -151,9 +150,9 @@ class TransactionBuffer:
 
     def validate(
         self,
-        check_version: callable | None = None,
-        check_lock: callable | None = None,
-        check_permission: callable | None = None,
+        check_version: Callable[..., bool] | None = None,
+        check_lock: Callable[..., bool] | None = None,
+        check_permission: Callable[..., bool] | None = None,
     ) -> list[StagedEffect]:
         """Validate all staged effects against preconditions.
 
@@ -232,7 +231,7 @@ class TransactionBuffer:
 
             if len(by_agent) == 1:
                 # Same agent — keep all in effect_id order (no conflict)
-                agent_effects = sorted(effects, key=lambda e: e.effect_id)
+                sorted(effects, key=lambda e: e.effect_id)
                 # All stay VALIDATED, no conflict resolution needed
                 continue
 
@@ -256,7 +255,7 @@ class TransactionBuffer:
 
             resolution = ConflictResolution(
                 winner=winner_effects[0].effect_id,
-                losers=[l.effect_id for l in loser_effects],
+                losers=[loser.effect_id for loser in loser_effects],
                 reason=(
                     f"Deterministic resolution: agent {winner_agent} wins "
                     f"({len(loser_effects)} effects failed)"
@@ -353,10 +352,18 @@ class TransactionBuffer:
 
     def summary(self) -> dict[str, Any]:
         """Get a summary of the transaction state."""
+        staged = sum(
+            1 for e in self._effects.values()
+            if e.status == EffectStatus.STAGED
+        )
+        validated = sum(
+            1 for e in self._effects.values()
+            if e.status == EffectStatus.VALIDATED
+        )
         return {
             "total_effects": len(self._effects),
-            "staged": sum(1 for e in self._effects.values() if e.status == EffectStatus.STAGED),
-            "validated": sum(1 for e in self._effects.values() if e.status == EffectStatus.VALIDATED),
+            "staged": staged,
+            "validated": validated,
             "committed": self.committed_count,
             "failed": self.failed_count,
             "conflicts": len(self._conflict_resolutions),

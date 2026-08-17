@@ -3,22 +3,16 @@
 Covers review gap §8.3: complete delegation flow through the Simulation.
 """
 
-import json
 
 import pytest
 
 from my_team.agent_runtime import (
-    AgentObservation,
-    BaseAgent,
+    MANAGER_TOOLS,
+    ROOT_TOOLS,
     ManagerAgent,
     RootAgent,
     SubAgent,
-    ActionPlan,
-    AgentAction,
-    ToolContext,
     ToolRegistry,
-    ROOT_TOOLS,
-    MANAGER_TOOLS,
 )
 from my_team.agent_tree import AgentTree
 from my_team.delegation import DelegationProtocol
@@ -26,10 +20,9 @@ from my_team.mailbox import MailSystem
 from my_team.models.email import EmailType
 from my_team.models.task import TaskPriority, TaskStatus
 from my_team.private_store import PrivateStore, PrivateStoreConfig
-from my_team.shared_kb import PermissionEngine, PermissionRule, SharedKB, LockManager
+from my_team.shared_kb import LockManager, PermissionEngine, PermissionRule, SharedKB
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import TickEngine
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -79,7 +72,6 @@ def full_system(agent_tree) -> dict:
     mail.register_agent("agent.web_research")
 
     task_tree = TaskTree()
-    audit_log = None  # using simple audit for tests
 
     permissions = PermissionEngine([
         PermissionRule(
@@ -105,7 +97,8 @@ def full_system(agent_tree) -> dict:
     tool_registry = ToolRegistry()
     tool_registry.register_agent("agent.root", ROOT_TOOLS)
     tool_registry.register_agent("agent.research", MANAGER_TOOLS)
-    tool_registry.register_agent("agent.web_research", frozenset({"read", "write", "ls", "send_email"}))
+    web_tools = frozenset({"read", "write", "ls", "send_email"})
+    tool_registry.register_agent("agent.web_research", web_tools)
 
     delegation = DelegationProtocol(agent_tree, task_tree, mail)
     tick_engine = TickEngine()
@@ -238,7 +231,7 @@ class TestE2EDelegation:
         # Step 10: Research aggregates and submits to Root
         tick = 7
         root_task.transition_to(TaskStatus.IN_PROGRESS, tick=6)
-        final_result = sys["delegation"].submit_result(
+        sys["delegation"].submit_result(
             agent_id="agent.research",
             task_id=root_task.task_id,
             summary="Market analysis complete. Recommended: Markets A and B.",

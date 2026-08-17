@@ -8,15 +8,13 @@ import pytest
 from my_team.agent_tree import AgentTree
 from my_team.delegation import (
     DelegationDeadlineError,
-    DelegationDepthError,
     DelegationProtocol,
     NotDirectChildError,
 )
-from my_team.mailbox import MailSystem, Mailbox
+from my_team.mailbox import Mailbox, MailSystem
 from my_team.models.email import Email, EmailPriority, EmailStatus, EmailType
-from my_team.models.task import Task, TaskPriority, TaskStatus
-from my_team.task_tree import InvalidTransitionError, TaskTree, TaskNotFoundError
-
+from my_team.models.task import TaskStatus
+from my_team.task_tree import InvalidTransitionError, TaskNotFoundError, TaskTree
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -219,7 +217,7 @@ class TestMailSystem:
         ms.register_agent("agent.a")
         ms.register_agent("agent.b")
 
-        email = ms.create_email(
+        ms.create_email(
             from_agent="agent.a",
             to=["agent.b"],
             subject="Test",

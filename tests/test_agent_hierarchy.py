@@ -4,15 +4,12 @@ Per KANBAN task: 2026-08-17-agent-hierarchy
 """
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 
 from my_team.agent_tree import (
     AgentNotFoundError,
     AgentTree,
-    AgentTreeError,
     ChildNotDeclaredError,
     CycleDetectedError,
     DuplicateAgentIdError,
@@ -21,7 +18,6 @@ from my_team.agent_tree import (
     ParentChildMismatchError,
 )
 from my_team.models.agent import AgentConfig
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

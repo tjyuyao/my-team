@@ -11,14 +11,12 @@ Per SPEC §14:
 from __future__ import annotations
 
 import copy
-import math
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from my_team.audit import AuditEventType, AuditLog
-from my_team.models.task import TaskStatus
 from my_team.shared_kb import LockManager
 from my_team.task_tree import TaskTree
 

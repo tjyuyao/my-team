@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import uuid
 from enum import Enum
-from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Permission model (§6.2)
@@ -358,10 +356,10 @@ class LockManager:
         return None
 
     def active_locks(self) -> list[LockInfo]:
-        return [l for l in self._locks.values() if l.status == LockStatus.ACTIVE]
+        return [lock for lock in self._locks.values() if lock.status == LockStatus.ACTIVE]
 
     def __len__(self) -> int:
-        return len([l for l in self._locks.values() if l.status == LockStatus.ACTIVE])
+        return len([lock for lock in self._locks.values() if lock.status == LockStatus.ACTIVE])
 
 
 # ---------------------------------------------------------------------------

@@ -11,9 +11,7 @@ from my_team.tick_engine import (
     TickEngine,
     TickPhase,
     TickResult,
-    TickSnapshot,
 )
-
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -266,7 +264,7 @@ class TestHistory:
 
     def test_history_contains_all_ticks(self):
         engine = TickEngine()
-        results = engine.advance(3)
+        engine.advance(3)
         history = engine.history
         assert len(history) == 3
         assert [h.tick for h in history] == [0, 1, 2]

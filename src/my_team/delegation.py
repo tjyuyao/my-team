@@ -13,7 +13,7 @@ from typing import Any
 
 from my_team.agent_tree import AgentTree
 from my_team.mailbox import MailSystem
-from my_team.models.email import Email, EmailPriority, EmailType
+from my_team.models.email import Email, EmailType
 from my_team.models.task import Task, TaskPriority, TaskStatus
 from my_team.task_tree import TaskTree
 
@@ -166,6 +166,16 @@ class DelegationProtocol:
         if instructions:
             email_body += f"\nInstructions:\n{instructions}\n"
 
+        # Convert TaskPriority to EmailPriority
+        from my_team.models.email import EmailPriority
+        priority_map = {
+            TaskPriority.LOW: EmailPriority.LOW,
+            TaskPriority.NORMAL: EmailPriority.NORMAL,
+            TaskPriority.HIGH: EmailPriority.HIGH,
+            TaskPriority.URGENT: EmailPriority.URGENT,
+        }
+        email_priority = priority_map.get(priority, EmailPriority.NORMAL)
+
         email = self._mail.create_email(
             from_agent=delegator_id,
             to=[target_id],
@@ -175,7 +185,7 @@ class DelegationProtocol:
             task_id=sub_task_id,
             tick=tick,
             deliver_at_tick=tick + 1,
-            priority=priority,
+            priority=email_priority,
             requires_reply=True,
         )
 
@@ -194,7 +204,7 @@ class DelegationProtocol:
         """
         task = self._task_tree.update_status(task_id, TaskStatus.ACCEPTED, tick)
 
-        body = f"Task accepted."
+        body = "Task accepted."
         if estimated_completion_tick is not None:
             body += f" Estimated completion: tick {estimated_completion_tick}"
 
