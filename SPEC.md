@@ -34,6 +34,9 @@
   日历、审批策略、知识库种子、KPI 视图），不修改内核。
 - **事务可靠**：每个 tick 的副作用原子提交；失败可回滚；外部操作
   幂等、可重试、可审计。
+- **服务对象**：小规模个体户与一人公司。用户无需软件开发背景，
+  通过安装 Skill 包与场景包即可获得一支可审计、可暂停、可插手的
+  AI 团队；开发者可通过 MCP 与 ToolPlugin 接入外部能力。
 
 ### 0.3 非目标
 
@@ -338,6 +341,34 @@ Integration:
 - 平台适配器 = Integration；内核只认 Integration 契约。
 - 凭证通过 CredentialStore 引用，不进 Journal/审计。
 
+### 6.5 MCP Provider Adapter
+
+MCP（Model Context Protocol）与 Skill 是不同层次的能力供给：
+
+- **MCP** 解决"工具从哪来"：把外部 MCP server 暴露的 Tool 资源
+  接入内核，面向开发者/集成者。
+- **Skill** 解决"一件事怎么做"：把 SOP、提示词、工具集、知识与
+  审批策略打包，面向非专业用户（见 §11.4）。
+
+MCP 接入规则：
+
+```text
+MCP server（stdio / HTTP / SSE）
+  → MCP Adapter 枚举 tools/resources
+  → 自动生成 ToolManifest（name/version/input_schema/output_schema
+     从 MCP tool schema 映射）
+  → 执行器注册为 UNTRUSTED_OUT_OF_PROCESS（本地 stdio/子进程）
+     或 EXTERNAL_IRREVERSIBLE（远程 HTTP）
+  → 调用经 ToolRequest/ToolResultContract 与 pending op 路径
+```
+
+- identity 字段（agent_id/task_id/state_epoch/manifest_hash）仍由
+  内核注入，MCP server 不得自指。
+- MCP 工具默认 deny-by-default：必须显式加入 OperationPolicy
+  allowlist 后才能被 Agent 使用。
+- 适配器负责限流、超时、重试与结果契约转换；MCP 的
+  `resources` 可映射为 SharedKB 或 AssetStore 的只读引用。
+
 ---
 
 ## 7. 数据与存储
@@ -493,6 +524,30 @@ scenario/
 | 自媒体 | content_plan/asset_*/publish_*/metric_* | content_asset/publish_job | 评论/数据回传 | 老板/终审 |
 | 知识星球 | kb_search/content_calendar/member_*/post_* | member/subscription/post | 帖子/评论/会员事件 | 星主 |
 
+### 11.4 Skill Package（面向非专业用户的能力封装）
+
+Skill 是一组"提示词 + SOP + 工具集 + 知识 + 审批策略"的可装卸单元，
+回答"Agent 如何做好一类具体工作"。面向不会写代码的个体户：
+
+```text
+skill/
+├── SKILL.md            # 人读说明书：做什么、何时触发、SOP、边界
+├── prompts/            # 角色/任务提示词模板
+├── tools/              # 可选：本技能需要的受限工具（manifest+handler）
+├── kb_seed/            # 可选：术语表、话术、规则、模板
+├── scripts/            # 可选：运行于 L0/L1 的脚本
+└── approval.json       # 哪些动作必须人工审批
+```
+
+- Skill 安装/卸载不修改内核；安装即校验。
+- ContextCompiler 按触发条件注入：任务标题、邮件正文或 KB 关键词
+  命中 Skill 的触发条件时，将该 Skill 的 SOP、模板与相关知识注入
+  对应 Worker 的 briefing。
+- Skill 与 Tool 的分工：Tool 是一个可执行能力；Skill 是"用这些
+  能力做好一类工作"的业务封装。
+- Skill 与场景包的关系：场景包 = 组织 + 多个 Skill + 记录模型 +
+  外部适配器 + 日历 + KPI。
+
 ---
 
 ## 12. 安全与不变量
@@ -568,10 +623,11 @@ GET  /audit?tick=...          审计查询
 - **v0.10 — 边界能力**：Ingress/Egress、RecordStore、AssetStore、
   ToolPlugin API、KB 读取与附件、Calendar/WorkerPool、
   ApprovalGate、Human Worker。
-- **v0.11 — 五场景包**：软件公司、小说工作室、电商、自媒体、
-  知识星球各一个可运行 demo。
+- **v0.11 — 五场景包与扩展协议**：软件公司、小说工作室、电商、
+  自媒体、知识星球各一个可运行 demo；MCP Provider Adapter；
+  Skill Package 系统与首批技能包。
 - **v1.0 — 一人公司可用**：成本/预算、审计回放、确定性重放、
-  五场景端到端验收。
+  五场景端到端验收；README 面向个体户的安装/托管路径。
 
 ---
 
