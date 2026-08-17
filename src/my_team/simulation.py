@@ -1005,7 +1005,11 @@ class Simulation:
                             eligible_tick=tick + 1,
                             deadline_tick=tick + intent.timeout_ticks,
                             task_id=intent.task_id,
-                            metadata={"request_id": intent.request_id},
+                            metadata={
+                                "request_id": intent.request_id,
+                                "tool_name": intent.tool_name,
+                                "arguments": intent.arguments,
+                            },
                         )
                         if runtime_state:
                             runtime_state.continuation.advance_to_waiting_tool(
