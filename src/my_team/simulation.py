@@ -1664,6 +1664,46 @@ class Simulation:
 
             self._pending_ops.remove(op.request_id)
 
+        # Failed operations (v0.8.0 P2-9 — executor crash / worker
+        # death): wake the waiting agent with a structured error so it
+        # can retry / fail / escalate. FAILED is terminal: the op is
+        # removed after the wake.
+        failed = [
+            op for op in self._pending_ops._operations.values()
+            if op.status == OpStatus.FAILED
+        ]
+        for op in failed:
+            self._audit_log.record(
+                AuditEventType.TOOL_RESULT,
+                agent_id=op.agent_id,
+                tick=tick,
+                details={
+                    "request_id": op.request_id,
+                    "op_type": op.op_type.value,
+                    "status": "failed",
+                    "error": op.error,
+                    "state_epoch": op.state_epoch,
+                },
+                success=False,
+                error=op.error or "operation failed",
+            )
+            runtime_state = self._agent_runtime_states.get(op.agent_id)
+            if (
+                runtime_state is not None
+                and runtime_state.continuation.pending_request_id == op.request_id
+            ):
+                failed_result: dict[str, Any] = {
+                    "error": op.error or f"Operation failed ({op.request_id})",
+                    "failed": True,
+                    "request_id": op.request_id,
+                }
+                if op.op_type == OpType.LLM_REQUEST:
+                    runtime_state.receive_llm_result(failed_result, tick)
+                elif op.op_type == OpType.TOOL_REQUEST:
+                    runtime_state.receive_tool_result(failed_result, tick)
+                self._enqueue_result_wake(op, tick, result=failed_result)
+            self._pending_ops.remove(op.request_id)
+
         # Collect completed operations eligible for this tick
         completed = self._pending_ops.collect_completed(tick)
         for op in completed:
