@@ -353,7 +353,7 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
                 path=payload.get("path", ""),
                 content=payload.get("content", ""),
             ))
-        elif action.action_type in {"read", "ls"}:
+        elif action.action_type in {"read", "ls", "kb_write", "kb_create"}:
             intents.append(SubmitToolRequest(
                 agent_id=plan.agent_id,
                 task_id=payload.get("task_id", ""),

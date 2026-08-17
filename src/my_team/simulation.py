@@ -378,6 +378,35 @@ class Simulation:
                 tick=context.tick,
             )
 
+        def handle_kb_write(
+            context: ToolContext,
+            path: str = "",
+            content: str = "",
+            expected_version: int = 0,
+            **_kw: Any,
+        ) -> Any:
+            """Stage a shared KB write as a KB_WRITE effect.
+
+            The actual write is applied in _phase_commit via
+            SharedKB._apply_committed() — after permission, lock, and
+            version validation.
+            """
+            self._transaction_buffer.stage(
+                effect_type=EffectType.KB_WRITE,
+                agent_id=context.agent_id,
+                resource=path,
+                data={
+                    "content": content,
+                    "expected_version": expected_version,
+                },
+                expected_version=expected_version,
+            )
+            return ToolResult(
+                success=True, data={"staged": True},
+                agent_id=context.agent_id, tool_name="kb_write",
+                tick=context.tick,
+            )
+
         def handle_send_email(
             context: ToolContext,
             to: list[str] | None = None,
@@ -449,6 +478,7 @@ class Simulation:
         self._tool_registry.register_handler("read", handle_read)
         self._tool_registry.register_handler("ls", handle_ls)
         self._tool_registry.register_handler("write", handle_write)
+        self._tool_registry.register_handler("kb_write", handle_kb_write)
         self._tool_registry.register_handler("send_email", handle_send_email)
         self._tool_registry.register_handler("delegate", handle_delegate)
 
@@ -971,7 +1001,7 @@ class Simulation:
 
                 # SubmitToolRequest → local tools execute, remote register
                 if isinstance(intent, SubmitToolRequest):
-                    if intent.tool_name in {"read", "ls"}:
+                    if intent.tool_name in {"read", "ls", "kb_write", "kb_create"}:
                         # Local tools execute synchronously
                         runtime = self._runtimes.get(agent_id)
                         if runtime:
@@ -1399,6 +1429,34 @@ class Simulation:
                         task.metadata["summary"] = data["summary"]
                     if data.get("artifacts"):
                         task.metadata["artifacts"] = data["artifacts"]
+
+            elif effect.effect_type in {
+                EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
+            }:
+                # Apply shared KB write via the internal commit path
+                # (permission/lock/version already validated in Phase 6-8)
+                data = effect.data
+                path = effect.resource
+                if effect.effect_type == EffectType.KB_WRITE:
+                    self._shared_kb._apply_committed(
+                        path=path,
+                        agent_id=effect.agent_id,
+                        content=data.get("content", ""),
+                        expected_version=data.get("expected_version", 0),
+                        tick=tick,
+                    )
+                elif effect.effect_type == EffectType.KB_CREATE:
+                    self._shared_kb.create(
+                        path=path,
+                        agent_id=effect.agent_id,
+                        content=data.get("content", ""),
+                        tick=tick,
+                    )
+                elif effect.effect_type == EffectType.KB_DELETE:
+                    self._shared_kb.delete(
+                        path=path,
+                        agent_id=effect.agent_id,
+                    )
 
         # Record audit for committed effects
         for effect in committed:

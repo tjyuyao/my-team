@@ -266,8 +266,13 @@ class IdentityEnforcer:
         expected_version: int,
         tick: int = 0,
     ) -> Any:
-        """Wrap shared KB write to enforce identity."""
-        return shared_kb.write(
+        """Wrap shared KB write to enforce identity.
+
+        NOTE: This applies a committed write directly. In the
+        transactional pipeline, agents should stage KB_WRITE effects
+        instead; this wrapper is retained for direct/legacy paths.
+        """
+        return shared_kb._apply_committed(
             path=path,
             agent_id=context.agent_id,
             content=content,

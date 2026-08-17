@@ -259,7 +259,7 @@ class TestSharedKB:
     def test_write_requires_lock(self, kb):
         kb.create("project/research/data.md", agent_id="agent.research", tick=0)
         with pytest.raises(SharedKBWriteError, match="Must hold lock"):
-            kb.write(
+            kb._apply_committed(
                 "project/research/data.md",
                 agent_id="agent.research",
                 content="updated",
@@ -279,7 +279,7 @@ class TestSharedKB:
         assert resource.version == 1
 
         # Write with correct version
-        updated = kb.write(
+        updated = kb._apply_committed(
             "project/research/data.md",
             agent_id="agent.research",
             content="updated data",
@@ -298,7 +298,7 @@ class TestSharedKB:
 
         # Write with wrong version
         with pytest.raises(VersionConflictError):
-            kb.write(
+            kb._apply_committed(
                 "project/research/data.md",
                 agent_id="agent.research",
                 content="conflict",

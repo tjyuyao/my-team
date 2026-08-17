@@ -399,9 +399,12 @@ class SharedKB:
         lock_manager: LockManager | None = None,
         version_control: VersionControl | None = None,
     ) -> None:
-        self._permissions = permissions or PermissionEngine()
-        self._locks = lock_manager or LockManager()
-        self._versions = version_control or VersionControl()
+        # NOTE: explicit None checks — LockManager defines __len__,
+        # so `lock_manager or LockManager()` would replace a valid
+        # empty lock manager with a fresh instance.
+        self._permissions = permissions if permissions is not None else PermissionEngine()
+        self._locks = lock_manager if lock_manager is not None else LockManager()
+        self._versions = version_control if version_control is not None else VersionControl()
         self._resources: dict[str, SharedKBResource] = {}
 
     @property
@@ -457,7 +460,7 @@ class SharedKB:
 
         return resource
 
-    def write(
+    def _apply_committed(
         self,
         path: str,
         agent_id: str,
@@ -465,7 +468,7 @@ class SharedKB:
         expected_version: int,
         tick: int = 0,
     ) -> SharedKBResource:
-        """Write to a resource (permission: 'write', lock required, version check).
+        """Apply a committed KB write (INTERNAL — commit pipeline only).
 
         Full commit model per SPEC §6.3:
         1. Permission check
@@ -473,12 +476,11 @@ class SharedKB:
         3. Version check
         4. Commit
 
-        NOTE: This is a direct-write path. For proper transactional
-        isolation, writes should go through TransactionBuffer as
-        StagedEffect(KB_WRITE) and be committed atomically. The
-        direct path is used for simplicity in the current implementation.
-        A future refactor should enforce a single write entry point
-        via TransactionBuffer.
+        NOTE: This is an internal method called ONLY by the commit
+        pipeline (TransactionBuffer application). Agents must not call
+        this directly — they stage KB_WRITE effects via
+        TransactionBuffer.stage() and the system validates + applies
+        them atomically.
         """
         # 1. Permission check
         if not self._permissions.check(agent_id, path, PermissionOp.WRITE):
