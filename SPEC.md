@@ -957,6 +957,135 @@ max_rounds = 3  # 最多 3 轮 LLM → Tool
 }
 ```
 
+## 8.6 核心概念分离（v0.6.0 架构重构）
+
+当前设计中，Tick、Activation 和 ReAct Turn 被混为一谈。正确的分离是：
+
+```text
+Simulation Tick       系统内核推进的最小状态提交单位
+Agent Activation      Agent 被唤醒并推进一次内部状态
+LLM Invocation        一次外部模型请求
+Tool Invocation       一次工具请求
+ReAct Turn            一次"观察 → 推理 → 工具动作"的逻辑回合
+Task                  跨多个 ReAct Turn 的长期工作
+```
+
+正确的关系：
+
+```text
+一个 Task
+  包含多个 ReAct Turn
+
+一个 ReAct Turn
+  跨越多个 Simulation Tick
+
+一个 Simulation Tick
+  只推进有限的内核事件或提交有限的状态变化
+```
+
+**核心原则：不要让 ReAct 回合驱动 Tick；让 Tick 驱动可恢复的 ReAct continuation。**
+
+### Tick 语义
+
+每个 Tick 是一次有限的系统内核推进：
+
+```text
+Phase 1: Ingest     — 收集已完成的外部事件（LLM、工具、人类）
+Phase 2: Freeze     — 生成当前全局状态快照
+Phase 3: Schedule   — 根据 WakeEvent 选择有限 Agent
+Phase 4: Resume     — 恢复 Agent continuation，读取新事件
+Phase 5: Decide     — 只允许有限、非阻塞的决策动作
+Phase 6: Validate   — 验证 Intent 或 ExternalRequest
+Phase 7: Commit     — 提交状态变化和请求登记
+Phase 8: Publish    — 发布下一 Tick 可见的事件
+Phase 9: Audit      — 记录所有变化
+```
+
+**关键规则：Phase 5 不允许同步等待 LLM 或外部工具。**
+
+它只能：
+- 读取已经存在的结果
+- 生成纯内存决策
+- 登记一个外部请求（Intent）
+- 产生有限的状态 effect
+- 立即结束
+
+### Intent 模型
+
+`Intent` 是 Agent 在当前 activation 中、基于当前可见状态生成的有限动作意图。它不是完整的 ReAct 轨迹，而是当前 continuation 的下一步推进。
+
+```text
+Intent 类型：
+  Noop                    — 无操作
+  SubmitLLMRequest        — 提交 LLM 请求（异步）
+  SubmitToolRequest       — 提交工具请求（异步）
+  SendEmailIntent         — 发送邮件
+  DelegateIntent          — 委派任务
+  WritePrivateFileIntent  — 写入私人文件
+  WaitForEventIntent      — 显式等待事件
+  CompleteTask            — 完成任务
+  FailTask                — 失败任务
+```
+
+### Agent Continuation
+
+每个 Agent 维护一个 `AgentContinuation`，记录其 ReAct 循环的可恢复状态：
+
+```text
+continuation = {
+  agent_id: "agent.research",
+  task_id: "task.market-entry.research",
+  activation_id: "activation.018",
+  phase: "waiting_for_tool",
+  pending_request_id: "tool.req.004",
+  context_version: 12,
+  react_turn: 5,
+  total_llm_calls: 3,
+  total_tool_calls: 2,
+}
+```
+
+Agent 的生命周期变成：
+
+```text
+READY
+→ PROCESSING
+→ WAITING_FOR_LLM（LLM 请求异步提交）
+→ READY（LLM 结果到达）
+→ PROCESSING
+→ WAITING_FOR_TOOL（工具请求异步提交）
+→ READY（工具结果到达）
+→ PROCESSING
+→ WAITING_FOR_CHILD（等待子任务）
+→ ...
+```
+
+### Pending Operation Registry
+
+所有外部操作（LLM、工具、人类决策）通过统一的 `PendingOperationRegistry` 跟踪：
+
+```text
+SUBMITTED → PENDING → COMPLETED / FAILED / CANCELLED / TIMED_OUT
+```
+
+每个操作有：
+- `request_id`：唯一标识，用于关联
+- `eligible_tick`：结果对模拟可见的最早 tick
+- `deadline_tick`：超时 tick
+- `status`：当前状态
+
+### 暂停语义
+
+推荐默认暂停语义：
+
+```text
+pause = 在下一个 Commit boundary 停止状态转换
+  → 不再调度新的 Agent activation
+  → 不再提交新的状态变化
+  → 不再推进 simulation tick
+  → 已发出的外部请求继续运行，结果进入隔离区
+```
+
 ---
 
 # 9. Agent 生命周期
