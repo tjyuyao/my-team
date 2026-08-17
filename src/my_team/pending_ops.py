@@ -215,6 +215,14 @@ class PendingOperationRegistry:
         """Get an operation by its request ID."""
         return self._operations.get(request_id)
 
+    def remove(self, request_id: str) -> PendingOperation | None:
+        """Remove a single operation from the registry.
+
+        Called after the simulation has consumed a completed result.
+        Returns the removed operation, or None if not found.
+        """
+        return self._operations.pop(request_id, None)
+
     def remove_completed(self) -> int:
         """Remove all completed/failed/cancelled/timed_out operations.
 

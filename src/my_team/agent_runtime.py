@@ -21,7 +21,9 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from my_team.models.intent import (
+    CompleteTaskIntent,
     DelegateIntent,
+    FailTaskIntent,
     Intent,
     SendEmailIntent,
     SubmitToolRequest,
@@ -357,6 +359,20 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
                 task_id=payload.get("task_id", ""),
                 tool_name=action.tool_name or action.action_type,
                 arguments=payload,
+            ))
+        elif action.action_type == "complete_task":
+            intents.append(CompleteTaskIntent(
+                agent_id=plan.agent_id,
+                task_id=payload.get("task_id", ""),
+                summary=payload.get("summary", ""),
+                artifacts=payload.get("artifacts", []),
+            ))
+        elif action.action_type == "fail_task":
+            intents.append(FailTaskIntent(
+                agent_id=plan.agent_id,
+                task_id=payload.get("task_id", ""),
+                reason=payload.get("reason", ""),
+                retryable=payload.get("retryable", False),
             ))
     return intents
 

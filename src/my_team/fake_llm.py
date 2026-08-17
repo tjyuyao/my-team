@@ -49,6 +49,19 @@ class FakeLLMProvider:
         """Register a deterministic response script for an agent."""
         self._responses[agent_id] = responses
 
+    def replace_script(
+        self,
+        agent_id: str,
+        responses: list[dict[str, Any]],
+    ) -> None:
+        """Replace an agent's remaining script and reset its call counter.
+
+        Used when the test needs to inject dynamic values (e.g. a
+        task_id generated at runtime) into a later response.
+        """
+        self._responses[agent_id] = responses
+        self._call_counters[agent_id] = 0
+
     def _next_response(self, agent_id: str) -> dict[str, Any]:
         """Get the next scripted response for an agent (deterministic)."""
         idx = self._call_counters.get(agent_id, 0)

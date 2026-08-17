@@ -56,7 +56,9 @@ from my_team.models.agent import AgentConfig
 from my_team.models.continuation import AgentContinuation, ContinuationPhase
 from my_team.models.email import Email
 from my_team.models.intent import (
+    CompleteTaskIntent,
     DelegateIntent,
+    FailTaskIntent,
     Intent,
     SendEmailIntent,
     SubmitLLMRequest,
@@ -672,6 +674,9 @@ class Simulation:
                     },
                 ))
 
+            # Remove the consumed operation so it is not re-delivered
+            self._pending_ops.remove(op.request_id)
+
     def _get_agent_states(self) -> dict[str, AgentState]:
         """Get current state of all agents for scheduler.
 
@@ -1101,6 +1106,42 @@ class Simulation:
                     ))
                     continue
 
+                # CompleteTaskIntent → stage TASK_UPDATE (completed)
+                if isinstance(intent, CompleteTaskIntent):
+                    self._transaction_buffer.stage(
+                        effect_type=EffectType.TASK_UPDATE,
+                        agent_id=agent_id,
+                        resource=intent.task_id,
+                        data={
+                            "status": "completed",
+                            "summary": intent.summary,
+                            "artifacts": intent.artifacts,
+                        },
+                    )
+                    results.append(ActionResult(
+                        action=action, success=True,
+                        result_data={"task_id": intent.task_id, "staged": True},
+                    ))
+                    continue
+
+                # FailTaskIntent → stage TASK_UPDATE (failed)
+                if isinstance(intent, FailTaskIntent):
+                    self._transaction_buffer.stage(
+                        effect_type=EffectType.TASK_UPDATE,
+                        agent_id=agent_id,
+                        resource=intent.task_id,
+                        data={
+                            "status": "failed",
+                            "reason": intent.reason,
+                            "retryable": intent.retryable,
+                        },
+                    )
+                    results.append(ActionResult(
+                        action=action, success=True,
+                        result_data={"task_id": intent.task_id, "staged": True},
+                    ))
+                    continue
+
                 # Unknown intent — record as failure
                 results.append(ActionResult(
                     action=action,
@@ -1339,6 +1380,21 @@ class Simulation:
                     status=TaskStatus.ASSIGNED,
                     tick=tick,
                 )
+
+            elif effect.effect_type == EffectType.TASK_UPDATE:
+                from my_team.models.task import TaskStatus
+                data = effect.data
+                task_id = effect.resource
+                if self._task_tree.exists(task_id):
+                    new_status = TaskStatus(data.get("status", "in_progress"))
+                    self._task_tree.update_status(
+                        task_id, new_status, tick=tick, allow_walk=True,
+                    )
+                    task = self._task_tree.get(task_id)
+                    if data.get("summary"):
+                        task.metadata["summary"] = data["summary"]
+                    if data.get("artifacts"):
+                        task.metadata["artifacts"] = data["artifacts"]
 
         # Record audit for committed effects
         for effect in committed:

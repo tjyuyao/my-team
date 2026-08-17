@@ -202,8 +202,8 @@ class TestAsyncLLMFlow:
     def test_llm_timeout(self) -> None:
         """LLM op that never responds is marked TIMED_OUT."""
         sim = Simulation(agent_tree=_make_tree())
-        # Provider never completes (no script registered)
-        provider = FakeLLMProvider()
+        # Provider with long latency never completes within the test window
+        provider = FakeLLMProvider(latency_ticks=100)
 
         agent = FakeLLMAgent("agent.root")
         agent._tool_registry = sim._tool_registry
@@ -214,11 +214,12 @@ class TestAsyncLLMFlow:
         ops = sim._pending_ops.get_by_agent("agent.root")
         assert len(ops) == 1
 
-        # Simulate many ticks without response — op times out at tick 11
-        provider.advance(sim, current_tick=1)  # no-op, no script
-        sim.run_tick()  # tick 1
+        # Provider won't complete (latency 100 > test window)
+        provider.advance(sim, current_tick=1)
+        ops = sim._pending_ops.get_by_agent("agent.root")
+        assert len(ops) == 1
 
-        # Move time forward past deadline by manually setting it
+        # Mark as PENDING and expire the deadline
         op = sim._pending_ops.get_by_agent("agent.root")[0]
         op.status = OpStatus.PENDING
         op.deadline_tick = 5

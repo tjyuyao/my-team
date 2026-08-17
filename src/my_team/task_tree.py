@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from my_team.models.task import Task, TaskPriority, TaskStatus
+from my_team.models.task import TASK_TRANSITIONS, Task, TaskPriority, TaskStatus
 
 
 class TaskTreeError(Exception):
@@ -133,16 +133,44 @@ class TaskTree:
         task_id: str,
         target_status: TaskStatus,
         tick: int = 0,
+        allow_walk: bool = False,
     ) -> Task:
         """Transition a task to a new status.
 
-        Raises InvalidTransitionError if the transition is not allowed.
+        By default the transition must be directly allowed. When
+        allow_walk=True, walks through intermediate states when the
+        direct transition is not allowed (e.g. assigned → completed
+        goes through accepted → in_progress → submitted → completed).
+        Raises InvalidTransitionError if the target is unreachable.
         """
         task = self.get(task_id)
-        if not task.can_transition_to(target_status):
+        if task.can_transition_to(target_status):
+            task.transition_to(target_status, tick)
+            return task
+
+        if not allow_walk:
             raise InvalidTransitionError(task_id, task.status, target_status)
-        task.transition_to(target_status, tick)
-        return task
+
+        # Walk the transition graph to find a path to the target
+        from collections import deque
+        visited = {task.status}
+        queue: deque[tuple[TaskStatus, list[TaskStatus]]] = deque(
+            [(task.status, [])]
+        )
+        while queue:
+            current, path = queue.popleft()
+            for nxt in TASK_TRANSITIONS.get(current, set()):
+                if nxt in visited:
+                    continue
+                visited.add(nxt)
+                new_path = path + [nxt]
+                if nxt == target_status:
+                    for step in new_path:
+                        task.transition_to(step, tick)
+                    return task
+                queue.append((nxt, new_path))
+
+        raise InvalidTransitionError(task_id, task.status, target_status)
 
     def add_child(self, parent_task_id: str, child_task_id: str) -> None:
         """Register a parent-child relationship."""
