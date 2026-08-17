@@ -474,6 +474,13 @@ class SharedKB:
         2. Lock check
         3. Version check
         4. Commit
+
+        NOTE: This is a direct-write path. For proper transactional
+        isolation, writes should go through TransactionBuffer as
+        StagedEffect(KB_WRITE) and be committed atomically. The
+        direct path is used for simplicity in the current implementation.
+        A future refactor should enforce a single write entry point
+        via TransactionBuffer.
         """
         # 1. Permission check
         if not self._permissions.check(agent_id, path, PermissionOp.WRITE):

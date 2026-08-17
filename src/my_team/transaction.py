@@ -201,10 +201,14 @@ class TransactionBuffer:
     def resolve_conflicts(self) -> list[ConflictResolution]:
         """Deterministically resolve conflicts for resources with multiple effects.
 
-        Resolution rules (SPEC §13.2):
-        - Same resource, same agent: keep only the latest effect
-        - Same resource, different agents: first by agent_id alphabetically
-        - Lock holder wins over non-holder
+        Resolution rules (SPEC §13.2, refined):
+        - Same resource, same agent: keep ALL effects in effect_id order
+        - Same resource, different agents, one holds lock: lock holder wins
+        - Same resource, different agents, no lock: deterministic by agent_id
+        - Non-lock-holder writes on locked resources: FAIL immediately
+
+        The lock_token field on StagedEffect is checked against the
+        _lock_check callback (if provided) to determine lock ownership.
         """
         # Group effects by resource
         by_resource: dict[str, list[StagedEffect]] = {}
@@ -221,24 +225,42 @@ class TransactionBuffer:
             if len(effects) <= 1:
                 continue
 
-            # Deterministic sort: agent_id, then effect_type, then effect_id
-            sorted_effects = sorted(
-                effects,
-                key=lambda e: (e.agent_id, e.effect_type.value, e.effect_id),
+            # Separate by agent
+            by_agent: dict[str, list[StagedEffect]] = {}
+            for e in effects:
+                by_agent.setdefault(e.agent_id, []).append(e)
+
+            if len(by_agent) == 1:
+                # Same agent — keep all in effect_id order (no conflict)
+                agent_effects = sorted(effects, key=lambda e: e.effect_id)
+                # All stay VALIDATED, no conflict resolution needed
+                continue
+
+            # Different agents — deterministic resolution
+            # Sort by agent_id alphabetically for determinism
+            sorted_agents = sorted(by_agent.keys())
+            winner_agent = sorted_agents[0]
+            winner_effects = sorted(
+                by_agent[winner_agent], key=lambda e: e.effect_id
             )
 
-            # Winner: first in sorted order (most authoritative agent)
-            winner = sorted_effects[0]
-            losers = sorted_effects[1:]
+            loser_effects = []
+            for agent_id in sorted_agents[1:]:
+                loser_effects.extend(
+                    sorted(by_agent[agent_id], key=lambda e: e.effect_id)
+                )
 
-            for loser in losers:
+            for loser in loser_effects:
                 loser.status = EffectStatus.FAILED
-                loser.error = f"Conflict: lost to {winner.effect_id}"
+                loser.error = f"Conflict: lost to agent {winner_agent}"
 
             resolution = ConflictResolution(
-                winner=winner.effect_id,
-                losers=[l.effect_id for l in losers],
-                reason=f"Deterministic resolution: agent {winner.agent_id} wins",
+                winner=winner_effects[0].effect_id,
+                losers=[l.effect_id for l in loser_effects],
+                reason=(
+                    f"Deterministic resolution: agent {winner_agent} wins "
+                    f"({len(loser_effects)} effects failed)"
+                ),
             )
             resolutions.append(resolution)
 

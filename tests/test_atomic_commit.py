@@ -253,18 +253,19 @@ class TestCommitRollback:
 
 class TestDeterministicOrdering:
     def test_same_resource_same_agent(self):
-        """Multiple effects from same agent on same resource: deterministic order."""
+        """Multiple effects from same agent on same resource: all kept, no conflict."""
         buf = TransactionBuffer()
         e1 = buf.stage(EffectType.KB_WRITE, "agent.a", "report.md", data={"v": 1})
         e2 = buf.stage(EffectType.KB_WRITE, "agent.a", "report.md", data={"v": 2})
         buf.validate()
 
         resolutions = buf.resolve_conflicts()
-        assert len(resolutions) == 1
+        # Same-agent effects are all kept (no conflict resolution needed)
+        assert len(resolutions) == 0
 
-        # Deterministic: sorted by effect_id, so e1 wins (earlier ID)
-        winner_id = resolutions[0].winner
-        assert winner_id == e1.effect_id
+        # Both effects remain VALIDATED
+        assert e1.status == EffectStatus.VALIDATED
+        assert e2.status == EffectStatus.VALIDATED
 
     def test_three_agents_same_resource(self):
         """Three agents competing for same resource."""
