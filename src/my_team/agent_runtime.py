@@ -51,6 +51,14 @@ class ToolResult(BaseModel):
     success: bool = Field(description="Whether the tool call succeeded")
     data: Any = Field(default=None, description="Tool output data")
     error: str | None = Field(default=None, description="Error message if failed")
+    error_code: str | None = Field(
+        default=None,
+        description="Machine-readable error code: permission_denied, tool_error, not_found, etc.",
+    )
+    retryable: bool = Field(
+        default=True,
+        description="Whether this failure is retryable (permission_denied is not)",
+    )
     agent_id: str = Field(default="", description="Agent that called the tool")
     tool_name: str = Field(default="", description="Tool that was called")
     tick: int = Field(default=0, description="Tick at which tool was called")
@@ -132,6 +140,8 @@ class ToolRegistry:
             return ToolResult(
                 success=False,
                 error=str(e),
+                error_code="permission_denied",
+                retryable=False,
                 agent_id=context.agent_id,
                 tool_name=tool_name,
                 tick=context.tick,
@@ -142,6 +152,8 @@ class ToolRegistry:
             return ToolResult(
                 success=False,
                 error=f"No handler registered for tool '{tool_name}'",
+                error_code="not_found",
+                retryable=False,
                 agent_id=context.agent_id,
                 tool_name=tool_name,
                 tick=context.tick,
@@ -162,6 +174,8 @@ class ToolRegistry:
             return ToolResult(
                 success=False,
                 error=str(e),
+                error_code="tool_error",
+                retryable=True,
                 agent_id=context.agent_id,
                 tool_name=tool_name,
                 tick=context.tick,

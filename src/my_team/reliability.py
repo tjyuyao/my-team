@@ -273,12 +273,27 @@ class TimeoutChecker:
 
 
 class DeterministicReplay:
-    """Ensures deterministic execution for replay.
+    """In-memory snapshot storage and deterministic conflict ordering.
 
-    Per SPEC §2.3, §18.8:
-    - Same input → same output
-    - Conflicts resolved deterministically, not by run order
-    - Completed ticks are immutable
+    Per SPEC §2.3, §18.8. Guarantees are limited to:
+
+    **Within scope (deterministic):**
+    - In-memory state snapshots per tick
+    - Conflict resolution ordering (by agent_id + effect_id)
+    - Fixed action inputs producing fixed outputs
+
+    **Outside scope (NOT guaranteed):**
+    - Cross-process replay (no serialization)
+    - LLM output replay (no LLM integration yet)
+    - File system state consistency (external to in-memory)
+    - Thread scheduling determinism (single-threaded)
+    - Random number reproducibility (no seed control)
+    - Network/external service responses
+
+    To achieve full replay, the following must also be saved:
+    initial state, tick duration config, mail delivery schedule,
+    agent observations, action plans, tool results, random seeds,
+    commit decisions.
     """
 
     def __init__(self) -> None:

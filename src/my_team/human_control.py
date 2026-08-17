@@ -71,6 +71,14 @@ class HumanControl:
 
         Takes effect after current tick commit (§12.1).
         Also handles CREATED state (prevent first advance).
+
+        Pause semantics (§12.1):
+        - Simulation ticks stop advancing
+        - Lock leases do NOT advance (tick-based, not wall-clock)
+        - Task deadlines do NOT advance (tick-based)
+        - Email delivery does NOT occur (Deliver phase skipped)
+        - Timeout checker does NOT run
+        - All time-dependent state is frozen
         """
         if self._engine.state == SimulationState.PAUSED:
             return CommandResult(
