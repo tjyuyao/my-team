@@ -23,12 +23,28 @@ _PRIORITY_ORDER = {
 }
 
 
-def _sort_key(email: Email) -> tuple[int, int, str]:
-    """Sort key per SPEC §13.3 ordering rules."""
+def _sort_key(email: Email) -> tuple[int, int, int, int, str]:
+    """Sort key per SPEC §13.3 ordering rules.
+
+    Order:
+    1. system_notice (rank 0)
+    2. human_message (rank 1)
+    3. priority (urgent=2, high=3, normal=4, low=5)
+    4. created_at_tick (earlier first — lower tick = higher priority)
+    5. email_id (deterministic tiebreak)
+    """
+    # Type rank: system_notice=0, human_message=1, others=2
+    type_rank = 0
+    if email.email_type == EmailType.HUMAN_MESSAGE:
+        type_rank = 1
+    elif email.email_type != EmailType.SYSTEM_NOTICE:
+        type_rank = 2
+
     return (
+        type_rank,
         _PRIORITY_ORDER.get(email.priority, 2),
-        -email.created_at_tick,  # newer first within same priority
-        email.email_id,  # deterministic tiebreak
+        email.created_at_tick,
+        email.email_id,
     )
 
 
