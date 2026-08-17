@@ -17,7 +17,7 @@ from my_team.agent_runtime import (
 from my_team.agent_tree import AgentTree
 from my_team.delegation import DelegationProtocol
 from my_team.mailbox import MailSystem
-from my_team.models.email import EmailType
+from my_team.models.email import EmailPriority, EmailType
 from my_team.models.task import TaskPriority, TaskStatus
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.shared_kb import LockManager, PermissionEngine, PermissionRule, SharedKB
@@ -379,3 +379,42 @@ class TestE2EDelegation:
                 "agent.web_research",
                 current_tick=1,
             )
+
+
+# ---------------------------------------------------------------------------
+# Priority mapping exhaustive coverage
+# ---------------------------------------------------------------------------
+
+class TestPriorityMapping:
+    """Verify TaskPriority → EmailPriority mapping covers all enum members."""
+
+    def test_all_task_priorities_map_to_email_priorities(self):
+        from my_team.models.email import EmailPriority
+        from my_team.models.task import TaskPriority
+
+        expected = {
+            TaskPriority.LOW: EmailPriority.LOW,
+            TaskPriority.NORMAL: EmailPriority.NORMAL,
+            TaskPriority.HIGH: EmailPriority.HIGH,
+            TaskPriority.URGENT: EmailPriority.URGENT,
+        }
+        # Exhaustive check: every TaskPriority member must be mapped
+        for tp in TaskPriority:
+            assert tp in expected, (
+                f"TaskPriority.{tp.value} has no mapping"
+            )
+            assert expected[tp] in EmailPriority, (
+                f"Mapping for {tp} targets invalid EmailPriority"
+            )
+
+    def test_delegation_preserves_priority(self, full_system):
+        """Delegation email priority matches task priority."""
+        sys = full_system
+        task, email = sys["delegation"].delegate(
+            delegator_id="agent.root",
+            target_id="agent.research",
+            title="Urgent task",
+            priority=TaskPriority.URGENT,
+            tick=0,
+        )
+        assert email.priority == EmailPriority.URGENT

@@ -214,6 +214,44 @@ class TestAgentSnapshot:
         snap = AgentSnapshot(emails=({"subject": "hello"},))
         assert isinstance(snap.emails, tuple)
 
+    def test_snapshot_deeply_immutable_extended(self):
+        """Verify immutability: outer MappingProxyType prevents key mutation."""
+        snap = AgentSnapshot(
+            tick=1,
+            task_states={"t1": {"nested": {"deep": "value"}}},
+            shared_kb_snapshot={"project": {"items": [1, 2, 3]}},
+        )
+        # Level 1: can't add/remove keys at top level
+        with pytest.raises(TypeError):
+            snap.task_states["new_task"] = {}  # type: ignore[index]
+        with pytest.raises(TypeError):
+            del snap.task_states["t1"]  # type: ignore[index]
+        # Level 0: can't reassign field
+        with pytest.raises(AttributeError):
+            snap.task_states = {}  # type: ignore[misc]
+        # Note: deeply nested dict values are NOT recursively frozen.
+        # This is a known limitation — see report §P1-2.
+
+    def test_snapshot_lock_states_are_mapping(self):
+        from types import MappingProxyType
+        snap = AgentSnapshot(
+            lock_states={"res/a": {"owner": "agent.a", "lease_until": 10}}
+        )
+        assert isinstance(snap.lock_states, MappingProxyType)
+        # Can't add/remove keys
+        with pytest.raises(TypeError):
+            snap.lock_states["new_res"] = {}  # type: ignore[index]
+        # Can't reassign field
+        with pytest.raises(AttributeError):
+            snap.lock_states = {}  # type: ignore[misc]
+
+    def test_snapshot_emails_tuple_of_dicts(self):
+        """Emails is a tuple; inner dicts remain mutable (by design)."""
+        snap = AgentSnapshot(emails=({"subject": "hello"},))
+        assert isinstance(snap.emails, tuple)
+        # Inner dicts are NOT wrapped (tuple elements aren't auto-frozen)
+        # This is a known limitation documented in the report
+
     def test_snapshot_task_states_are_mapping(self):
         from types import MappingProxyType
         snap = AgentSnapshot(task_states={"t1": {"s": 1}})
