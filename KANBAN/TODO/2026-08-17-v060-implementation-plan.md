@@ -1,7 +1,7 @@
 # v0.6.0 Implementation Plan — Async LLM + Continuation Runtime
 
 **Created:** 2026-08-17
-**Status:** TODO (P1-1, P1-3, P1-5 done)
+**Status:** TODO (all P1 done)
 **Label:** v0.6.0 — Async LLM runtime with continuation-based agents
 
 ## Goal
@@ -42,12 +42,14 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 - ✅ 6 tests in `test_e2e_async_llm.py`
 - ⚠️ Stale response rejection not yet tested
 
-### 4. Async Tool Request Flow ⚠️ PARTIAL
+### 4. Async Tool Request Flow ✅ DONE (commit `db6f9c2`)
 
 - ✅ SubmitToolRequest → PendingOperationRegistry (remote tools)
-- ✅ Local tools (read/ls) execute synchronously
-- ❌ TOOL_RESULT wake event → re-activation flow not E2E tested
-- ❌ Tool timeout and retry
+- ✅ FakeToolExecutor completes TOOL_REQUEST ops with scripted results
+- ✅ TOOL_RESULT wake event → agent re-activated → acts on result
+- ✅ Tool timeout (TIMED_OUT) and error result delivery
+- ✅ Hybrid LLM → tool → result multi-hop continuation
+- ✅ 5 tests in `test_e2e_async_tool.py`
 
 ### 5. Complete Task Completion Roundtrip E2E ✅ DONE (commit `43c5ce4`)
 
@@ -116,9 +118,9 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
  1. ✅ decide() → Intent (models + agent_runtime)          — e3af699
  2. ✅ Continuation save/restore (AgentRuntimeState)       — e3af699, a1e91fa
  3. ✅ FakeLLMProvider + async LLM E2E                     — a1e91fa
- 4. ⏳ Async tool requests                                  — next
+ 4. ✅ Async tool requests                                 — db6f9c2
  5. ✅ Full task completion E2E                            — 43c5ce4
- 6. Outbox persistence
+ 6. Outbox persistence                                    — next (P2)
  7. SharedKB single entry
  8. Commit rollback
  9. Pause semantics
