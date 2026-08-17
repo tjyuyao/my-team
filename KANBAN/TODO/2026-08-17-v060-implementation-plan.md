@@ -62,14 +62,16 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 
 ## P2: Should Complete
 
-### 6. Outbox Persistence + Idempotent Delivery ❌ NOT STARTED
+### 6. Outbox Persistence + Idempotent Delivery ✅ DONE (commit `3b4798c`)
 
-**Priority:** P2
-**Acceptance:**
-- Outbox entries: effect_id, idempotency_key, status, retry_count, last_error
-- Lifecycle: STAGED → COMMITTED → DISPATCHING → DISPATCHED / FAILED
-- Failed dispatches retry up to N times
-- Idempotency key prevents duplicate delivery
+- ✅ Outbox entries: entry_id, idempotency_key, effect_id, status,
+  attempt_count, last_error, next_retry_tick
+- ✅ Lifecycle: STAGED → COMMITTED → DISPATCHING → DISPATCHED / FAILED / DEAD
+- ✅ Failed dispatches retried up to max_retries, then DEAD
+- ✅ Idempotency key prevents duplicate staging
+- ✅ Simulation integration: EMAIL_SEND → outbox → MailSystem
+- ✅ 7 tests in `test_outbox.py`
+- ⚠️ Not yet persisted to disk (in-memory; SQLite persistence is P3-11)
 
 ### 7. SharedKB Single Write Entry ✅ DONE (commit `8e6b386`)
 
@@ -120,10 +122,10 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
  3. ✅ FakeLLMProvider + async LLM E2E                     — a1e91fa
  4. ✅ Async tool requests                                 — db6f9c2
  5. ✅ Full task completion E2E                            — 43c5ce4
- 6. Outbox persistence                                    — next (P2)
+ 6. ✅ Outbox persistence + idempotent delivery            — 3b4798c
  7. ✅ SharedKB single entry                               — 8e6b386
  8. ✅ Commit rollback                                     — 79209cd
- 9. Pause semantics
-10. LLM budget
+ 9. ✅ Pause at commit boundary                            — 7e99368
+10. LLM budget                                            — next (P3)
 11. SQLite persistence
 ```
