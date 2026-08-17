@@ -164,7 +164,9 @@ class TestCancelOperation:
     def test_cancel_requires_supports_cancel(self) -> None:
         sim, request_id = self._sim_with_pending_tool("web_nocancel")
         result = sim.cancel_operation(request_id)
-        assert result is None
+        assert not result.accepted
+        assert "supports_cancel" in result.reason
+        assert result.result_fenced is False
         # Op still in flight, agent still waiting
         op = sim._pending_ops.get_by_id(request_id)
         assert op is not None
@@ -172,9 +174,11 @@ class TestCancelOperation:
 
     def test_cancel_wakes_agent_with_notice(self) -> None:
         sim, request_id = self._sim_with_pending_tool("web_search")
-        op = sim.cancel_operation(request_id)
-        assert op is not None
-        assert op.status == OpStatus.CANCELLED
+        result = sim.cancel_operation(request_id)
+        assert result.accepted
+        assert result.result_fenced is True
+        assert result.external_effects_possible is True
+        assert result.executor_cancel_requested is False  # no executor to signal
         # Op removed from registry
         assert sim._pending_ops.get_by_id(request_id) is None
 
@@ -194,8 +198,8 @@ class TestCancelOperation:
 
     def test_late_result_never_published(self) -> None:
         sim, request_id = self._sim_with_pending_tool("web_search")
-        op = sim.cancel_operation(request_id)
-        assert op is not None
+        result = sim.cancel_operation(request_id)
+        assert result.accepted and result.result_fenced
 
         # The executor completes the (cancelled) op late
         completed = sim._pending_ops.complete(request_id, result={"summary": "x"})
@@ -207,12 +211,15 @@ class TestCancelOperation:
     def test_cancel_wrong_agent_refused(self) -> None:
         sim, request_id = self._sim_with_pending_tool("web_search")
         result = sim.cancel_operation(request_id, agent_id="agent.root")
-        assert result is None
+        assert not result.accepted
+        assert "belongs to" in result.reason
         assert sim._pending_ops.get_by_id(request_id) is not None
 
     def test_cancel_missing_op(self) -> None:
         sim = Simulation(agent_tree=_make_tree([]))
-        assert sim.cancel_operation("tool.req.nope") is None
+        result = sim.cancel_operation("tool.req.nope")
+        assert not result.accepted
+        assert "not found" in result.reason
 
     def test_llm_request_cancellable(self) -> None:
         sim = Simulation(agent_tree=_make_tree(["web_search"]))
@@ -225,9 +232,11 @@ class TestCancelOperation:
         assert len(ops) == 1
         assert ops[0].op_type == OpType.LLM_REQUEST
 
-        op = sim.cancel_operation(ops[0].request_id)
-        assert op is not None
-        assert op.status == OpStatus.CANCELLED
+        result = sim.cancel_operation(ops[0].request_id)
+        assert result.accepted
+        # Logical cancel + fencing — provider-side effects (cost, logs,
+        # processing) cannot be undone
+        assert result.external_effects_possible is True
         rs = sim._agent_runtime_states["agent.research"]
         assert (rs.continuation.last_llm_result or {}).get("cancelled") is True
 
@@ -235,4 +244,5 @@ class TestCancelOperation:
         sim, request_id = self._sim_with_pending_tool("web_search")
         sim._pending_ops.get_by_id(request_id).status = OpStatus.TIMED_OUT
         result = sim.cancel_operation(request_id)
-        assert result is None
+        assert not result.accepted
+        assert "no longer in flight" in result.reason

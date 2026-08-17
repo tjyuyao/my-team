@@ -86,6 +86,17 @@ class StagedEffect(BaseModel):
         description="True if this effect has external side effects "
                     "(file writes, email delivery) that cannot be undone in-memory",
     )
+    group_id: str = Field(
+        default="",
+        description="Effects sharing a group_id commit or fail as one "
+                    "(when atomicity='group'); '' = singleton group",
+    )
+    atomicity: str = Field(
+        default="per_effect",
+        description="'per_effect' = independent failure; 'group' = any "
+                    "member failure fails the whole group (no tick "
+                    "rollback — local effect-level failure)",
+    )
 
 
 class ConflictResolution(BaseModel):
@@ -123,8 +134,15 @@ class TransactionBuffer:
         data: dict[str, Any] | None = None,
         expected_version: int | None = None,
         lock_token: str | None = None,
+        group_id: str = "",
+        atomicity: str = "per_effect",
     ) -> StagedEffect:
-        """Stage a new effect for later commit."""
+        """Stage a new effect for later commit.
+
+        group_id + atomicity="group": members commit or fail as one
+        (used by multi-effect intents like delegate → TASK_CREATE +
+        EMAIL_SEND).
+        """
         self._counter += 1
         effect = StagedEffect(
             effect_id=f"eff.{self._counter:06d}",
@@ -135,6 +153,8 @@ class TransactionBuffer:
             expected_version=expected_version,
             lock_token=lock_token,
             side_effect=effect_type in _EXTERNAL_EFFECT_TYPES,
+            group_id=group_id,
+            atomicity=atomicity,
         )
         self._effects[effect.effect_id] = effect
         return effect
@@ -164,6 +184,10 @@ class TransactionBuffer:
         to TASK_UPDATE effects (task still exists / not cancelled /
         not already terminal). CommitValidate: "is it still committable
         now?"
+
+        Note: apply-time checks (e.g. FILE_PATCH base-hash re-check,
+        which must see same-tick writes already applied) live in the
+        caller's apply loop, not here.
 
         Returns list of effects that failed validation.
         """
@@ -215,6 +239,23 @@ class TransactionBuffer:
                     continue
 
             effect.status = EffectStatus.VALIDATED
+
+        # Group atomicity: if any member of a 'group'-atomicity group
+        # failed, ALL members fail together (e.g. a DelegateIntent's
+        # TASK_CREATE + EMAIL_SEND must commit or fail as one).
+        groups: dict[str, list[StagedEffect]] = {}
+        for effect in self._effects.values():
+            if effect.group_id and effect.atomicity == "group":
+                groups.setdefault(effect.group_id, []).append(effect)
+        for group_id, members in groups.items():
+            if any(m.status == EffectStatus.FAILED for m in members):
+                for member in members:
+                    if member.status != EffectStatus.FAILED:
+                        member.status = EffectStatus.FAILED
+                        member.error = (
+                            f"group member failed (group {group_id})"
+                        )
+                        failures.append(member)
 
         return failures
 
@@ -273,6 +314,19 @@ class TransactionBuffer:
             for loser in loser_effects:
                 loser.status = EffectStatus.FAILED
                 loser.error = f"Conflict: lost to agent {winner_agent}"
+                # Group atomicity: a member that lost a conflict fails
+                # the whole group with it.
+                if loser.group_id and loser.atomicity == "group":
+                    for effect in self._effects.values():
+                        if (
+                            effect.group_id == loser.group_id
+                            and effect.status != EffectStatus.FAILED
+                        ):
+                            effect.status = EffectStatus.FAILED
+                            effect.error = (
+                                f"group member lost conflict "
+                                f"(group {loser.group_id})"
+                            )
 
             resolution = ConflictResolution(
                 winner=winner_effects[0].effect_id,

@@ -336,13 +336,19 @@ class TestRunTestsTool:
         assert not result.success
         assert result.data["exit_code"] == 1
 
-    def test_manifest_declares_sandboxed_process(self) -> None:
+    def test_manifest_declares_local_process(self) -> None:
         sim = self._sim()
         manifest = sim._tool_registry.get_manifest("run_tests")
         assert manifest is not None
-        assert manifest.execution_class is ExecutionClass.SANDBOXED_PROCESS
+        # Honest classification: timeout + truncation + process-group
+        # kill, but NOT a sandbox (no read-only mount / network deny /
+        # resource limits) — declared side effects are disclosed.
+        assert manifest.execution_class is ExecutionClass.LOCAL_PROCESS
         assert manifest.max_runtime_ms is not None
         assert manifest.max_output_bytes is not None
+        assert manifest.requires_network is True
+        assert "process_spawn" in manifest.possible_side_effects
+        assert "possible_network" in manifest.possible_side_effects
 
 
 class TestGitTools:
@@ -381,6 +387,7 @@ class TestGitTools:
         sim._tool_registry.set_policy(OperationPolicy(
             allowed=frozenset({"git_diff", "git_status", "run_tests"}),
             filesystem_scope="private",
+            network_access=True,  # run_tests requires network (declared)
         ))
         result = sim._tool_registry.execute(
             _ctx(sim, "git_status"), "git_status",
@@ -388,6 +395,21 @@ class TestGitTools:
         assert not result.success
         assert result.error_code == "policy_denied"
         assert "filesystem" in (result.error or "")
+
+    def test_run_tests_requires_network_policy_grant(self) -> None:
+        """run_tests declares requires_network=True — a deny-network
+        policy must refuse it (deny-by-default)."""
+        sim = Simulation(agent_tree=_make_tree(["run_tests"]))
+        sim._tool_registry.set_policy(OperationPolicy(
+            allowed=frozenset({"run_tests"}),
+            filesystem_scope="workspace",
+        ))
+        result = sim._tool_registry.execute(
+            _ctx(sim, "run_tests"), "run_tests", test_path="",
+        )
+        assert not result.success
+        assert result.error_code == "policy_denied"
+        assert "network" in (result.error or "")
 
 
 class TestBuiltinRegistration:

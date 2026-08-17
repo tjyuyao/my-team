@@ -404,6 +404,14 @@ class ActionResult(BaseModel):
     success: bool = Field(description="Whether the action succeeded")
     result_data: Any = Field(default=None, description="Action output")
     error: str | None = Field(default=None, description="Error if failed")
+    # Structured validation error code (v0.7.0 review): CAPABILITY_DENIED,
+    # TOOL_MANIFEST_MISSING, POLICY_DENIED, APPROVAL_REQUIRED,
+    # BUDGET_EXCEEDED, DUPLICATE_REQUEST_ID, TASK_NOT_FOUND,
+    # DEADLINE_EXCEEDED, INVALID_ARGUMENT, patch_conflict, ...
+    error_code: str | None = Field(
+        default=None,
+        description="Machine-readable error code",
+    )
 
 
 def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:

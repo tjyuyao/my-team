@@ -15,6 +15,7 @@ Architecture (v0.6.0):
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,7 @@ from my_team.models.task import Task, TaskPriority, TaskStatus
 from my_team.outbox import Outbox, OutboxEntry
 from my_team.patch_ops import PatchError, apply_patch
 from my_team.pending_ops import (
+    CancellationResult,
     OpType,
     PendingOperation,
     PendingOperationRegistry,
@@ -251,6 +253,10 @@ class Simulation:
 
         # Phase order of the last tick (kernel protocol observability)
         self._last_tick_phases: list[str] = []
+        # Set by _phase_commit when the tick's effects were rolled back.
+        # run_tick uses it to defer/requeue claimed wake events so the
+        # rolled-back tick's activations re-trigger next tick.
+        self._last_tick_rolled_back = False
 
         # Email outbox (reliable dispatch with idempotency)
         self._outbox = Outbox(max_retries=self._config.max_retries)
@@ -511,9 +517,12 @@ class Simulation:
             task_description: str = "",
             **_kw: Any,
         ) -> Any:
-            # Create task + send delegation email — staged as two effects
+            # Create task + send delegation email — staged as two
+            # effects in ONE atomic group (task fails → email must not
+            # be sent).
             from uuid import uuid4
             task_id = f"task.{context.tick}.{uuid4().hex[:8]}"
+            group_id = f"group.{uuid4().hex[:8]}"
             self._transaction_buffer.stage(
                 effect_type=EffectType.TASK_CREATE,
                 agent_id=context.agent_id,
@@ -526,6 +535,8 @@ class Simulation:
                     "owner_agent_id": recipient_agent_id,
                     "parent_task_id": None,
                 },
+                group_id=group_id,
+                atomicity="group",
             )
             self._transaction_buffer.stage(
                 effect_type=EffectType.EMAIL_SEND,
@@ -539,6 +550,8 @@ class Simulation:
                     "email_type": "delegation",
                     "task_id": task_id,
                 },
+                group_id=group_id,
+                atomicity="group",
             )
             return ToolResult(
                 success=True,
@@ -595,14 +608,32 @@ class Simulation:
                     agent_id=context.agent_id, tool_name="apply_patch",
                     tick=context.tick,
                 )
+            # base_hash = hash of the content the patch was validated
+            # against (the frozen view). Commit re-checks the live file:
+            # if another same-tick write changed it, the patch is stale
+            # → patch_conflict at commit (never silently overwrite).
+            def _sha(text: str) -> str:
+                return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
             self._transaction_buffer.stage(
                 effect_type=EffectType.FILE_PATCH,
                 agent_id=context.agent_id,
                 resource=path,
-                data={"content": new_content, "patch": patch},
+                data={
+                    "content": new_content,
+                    "patch": patch,
+                    "base_hash": _sha(content),
+                    "patch_hash": _sha(patch),
+                    "new_content_hash": _sha(new_content),
+                },
             )
             return ToolResult(
-                success=True, data={"staged": True},
+                success=True,
+                data={
+                    "staged": True,
+                    "base_hash": _sha(content),
+                    "new_content_hash": _sha(new_content),
+                },
                 agent_id=context.agent_id, tool_name="apply_patch",
                 tick=context.tick,
             )
@@ -858,39 +889,59 @@ class Simulation:
         self,
         request_id: str,
         agent_id: str | None = None,
-    ) -> PendingOperation | None:
+    ) -> CancellationResult:
         """Cancel an in-flight operation (v0.7.0 P1-4).
 
         Rules:
         - Only SUBMITTED/PENDING ops can be cancelled (registry-level)
         - TOOL_REQUEST ops require the tool's manifest to declare
-          supports_cancel; LLM requests are always cancellable (they
-          carry no external side effect — the pending response is
-          simply discarded)
-        - The agent is NOT left hanging: it is woken with a structured
-          {error, cancelled, request_id} notice (mirrors the timeout
-          path), never with the op's result
+          supports_cancel; LLM requests are always logically cancellable
+        - The agent is woken with a structured {error, cancelled,
+          request_id} notice (mirrors the timeout path), NEVER with the
+          op's result; a late result is fenced by complete()
         - Cancelled ops audit OP_CANCELLED and are removed from the
-          registry; a late result is fenced by complete() (never
-          published)
+          registry
 
-        Returns the cancelled op, or None if not cancellable (missing,
-        wrong agent, terminal/completed, or manifest denies cancel).
+        Cancellation is LOGICAL: for remote tools the external harness
+        is out of reach (executor_cancel_requested=False) and even an
+        LLM request may already have provider-side effects (cost, logs,
+        processing) that cancellation cannot undo
+        (external_effects_possible=True). Returns a CancellationResult,
+        never raising.
         """
         op = self._pending_ops.get_by_id(request_id)
         if op is None:
-            return None
+            return CancellationResult(
+                accepted=False, request_id=request_id,
+                reason="operation not found",
+            )
         if agent_id is not None and op.agent_id != agent_id:
-            return None
+            return CancellationResult(
+                accepted=False, request_id=request_id,
+                op_type=op.op_type,
+                reason=f"operation belongs to '{op.agent_id}', not '{agent_id}'",
+            )
         if op.op_type == OpType.TOOL_REQUEST:
             tool_name = op.metadata.get("tool_name", "")
             manifest = self._tool_registry.get_manifest(tool_name)
             if manifest is None or not manifest.supports_cancel:
-                return None
+                return CancellationResult(
+                    accepted=False, request_id=request_id,
+                    op_type=op.op_type,
+                    reason=(
+                        f"tool '{tool_name}' does not declare "
+                        "supports_cancel"
+                    ),
+                )
 
         cancelled = self._pending_ops.cancel(request_id)
         if cancelled is None:
-            return None
+            return CancellationResult(
+                accepted=False, request_id=request_id,
+                op_type=op.op_type,
+                reason="operation is no longer in flight "
+                       "(terminal/completed)",
+            )
 
         self._audit_log.record(
             AuditEventType.OP_CANCELLED,
@@ -929,7 +980,19 @@ class Simulation:
             self._enqueue_result_wake(op, self._tick_engine.current_tick, result=notice)
 
         self._pending_ops.remove(request_id)
-        return op
+        return CancellationResult(
+            accepted=True,
+            request_id=request_id,
+            op_type=op.op_type,
+            result_fenced=True,
+            # No in-kernel executor exists for remote ops — the external
+            # harness cannot be signaled from here.
+            executor_cancel_requested=False,
+            executor_cancel_confirmed=False,
+            # The op may already have produced external side effects
+            # (provider processing/cost/logs) that cannot be undone.
+            external_effects_possible=True,
+        )
 
     @classmethod
     def from_config_file(cls, path: str | Path) -> Simulation:
@@ -1313,17 +1376,31 @@ class Simulation:
         # Phase 10: Audit
         self._phase_audit(tick, delivered, all_results, ready)
 
-        # Complete activations and clean up scheduler
+        # Complete activations and clean up scheduler. On COMMIT
+        # ROLLBACK the tick's state was invalidated: activations
+        # complete as FAILED (claims deferred) and their wake events are
+        # requeued — the agents re-activate next tick and re-observe
+        # the rolled-back state.
+        rolled_back = self._last_tick_rolled_back
         for candidate in ready:
             activation = self._scheduler._activations_this_tick.get(candidate.agent_id)
             if activation:
                 self._scheduler.complete_activation(
-                    activation.activation_id, success=True
+                    activation.activation_id, success=not rolled_back
                 )
                 # Transition agent state: PROCESSING → IDLE
                 runtime_state = self._agent_runtime_states.get(candidate.agent_id)
                 if runtime_state:
                     runtime_state.complete_activation(tick)
+        if rolled_back:
+            for candidate in ready:
+                activation = self._scheduler._activations_this_tick.get(
+                    candidate.agent_id,
+                )
+                if activation:
+                    self._scheduler.requeue_events(
+                        [e.event_id for e in activation.wake_events]
+                    )
         self._scheduler.end_tick()
 
         # Advance tick engine
@@ -1927,7 +2004,11 @@ class Simulation:
                     ))
                     continue
 
-                # DelegateIntent → stage TASK_CREATE + EMAIL_SEND
+                # DelegateIntent → stage TASK_CREATE + EMAIL_SEND.
+                # GROUP ATOMICITY: the delegation is one logical
+                # operation — if the task creation fails validation,
+                # the delegation email must NOT be sent (and vice
+                # versa). Members share group_id = the intent's id.
                 if isinstance(intent, DelegateIntent):
                     from uuid import uuid4
                     task_id = f"task.{tick}.{uuid4().hex[:8]}"
@@ -1943,6 +2024,8 @@ class Simulation:
                             "owner_agent_id": intent.recipient_agent_id,
                             "parent_task_id": intent.parent_task_id or None,
                         },
+                        group_id=intent.intent_id,
+                        atomicity="group",
                     )
                     self._transaction_buffer.stage(
                         effect_type=EffectType.EMAIL_SEND,
@@ -1956,6 +2039,8 @@ class Simulation:
                             "email_type": "delegation",
                             "task_id": task_id,
                         },
+                        group_id=intent.intent_id,
+                        atomicity="group",
                     )
                     results.append(ActionResult(
                         action=action, success=True,
@@ -2096,12 +2181,17 @@ class Simulation:
                                 f"Tool '{intent.tool_name}' not authorized "
                                 f"for '{agent_id}'"
                             ),
+                            error_code="CAPABILITY_DENIED",
                         ))
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
                             agent_id=agent_id,
                             tick=tick,
-                            details={"tool": intent.tool_name, "intent": intent.intent_type.value},
+                            details={
+                                "tool": intent.tool_name,
+                                "intent": intent.intent_type.value,
+                                "error_code": "CAPABILITY_DENIED",
+                            },
                             success=False,
                             error="Tool not authorized",
                         )
@@ -2123,6 +2213,7 @@ class Simulation:
                                 f"{in_flight_llm} in flight, max "
                                 f"{self._config.max_concurrent_llm_requests}"
                             ),
+                            error_code="BUDGET_EXCEEDED",
                         ))
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
@@ -2131,6 +2222,7 @@ class Simulation:
                             details={
                                 "intent": intent.intent_type.value,
                                 "reason": "llm_budget_exceeded",
+                                "error_code": "BUDGET_EXCEEDED",
                             },
                             success=False,
                             error="LLM request budget exceeded",
@@ -2157,6 +2249,7 @@ class Simulation:
                                 f"Duplicate request_id '{intent.request_id}' "
                                 f"for '{agent_id}'"
                             ),
+                            error_code="DUPLICATE_REQUEST_ID",
                         ))
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
@@ -2166,6 +2259,7 @@ class Simulation:
                                 "intent": intent.intent_type.value,
                                 "request_id": intent.request_id,
                                 "reason": "duplicate_request_id",
+                                "error_code": "DUPLICATE_REQUEST_ID",
                             },
                             success=False,
                             error="Duplicate request_id rejected",
@@ -2189,6 +2283,7 @@ class Simulation:
                                 f"Tool '{intent.tool_name}' has no "
                                 "registered manifest"
                             ),
+                            error_code="TOOL_MANIFEST_MISSING",
                         ))
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
@@ -2197,6 +2292,7 @@ class Simulation:
                             details={
                                 "tool": intent.tool_name,
                                 "reason": "no_manifest",
+                                "error_code": "TOOL_MANIFEST_MISSING",
                             },
                             success=False,
                             error="Tool has no manifest",
@@ -2210,6 +2306,7 @@ class Simulation:
                             action=action,
                             success=False,
                             error=decision.reason,
+                            error_code="POLICY_DENIED",
                         ))
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
@@ -2218,6 +2315,7 @@ class Simulation:
                             details={
                                 "tool": intent.tool_name,
                                 "reason": "policy_denied",
+                                "error_code": "POLICY_DENIED",
                             },
                             success=False,
                             error=decision.reason,
@@ -2231,6 +2329,7 @@ class Simulation:
                                 f"Tool '{intent.tool_name}' requires "
                                 "human approval"
                             ),
+                            error_code="APPROVAL_REQUIRED",
                         ))
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
@@ -2239,6 +2338,7 @@ class Simulation:
                             details={
                                 "tool": intent.tool_name,
                                 "reason": "requires_approval",
+                                "error_code": "APPROVAL_REQUIRED",
                             },
                             success=False,
                             error="Tool requires human approval",
@@ -2257,6 +2357,7 @@ class Simulation:
                             error=(
                                 f"Task '{intent.task_id}' not found"
                             ),
+                            error_code="TASK_NOT_FOUND",
                         ))
                         continue
                     task = self._task_tree.get(intent.task_id)
@@ -2272,6 +2373,7 @@ class Simulation:
                                 f"(deadline_tick={task.deadline_tick} < "
                                 f"tick={tick})"
                             ),
+                            error_code="DEADLINE_EXCEEDED",
                         ))
                         continue
 
@@ -2286,6 +2388,7 @@ class Simulation:
                                 f"'{agent_id}' cannot delegate to '{target_id}'"
                                 " (not a direct child)"
                             ),
+                            error_code="INVALID_ARGUMENT",
                         ))
                         continue
 
@@ -2296,6 +2399,7 @@ class Simulation:
                             action=action,
                             success=False,
                             error="write intent requires 'path' field",
+                            error_code="INVALID_ARGUMENT",
                         ))
                         continue
 
@@ -2305,6 +2409,7 @@ class Simulation:
                             action=action,
                             success=False,
                             error="send_email intent requires 'to' field",
+                            error_code="INVALID_ARGUMENT",
                         ))
                         continue
 
@@ -2317,6 +2422,7 @@ class Simulation:
                                 "delegate intent requires 'recipient_agent_id' "
                                 "and 'task_title' fields"
                             ),
+                            error_code="INVALID_ARGUMENT",
                         ))
                         continue
 
@@ -2363,8 +2469,7 @@ class Simulation:
         matches, task not cancelled/terminal, deadline not passed.
         """
         buffer = self._transaction_buffer
-
-        # Step 1: Validate
+        self._last_tick_rolled_back = False
         def check_task(effect: StagedEffect) -> str | None:
             """TASK_UPDATE must target an existing, live task.
 
@@ -2395,6 +2500,7 @@ class Simulation:
                     f"(deadline_tick={task.deadline_tick} < tick={tick})"
                 )
             return None
+
         def check_version(resource: str, expected: int) -> bool:
             current = self._shared_kb.versions.get_version(resource)
             return current == expected
@@ -2513,6 +2619,33 @@ class Simulation:
                     content = effect.data.get("content", "")
                     home = self._private_store.agent_home(agent_id)
                     target = home / path
+
+                    # FILE_PATCH base re-check AT APPLY TIME: earlier
+                    # same-tick writes are now visible on disk. If the
+                    # content no longer matches the base the patch was
+                    # validated against, the patch is stale → local
+                    # patch_conflict (mark FAILED, never overwrite).
+                    if effect.effect_type == EffectType.FILE_PATCH:
+                        base_hash = effect.data.get("base_hash")
+                        if base_hash is not None:
+                            if target.exists() and target.is_file():
+                                current = target.read_text(
+                                    encoding="utf-8",
+                                )
+                            else:
+                                current = ""
+                            current_hash = hashlib.sha256(
+                                current.encode("utf-8"),
+                            ).hexdigest()
+                            if current_hash != base_hash:
+                                effect.status = EffectStatus.FAILED
+                                effect.error = (
+                                    f"patch base conflict: file '{path}' "
+                                    "changed since Act (content hash "
+                                    "mismatch) — re-read and re-apply"
+                                )
+                                continue
+
                     target.parent.mkdir(parents=True, exist_ok=True)
                     if target.exists():
                         file_previous[str(target)] = target.read_text(
@@ -2629,6 +2762,7 @@ class Simulation:
 
                 applied.append(effect)
         except Exception as e:  # noqa: BLE001 — rollback on any apply failure
+            self._last_tick_rolled_back = True
             _rollback()
             # Mark the failing effect as FAILED; any committed effects
             # that were not applied (skipped by the exception) also FAIL
@@ -2656,8 +2790,12 @@ class Simulation:
             )
             return []
 
-        # Record audit for committed effects
+        # Record audit for committed effects (apply-time failures such
+        # as a stale FILE_PATCH are marked FAILED — not audited as
+        # commits)
         for effect in committed:
+            if effect.status != EffectStatus.COMMITTED:
+                continue
             self._audit_log.record(
                 AuditEventType.TRANSACTION_COMMIT,
                 agent_id=effect.agent_id,

@@ -218,6 +218,21 @@ class AgentScheduler:
             if qe.status == EventStatus.CLAIMED and qe.event.event_id in event_ids:
                 qe.status = EventStatus.CONSUMED
 
+    def requeue_events(self, event_ids: list[str]) -> None:
+        """Return claimed/eligible events to QUEUED (rollback recovery).
+
+        After a tick ROLLBACK the state the activation observed was
+        invalidated; the wake events must re-trigger activation next
+        tick. QUEUED survives end_tick (which only expires ELIGIBLE
+        events that were never claimed this tick).
+        """
+        for qe in self._events:
+            if (
+                qe.status in {EventStatus.CLAIMED, EventStatus.ELIGIBLE}
+                and qe.event.event_id in event_ids
+            ):
+                qe.status = EventStatus.QUEUED
+
     def begin_activation(
         self,
         candidate: ReadyCandidate,

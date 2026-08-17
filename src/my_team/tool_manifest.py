@@ -35,7 +35,14 @@ class ToolManifestError(ValueError):
 
 
 class ExecutionClass(str, Enum):
-    """How a tool may be executed (declared, enforced by the kernel)."""
+    """How a tool may be executed (declared, enforced by the kernel).
+
+    Classification honesty: LOCAL_PROCESS and SANDBOXED_PROCESS are
+    DIFFERENT things. Only a tool with real isolation (read-only mount,
+    network deny-by-default, resource limits) may declare
+    SANDBOXED_PROCESS; a host subprocess with timeout + output
+    truncation is LOCAL_PROCESS (see KANBAN/OPEN_ISSUE/OI-001.md).
+    """
 
     PURE = "pure"
     # ^ No side effects, no I/O, deterministic output from input alone.
@@ -46,9 +53,16 @@ class ExecutionClass(str, Enum):
     STAGED_MUTATION = "staged_mutation"
     # ^ Mutation staged as an effect, committed atomically in Commit
     #   phase; reversible via rollback.
+    LOCAL_PROCESS = "local_process"
+    # ^ Host subprocess with enforced timeout (process-group kill),
+    #   output truncation, no shell, pinned cwd. NOT a sandbox: inherits
+    #   env/PATH, no read-only mount, no network deny, no resource
+    #   limits. The manifest's possible_side_effects must be declared.
     SANDBOXED_PROCESS = "sandboxed_process"
     # ^ External process in an isolated sandbox (read-only mount,
-    #   output truncation, timeout). Effects confined to the sandbox.
+    #   network deny-by-default, resource limits, approval policy).
+    #   NOT granted to any builtin tool until the sandbox protocol
+    #   exists (OI-001).
     EXTERNAL_IRREVERSIBLE = "external_irreversible"
     # ^ External call that cannot be undone; must be declared
     #   irreversible and (typically) requires approval.
@@ -85,6 +99,11 @@ class ToolManifest:
     output_schema: dict[str, Any] = field(default_factory=dict)
     capabilities: tuple[str, ...] = ()
     effect_types: tuple[EffectType, ...] = ()
+    # Documented (not kernel-enforced) side-effect possibilities for
+    # LOCAL_PROCESS tools: e.g. "file_write_local", "process_spawn",
+    # "possible_network". The kernel cannot observe everything an
+    # un-sandboxed process does — this is the honest disclosure.
+    possible_side_effects: tuple[str, ...] = ()
     deterministic: bool = True
     idempotent: bool = False
     reversible: bool = True
@@ -376,10 +395,15 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         reversible=True,    # rolled back via file_previous like FILE_WRITE
         max_output_bytes=1_000_000,
     )
+    # LOCAL_PROCESS, NOT SANDBOXED_PROCESS: running tests executes
+    # untrusted code (conftest, plugins, imports, subprocesses, possible
+    # network). We enforce timeout + output truncation + process-group
+    # kill only; there is no read-only mount / network deny / resource
+    # limit. The declared side effects are honest disclosure.
     run_tests = ToolManifest(
         name="run_tests",
         version="1.0.0",
-        execution_class=ExecutionClass.SANDBOXED_PROCESS,
+        execution_class=ExecutionClass.LOCAL_PROCESS,
         input_schema={"test_path": {"type": "string"}},
         output_schema={
             "success": {"type": "boolean"},
@@ -389,11 +413,16 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         },
         capabilities=("test:run",),
         effect_types=(),
+        possible_side_effects=(
+            "file_write_local",
+            "process_spawn",
+            "possible_network",
+        ),
         filesystem_scopes=("workspace",),
         deterministic=False,    # depends on test results
         idempotent=True,
         reversible=True,
-        requires_network=False,  # uv uses the synced environment
+        requires_network=True,  # test code MAY use the network — declare
         max_runtime_ms=60_000,
         max_output_bytes=200_000,
     )

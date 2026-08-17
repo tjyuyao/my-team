@@ -49,6 +49,29 @@ class OpType(str, Enum):
     LOCK_ACQUISITION = "lock_acquisition"
 
 
+class CancellationResult(BaseModel):
+    """Structured outcome of a cancel_operation() call (v0.7.0 review).
+
+    Distinguishes the levels of a cancel:
+    - accepted: the registry cancelled the op and fenced its result
+    - executor_cancel_requested / executor_cancel_confirmed: whether an
+      actual executor could be SIGNALED (no executor exists in-kernel
+      for remote tools — the external harness is out of reach)
+    - external_effects_possible: the op MAY already have external side
+      effects (provider processing, cost, logs) that cancellation
+      cannot undo — cancellation is logical, not physical
+    """
+
+    accepted: bool
+    request_id: str
+    op_type: OpType | None = None
+    reason: str = ""
+    result_fenced: bool = False
+    executor_cancel_requested: bool = False
+    executor_cancel_confirmed: bool = False
+    external_effects_possible: bool = False
+
+
 class PendingOperation(BaseModel):
     """A single in-flight external operation."""
 
