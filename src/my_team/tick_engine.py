@@ -199,8 +199,11 @@ class TickEngine:
         return self._state in (SimulationState.CREATED, SimulationState.RUNNING)
 
     def pause(self) -> None:
-        """Pause the simulation. Takes effect after current tick (SPEC §12.1)."""
-        if self._state == SimulationState.RUNNING:
+        """Pause the simulation. Takes effect after current tick (SPEC §12.1).
+
+        Can pause from CREATED (before first tick) or RUNNING.
+        """
+        if self._state in (SimulationState.RUNNING, SimulationState.CREATED):
             self._state = SimulationState.PAUSED
 
     def resume(self) -> None:

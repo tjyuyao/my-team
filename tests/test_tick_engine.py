@@ -202,11 +202,13 @@ class TestPauseResume:
         assert engine.state == SimulationState.PAUSED
         assert not engine.can_advance()
 
-    def test_pause_only_when_running(self):
+    def test_pause_from_created(self):
+        """Pause can be requested before the first tick (SPEC §8.6)."""
         engine = TickEngine()
-        # CREATED state
+        # CREATED state — pause takes effect immediately (no tick in flight)
         engine.pause()
-        assert engine.state == SimulationState.CREATED  # no change
+        assert engine.state == SimulationState.PAUSED
+        assert not engine.can_advance()
 
 
 # ---------------------------------------------------------------------------

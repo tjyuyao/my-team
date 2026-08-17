@@ -546,6 +546,25 @@ class Simulation:
     def current_tick(self) -> int:
         return self._tick_engine.current_tick
 
+    @property
+    def is_paused(self) -> bool:
+        """Check if the simulation is paused."""
+        return self._tick_engine.state.value == "paused"
+
+    def pause(self) -> None:
+        """Pause the simulation — takes effect at the next commit boundary.
+
+        Per SPEC §8.6: no new agent activations are scheduled, no state
+        transitions are committed. Already-issued external requests
+        continue; their results enter quarantine (they are collected by
+        the Ingest phase only after resume).
+        """
+        self._tick_engine.pause()
+
+    def resume(self) -> None:
+        """Resume the simulation from a paused state."""
+        self._tick_engine.resume()
+
     @classmethod
     def from_config_file(cls, path: str | Path) -> Simulation:
         """Create a simulation from a JSON config file."""
@@ -578,6 +597,12 @@ class Simulation:
         8. Publish  — dispatch pending ops, generate wake events; timeouts
         9. Audit    — record all events
         """
+        if self.is_paused:
+            raise RuntimeError(
+                "Cannot run a tick while paused. Call resume() first. "
+                "External results are quarantined until resume."
+            )
+
         tick = self._tick_engine.current_tick
 
         # Phase 1: Ingest — collect completed external operations + deliver emails
