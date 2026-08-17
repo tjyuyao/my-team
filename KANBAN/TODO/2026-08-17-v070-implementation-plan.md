@@ -1,0 +1,139 @@
+# v0.7.0 Implementation Plan — Snapshot-Consistent, Policy-Controlled Tool Runtime
+
+**Created:** 2026-08-17
+**Status:** TODO
+**Label:** v0.7.0 — Snapshot-consistent and policy-controlled tool runtime
+
+## Goal
+
+v0.6.0 完成了核心异步 runtime（Intent → PendingOp → Wake →
+Continuation Resume），并硬化了快照读、epoch fencing、超时唤醒与
+SQLite 持久化。v0.7.0 的目标是**把"可执行的确定性原型"变成
+"可安全执行受限工具的策略受控运行时"**：
+
+```text
+ToolManifest
+→ Intent
+→ PreValidate(Intent + Policy)
+→ ToolRequest
+→ IsolatedExecutor
+→ ToolResult + EffectManifest
+→ CommitValidate
+→ Commit / Outbox / Compensation
+```
+
+**显式不做：** 开放 Bash（见 KANBAN/OPEN_ISSUE.md OI-001）。
+
+## P1: Must Complete
+
+### 1. Tool Manifest + OperationPolicy
+
+**Acceptance:**
+- `ToolManifest`（frozen dataclass）：name、version、input/output
+  schema、capabilities、effect_types、execution_class
+  （PURE / READ_ONLY / LOCAL_DETERMINISTIC / STAGED_MUTATION /
+  SANDBOXED_PROCESS / EXTERNAL_IRREVERSIBLE）、deterministic、
+  idempotent、reversible、requires_network、filesystem_scopes、
+  max_runtime_ms、max_output_bytes、supports_cancel、
+  requires_approval、retry_policy
+- 现有工具（read/write/ls/kb_write/send_email/delegate）补齐
+  manifest；注册即校验
+- `OperationPolicy`：allowed / requires_approval / max_wall_time_ms /
+  max_output_bytes / network_access / filesystem_scope / retry_policy /
+  reversible
+- 测试：manifest 必填、capability 作用域、输出上限、超时、取消、
+  网络策略、文件系统作用域、需人工审批、effect 审计、版本记录
+  （v0.6.0 审查 §十 测试清单）
+
+### 2. Two-Phase Validate 强化
+
+**Acceptance:**
+- PreValidate(Intent) 增加：deadline、budget、idempotency、
+  operation policy、tool manifest、task 有效性
+- CommitValidate(Effect/PendingOp) 增加：lock token 仍有效、
+  KB version 仍匹配、task 未取消、deadline 未过、op 未重复提交、
+  effect 属于当前 epoch、配额仍够、outbox key 不重复
+- 核心原则固化为注释/SPEC：PreValidate 检查"是否允许尝试"；
+  CommitValidate 检查"现在是否仍可提交"
+
+### 3. 受限工具（先于 Bash）
+
+按审查 §十三 顺序加入：
+
+```text
+1. read_file      — READ_ONLY，快照视图读取（v0.6.0 已有 read，改名/别名）
+2. list_files     — READ_ONLY，快照视图列出
+3. apply_patch    — STAGED_MUTATION，patch 格式校验 + 冲突检测 + 回滚
+4. run_tests      — SANDBOXED_PROCESS，只读挂载 + 输出截断 + 超时
+5. git_diff       — READ_ONLY，沙箱工作区
+6. git_status     — READ_ONLY
+7. sandboxed_python — SANDBOXED_PROCESS（可选，P2）
+8. restricted_bash   — 不实现（OI-001）
+```
+
+**Acceptance:** 每个工具带 manifest + policy；工具通过
+`ToolRequest → IsolatedExecutor → ToolResult + EffectManifest` 路径；
+`apply_patch` 与 `run_tests` 的副作用可审计、可回滚（或声明
+irreversible 并走补偿）。
+
+### 4. 工具超时与取消
+
+**Acceptance:**
+- 超时：工具进程被终止（process group），op 标记 TIMED_OUT，
+  agent 以结构化错误唤醒（v0.6.0 已有链路的工具版本）
+- 取消：`supports_cancel` 的工具可被取消；cancelled op 的结果
+  不发布（v0.6.0 已有 registry 语义）
+- 超时/取消审计记录
+
+## P2: Should Complete
+
+### 5. Typed AgentSnapshot Views
+
+- `AgentSnapshot` 从 dict 改为类型化视图：EmailView、TaskView、
+  KBResourceView、LockView、FileView
+- 读一致性与 v0.6.0 冻结视图合并（一份只读视图，两种语义）
+
+### 6. BoundedMicroLoop 重新观察
+
+- 第二轮 micro-loop 使用重新冻结的快照（stale snapshot 修复）
+
+### 7. Provider 429/5xx 重试 + token/cost 预算
+
+- provider 级重试（退避）与 v0.6.0 agent 驱动重试并存
+- 每 agent / task / simulation 的 token/cost 上限，超限在
+  PreValidate 拒绝
+
+### 8. 内容寻址 / 版本化文件历史
+
+- workspace 版本化：`write` → 版本 n；读视图为冻结版本
+- 二进制文件纳入快照（v0.6.0 明确排除）
+
+## 迁移顺序（建议）
+
+```
+ 1. ToolManifest + OperationPolicy（模型 + 注册校验）
+ 2. 现有工具补齐 manifest（read/ls → READ_ONLY；write → STAGED_MUTATION）
+ 3. Two-Phase Validate 强化（deadline/budget/manifest/task 校验）
+ 4. apply_patch（patch 校验 + 冲突 + 回滚）
+ 5. run_tests（sandbox：只读挂载 + 超时 + 输出截断）
+ 6. git_diff / git_status（只读沙箱工作区）
+ 7. 工具超时/取消接线（process group）
+ 8. Typed AgentSnapshot + BoundedMicroLoop 重新观察
+ 9. provider 重试 + token/cost 预算
+10. 版本化文件历史（可选）
+```
+
+## 明确的非目标
+
+- ❌ 开放 Bash（OI-001：Manifest + 沙箱 + 审批协议完成前禁止）
+- ❌ 宿主机直连 `subprocess.run(shell=True)` 类执行
+- ❌ 多实例并发写同一 DB（SQLite 单写者；多实例是 v0.8+）
+
+## 验证
+
+```bash
+uv run pytest -q
+uv run ruff check src tests
+uv run mypy src/my_team
+uv run pytest --cov=my_team --cov-branch --cov-report=term
+```

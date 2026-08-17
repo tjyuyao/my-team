@@ -1,7 +1,7 @@
 # v0.6.0 Implementation Plan — Async LLM + Continuation Runtime
 
 **Created:** 2026-08-17
-**Status:** DONE (P1 + P2 + P3-9/10 + post-review hardening; P3-11 SQLite → v0.7.0)
+**Status:** DONE (P1 + P2 + P3-9/10/11 + post-review hardening)
 **Label:** v0.6.0 — Async LLM/tool runtime prototype with continuation-based agents
 
 ## Goal
@@ -110,12 +110,23 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
   timeout errors; provider-level backoff not implemented
 - ❌ Token/cost budget per agent, task, simulation
 
-### 11. Persistence (SQLite)
+### 11. Persistence (SQLite) ✅ DONE (commit pending)
 
 **Priority:** P3
 **Acceptance:**
-- Save/load: simulation, agents, tasks, emails, wake events, transactions, outbox, KB versions, locks, audit, LLM invocations
-- Crash recovery: pause → shutdown → restart → resume
+- ✅ Save/load: config, agent tree, tick engine (tick + paused state),
+  state epoch, tasks, emails (all + pending + per-mailbox), scheduler
+  (wake conditions, queued events, activation history), outbox entries,
+  pending operations, shared KB (resources + versions + permissions),
+  locks, audit log, file-ops audit, agent runtime states
+  (state machine + continuation) — `Simulation.save_to()` /
+  `Simulation.load_from()` via `persistence.py` (SQLite)
+- ✅ Crash recovery: pause → save → shutdown → load → resume, with
+  quarantined external results delivered after resume
+- ✅ Atomic saves: one SQLite transaction (all-or-nothing)
+- ✅ Schema versioning + corruption/mismatch → clean failure
+- ✅ 11 tests in `test_persistence.py` (roundtrip, lockstep
+  determinism, quarantine recovery, atomicity, load errors)
 
 ---
 
@@ -139,10 +150,9 @@ Per the v0.6.0 review (P0 + P1). Report, SPEC §8.6, and KANBAN updated.
 | LLM budget enforced in Validate | ✅ — per-agent max concurrent |
 | Rolled-back email → no wake events | ✅ — 1 test |
 
-**Remaining (v0.7.0):** SQLite persistence + crash recovery, provider
-429/5xx retry, token/cost budget, ToolManifest/OperationPolicy + tool
-contract, sandboxed tool execution, typed AgentSnapshot views,
-BoundedMicroLoop re-observation.
+**Remaining (v0.7.0):** provider 429/5xx retry, token/cost budget,
+ToolManifest/OperationPolicy + tool contract, sandboxed tool
+execution, typed AgentSnapshot views, BoundedMicroLoop re-observation.
 
 ## Migration Order
 
@@ -157,5 +167,5 @@ BoundedMicroLoop re-observation.
  8. ✅ Commit rollback                                     — 79209cd
  9. ✅ Pause at commit boundary                            — 7e99368
 10. ✅ LLM budget (concurrency)                            — post-review hardening
-11. SQLite persistence                                    — next (v0.7.0)
+11. ✅ SQLite persistence + crash recovery                 — P3-11 (persistence.py)
 ```

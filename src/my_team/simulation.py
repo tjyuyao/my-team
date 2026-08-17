@@ -38,12 +38,13 @@ from my_team.agent_runtime import (
 )
 from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
-from my_team.audit import AuditEventType, AuditLog
+from my_team.audit import AuditEntry, AuditEventType, AuditLog
 from my_team.delegation import DelegationProtocol
-from my_team.file_ops import FileOps, FileOpsAuditLog
+from my_team.file_ops import FileOps, FileOpsAuditEntry, FileOpsAuditLog
 from my_team.human_control import HumanControl
 from my_team.mailbox import MailSystem
 from my_team.models.activation import (
+    AgentActivation,
     ExecutionConfig,
     ReadyCandidate,
     WakeCondition,
@@ -66,18 +67,28 @@ from my_team.models.intent import (
     WaitForEventIntent,
     WritePrivateFileIntent,
 )
-from my_team.outbox import Outbox
+from my_team.models.task import Task
+from my_team.outbox import Outbox, OutboxEntry
 from my_team.pending_ops import (
     OpType,
     PendingOperation,
     PendingOperationRegistry,
 )
+from my_team.persistence import SCHEMA_VERSION, SimulationStore
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
-from my_team.scheduler import AgentScheduler
-from my_team.shared_kb import LockManager, PermissionEngine, SharedKB
+from my_team.scheduler import AgentScheduler, QueuedEvent
+from my_team.shared_kb import (
+    LockInfo,
+    LockManager,
+    PermissionEngine,
+    PermissionRule,
+    SharedKB,
+    SharedKBResource,
+    VersionInfo,
+)
 from my_team.task_tree import TaskTree
-from my_team.tick_engine import TickConfig, TickEngine, TickResult
+from my_team.tick_engine import SimulationState, TickConfig, TickEngine, TickResult
 from my_team.transaction import EffectStatus, EffectType, StagedEffect, TransactionBuffer
 
 
@@ -653,6 +664,302 @@ class Simulation:
         agent_tree = AgentTree.from_dict(data)
 
         return cls(agent_tree=agent_tree, config=sim_config)
+
+    # -- Persistence (P3-11: SQLite save/load) ------------------------------
+
+    def save_to(self, path: str | Path) -> None:
+        """Persist the full simulation state to a SQLite database.
+
+        All components are written in ONE transaction: either the
+        previous state remains or the new state is complete — never
+        partial. Save at tick boundaries (the transaction buffer is
+        empty after each tick). Private workspace files stay on disk
+        under the saved base path; the DB captures everything else.
+        """
+        store = SimulationStore(path)
+        store.save(self._collect_state())
+
+    @classmethod
+    def load_from(cls, path: str | Path) -> Simulation:
+        """Reconstruct a simulation from a saved database (crash recovery).
+
+        The simulation is rebuilt from the saved agent tree + config,
+        then every subsystem's state is restored: tick engine, tasks,
+        emails, scheduler events, outbox, pending ops, shared KB
+        (resources + versions + permissions), locks, audit, agent
+        runtime states (state machine + continuation), and the state
+        epoch.
+
+        Agent runtime LOGIC is not persisted: runtimes are rebuilt by
+        role from the agent config (RootAgent/ManagerAgent/SubAgent).
+        Callers that inject custom runtime classes (e.g. LLMAgent or
+        test doubles) must re-install them after load, exactly like
+        they do when constructing a fresh simulation.
+        """
+        store = SimulationStore(path)
+        state = store.load()
+        if state is None:
+            raise FileNotFoundError(f"No saved simulation state at '{path}'")
+        saved_version = store.schema_version()
+        if saved_version != SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported persistence schema version: {saved_version} "
+                f"(expected {SCHEMA_VERSION})"
+            )
+
+        config = SimulationConfig(**state["config"])
+        agent_tree = AgentTree.from_dict({"agents": state["agent_tree"]})
+        sim = cls(agent_tree=agent_tree, config=config)
+        sim._restore_state(state)
+        return sim
+
+    def _collect_state(self) -> dict[str, Any]:
+        """Serialize all subsystem state into JSON-safe component blobs."""
+        return {
+            "config": self._config.model_dump(mode="json"),
+            "agent_tree": [
+                c.model_dump(mode="json") for c in self._agent_tree
+            ],
+            "tick_engine": {
+                "current_tick": self._tick_engine.current_tick,
+                "state": self._tick_engine.state.value,
+            },
+            "state_epoch": self._state_epoch,
+            "private_store_base_path": str(
+                self._private_store._config.base_path
+            ),
+            "tasks": {
+                "tasks": {
+                    tid: t.model_dump(mode="json")
+                    for tid, t in self._task_tree._tasks.items()
+                },
+                "parent_map": self._task_tree._parent_map,
+                "children_map": self._task_tree._children_map,
+                "owner_map": self._task_tree._owner_map,
+            },
+            "emails": {
+                "all": {
+                    eid: e.model_dump(mode="json")
+                    for eid, e in self._mail_system._all_emails.items()
+                },
+                "pending": [e.email_id for e in self._mail_system._pending],
+                "mailboxes": {
+                    aid: {
+                        "inbox": [e.email_id for e in mb._inbox.values()],
+                        "outbox": [e.email_id for e in mb._outbox.values()],
+                    }
+                    for aid, mb in self._mail_system._mailboxes.items()
+                },
+            },
+            "scheduler": {
+                "wake_conditions": {
+                    aid: c.model_dump(mode="json")
+                    for aid, c in self._scheduler._wake_conditions.items()
+                },
+                "events": [
+                    qe.model_dump(mode="json") for qe in self._scheduler._events
+                ],
+                "activation_history": [
+                    a.model_dump(mode="json")
+                    for a in self._scheduler._activation_history
+                ],
+                "activation_counter": self._scheduler._activation_counter,
+            },
+            "outbox": {
+                "entries": [
+                    e.model_dump(mode="json")
+                    for e in self._outbox._entries.values()
+                ],
+                "max_retries": self._outbox._max_retries,
+            },
+            "pending_ops": {
+                "operations": [
+                    op.model_dump(mode="json")
+                    for op in self._pending_ops._operations.values()
+                ],
+            },
+            "kb": {
+                "resources": [
+                    r.model_dump(mode="json")
+                    for r in self._shared_kb._resources.values()
+                ],
+                "versions": [
+                    v.model_dump(mode="json")
+                    for v in self._shared_kb.versions._versions.values()
+                ],
+                "permissions": [
+                    r.model_dump(mode="json")
+                    for r in self._permission_engine._rules
+                ],
+            },
+            "locks": {
+                "locks": [
+                    lock.model_dump(mode="json")
+                    for lock in self._lock_manager._locks.values()
+                ],
+                "lock_counter": self._lock_manager._lock_counter,
+            },
+            "audit": {
+                "entries": [
+                    e.model_dump(mode="json") for e in self._audit_log._entries
+                ],
+                "next_event_id": self._audit_log._counter,
+            },
+            "file_ops_audit": [
+                e.model_dump(mode="json") for e in self._file_ops_audit._entries
+            ],
+            "agent_states": {
+                aid: {
+                    "state": rs.state_machine.state.value,
+                    "transition_count": rs.state_machine.transition_count,
+                    "continuation": rs.continuation.model_dump(mode="json"),
+                    "active_activation_id": rs.active_activation_id,
+                    "last_activation_tick": rs.last_activation_tick,
+                }
+                for aid, rs in self._agent_runtime_states.items()
+            },
+        }
+
+    def _restore_state(self, state: dict[str, Any]) -> None:
+        """Restore subsystem state into a freshly constructed simulation.
+
+        The constructor already built agents, mailboxes, runtimes and
+        registered scheduler conditions; this overwrites them with the
+        persisted state.
+        """
+        # Tick engine + state epoch
+        te = state["tick_engine"]
+        self._tick_engine._current_tick = te["current_tick"]
+        self._tick_engine._state = SimulationState(te["state"])
+        self._state_epoch = state["state_epoch"]
+
+        # Private store (files live on disk under the saved base path)
+        base = state.get("private_store_base_path", "private")
+        self._private_store = PrivateStore(PrivateStoreConfig(
+            base_path=base,
+            max_storage_bytes=self._config.private_storage_limit_mb * 1024 * 1024,
+        ))
+        for agent_config in self._agent_tree:
+            self._private_store.initialize_agent(agent_config.agent_id)
+
+        # Tasks
+        task_state = state["tasks"]
+        self._task_tree._tasks = {
+            tid: Task.model_validate(d)
+            for tid, d in task_state["tasks"].items()
+        }
+        self._task_tree._parent_map = dict(task_state["parent_map"])
+        self._task_tree._children_map = {
+            k: list(v) for k, v in task_state["children_map"].items()
+        }
+        self._task_tree._owner_map = {
+            k: list(v) for k, v in task_state["owner_map"].items()
+        }
+
+        # Emails
+        email_state = state["emails"]
+        all_emails = {
+            eid: Email.model_validate(d)
+            for eid, d in email_state["all"].items()
+        }
+        ms = self._mail_system
+        ms._all_emails = all_emails
+        ms._pending = [all_emails[eid] for eid in email_state["pending"]]
+        for aid, mb_state in email_state["mailboxes"].items():
+            mb = ms._mailboxes.get(aid)
+            if mb is None:
+                continue
+            mb._inbox = {
+                eid: all_emails[eid]
+                for eid in mb_state["inbox"] if eid in all_emails
+            }
+            mb._outbox = {
+                eid: all_emails[eid]
+                for eid in mb_state["outbox"] if eid in all_emails
+            }
+
+        # Scheduler
+        sched = state["scheduler"]
+        self._scheduler._wake_conditions = {
+            aid: WakeCondition.model_validate(d)
+            for aid, d in sched["wake_conditions"].items()
+        }
+        self._scheduler._events = [
+            QueuedEvent.model_validate(d) for d in sched["events"]
+        ]
+        self._scheduler._activation_history = [
+            AgentActivation.model_validate(d)
+            for d in sched["activation_history"]
+        ]
+        self._scheduler._activation_counter = sched["activation_counter"]
+
+        # Outbox
+        ob = state["outbox"]
+        self._outbox._entries = {
+            e["entry_id"]: OutboxEntry.model_validate(e)
+            for e in ob["entries"]
+        }
+        self._outbox._idempotency_keys = {
+            e.idempotency_key for e in self._outbox._entries.values()
+        }
+        self._outbox._max_retries = ob["max_retries"]
+
+        # Pending operations
+        self._pending_ops._operations = {
+            op["request_id"]: PendingOperation.model_validate(op)
+            for op in state["pending_ops"]["operations"]
+        }
+
+        # Shared KB (resources + versions + permissions)
+        kb = state["kb"]
+        self._shared_kb._resources = {
+            r["path"]: SharedKBResource.model_validate(r)
+            for r in kb["resources"]
+        }
+        self._shared_kb.versions._versions = {
+            v["path"]: VersionInfo.model_validate(v)
+            for v in kb["versions"]
+        }
+        self._permission_engine._rules = [
+            PermissionRule.model_validate(r) for r in kb["permissions"]
+        ]
+
+        # Locks
+        locks = state["locks"]
+        self._lock_manager._locks = {
+            lock["resource"]: LockInfo.model_validate(lock)
+            for lock in locks["locks"]
+        }
+        self._lock_manager._lock_counter = locks["lock_counter"]
+
+        # Audit
+        audit = state["audit"]
+        self._audit_log._entries = [
+            AuditEntry.model_validate(e) for e in audit["entries"]
+        ]
+        self._audit_log._counter = audit["next_event_id"]
+
+        # File ops audit
+        self._file_ops_audit._entries = [
+            FileOpsAuditEntry.model_validate(e)
+            for e in state.get("file_ops_audit", [])
+        ]
+
+        # Agent runtime states (state machine + continuation)
+        for aid, rs_state in state["agent_states"].items():
+            rs = self._agent_runtime_states.get(aid)
+            if rs is None:
+                continue
+            rs.state_machine = AgentStateMachine(
+                agent_id=aid,
+                initial_state=AgentState(rs_state["state"]),
+            )
+            rs.state_machine._transition_count = rs_state["transition_count"]
+            rs.continuation = AgentContinuation.model_validate(
+                rs_state["continuation"]
+            )
+            rs.active_activation_id = rs_state["active_activation_id"]
+            rs.last_activation_tick = rs_state["last_activation_tick"]
 
     # -- Tick execution (10 phases) -----------------------------------------
 
