@@ -22,7 +22,7 @@ ToolManifest
 → Commit / Outbox / Compensation
 ```
 
-**显式不做：** 开放 Bash（见 KANBAN/OPEN_ISSUE.md OI-001）。
+**显式不做：** 开放 Bash（见 KANBAN/OPEN_ISSUE/OI-001.md）。
 
 ## P1: Must Complete
 
