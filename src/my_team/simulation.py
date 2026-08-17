@@ -42,6 +42,7 @@ from my_team.agent_runtime import (
 from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
+from my_team.context_compiler import ContextCompiler
 from my_team.executor_registry import (
     ExecutorRegistry,
     ExecutorTier,
@@ -329,6 +330,15 @@ class Simulation:
             task_tree=self._task_tree,
             lock_manager=self._lock_manager,
             audit_log=self._audit_log,
+        )
+
+        # T6: ContextCompiler for role-aware observation assembly
+        self._context_compiler = ContextCompiler(
+            agent_tree=self._agent_tree,
+            task_tree=self._task_tree,
+            shared_kb=self._shared_kb,
+            mail_system=self._mail_system,
+            private_store=self._private_store,
         )
 
         # Agent scheduler (event-driven activation)
@@ -2125,7 +2135,11 @@ class Simulation:
         snapshot: dict[str, Any],
         ready: list[ReadyCandidate] | None = None,
     ) -> dict[str, AgentObservation]:
-        """Phase 4: Ready agents observe the frozen snapshot."""
+        """Phase 4: Ready agents observe the frozen snapshot.
+
+        T6: Uses ContextCompiler for role-aware observation assembly
+        with token budget enforcement.
+        """
         observations: dict[str, AgentObservation] = {}
         # Determine which agents to observe
         if ready is not None:
@@ -2136,27 +2150,32 @@ class Simulation:
         for agent_id, runtime in self._runtimes.items():
             if agent_id not in active_ids:
                 continue
-            # Filter lock tokens: only the lock holder sees their token
-            agent_locks = {}
-            lock_tokens = snapshot.get("lock_tokens", {})
-            for resource, lock_info in snapshot["locks"].items():
-                entry = dict(lock_info)
-                if entry.get("owner") == agent_id and resource in lock_tokens:
-                    entry["lock_token"] = lock_tokens[resource]
-                agent_locks[resource] = entry
 
-            # Build typed, deeply immutable agent-specific snapshot
-            agent_snapshot = AgentSnapshot(
-                tick=tick,
-                emails=tuple(snapshot["emails"]),
-                task_states=_proxy_nested(snapshot["tasks"]),
-                shared_kb_snapshot=_proxy(snapshot["shared_kb"]),
-                lock_states=_proxy(agent_locks),
-                private_workspace_path=str(
-                    self._private_store.agent_home(agent_id)
-                ),
+            # Find agent config
+            agent_config = None
+            for cfg in self._agent_tree:
+                if cfg.agent_id == agent_id:
+                    agent_config = cfg
+                    break
+            if agent_config is None:
+                continue
+
+            # T6: Use ContextCompiler for role-aware observation
+            continuation = self._agent_runtime_states[agent_id].continuation
+            compiled = self._context_compiler.compile(
+                agent_config, snapshot, continuation,
             )
-            observations[agent_id] = runtime.observe(agent_snapshot)
+
+            # Wrap in AgentObservation (backward compatible)
+            observations[agent_id] = AgentObservation(
+                agent_id=compiled["agent_id"],
+                tick=compiled["tick"],
+                emails=compiled.get("emails", []),
+                task_states=compiled.get("task_states", {}),
+                shared_kb_snapshot=compiled.get("shared_kb_snapshot", {}),
+                lock_states=compiled.get("lock_states", {}),
+                private_workspace_path=compiled.get("private_workspace_path", ""),
+            )
         return observations
 
     def _phase_decide(

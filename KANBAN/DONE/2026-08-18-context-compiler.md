@@ -3,6 +3,8 @@
 **Phase:** v0.9 基础 / v0.10 完整
 **Source:** SPEC §5；OI-004 §1.1/§1.2
 **Priority:** high
+**Completed:** 2026-08-18
+**Tests:** 768 passed（+17），ruff clean，mypy clean（43 source files）
 
 ## 目标
 实现"同一抽象水平思考"：每个 Agent 看到的观察由其角色与当前
