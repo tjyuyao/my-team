@@ -29,6 +29,11 @@ from my_team.models.intent import (
     SubmitToolRequest,
     WritePrivateFileIntent,
 )
+from my_team.tool_manifest import (
+    OperationPolicy,
+    PolicyDecision,
+    ToolManifest,
+)
 
 # ---------------------------------------------------------------------------
 # ToolContext — identity binding for every tool call
@@ -108,19 +113,83 @@ class ToolRegistry:
     Every tool call must go through this registry. The system provides
     the ToolContext (with agent_id), and the registry verifies the agent
     has permission to use the requested tool.
+
+    v0.7.0: tools are registered with a ToolManifest (declarative
+    contract — see tool_manifest.py). Registration validates the
+    manifest. An OperationPolicy (deny-by-default) may be attached:
+    execution then requires (a) the agent's tool permission AND (b) a
+    policy decision allowing the tool. Bare handler registration
+    (without manifest) remains supported for legacy callers; policy
+    enforcement requires manifests for all policy-checked tools.
     """
 
     def __init__(self) -> None:
         self._agent_tools: dict[str, frozenset[str]] = {}
         self._tool_handlers: dict[str, Any] = {}
+        self._manifests: dict[str, ToolManifest] = {}
+        self._policy: OperationPolicy | None = None
 
     def register_agent(self, agent_id: str, tools: frozenset[str]) -> None:
         """Register the allowed tools for an agent."""
         self._agent_tools[agent_id] = tools
 
-    def register_handler(self, tool_name: str, handler: Any) -> None:
-        """Register a callable handler for a tool."""
+    def register_manifest(self, manifest: ToolManifest) -> None:
+        """Register a tool manifest (registration-time validation).
+
+        Raises ToolManifestError if the manifest is invalid.
+        """
+        self._manifests[manifest.name] = manifest
+
+    def register_handler(
+        self,
+        tool_name: str,
+        handler: Any,
+        manifest: ToolManifest | None = None,
+    ) -> None:
+        """Register a callable handler for a tool, optionally with its
+        manifest (validated at registration)."""
+        if manifest is not None:
+            if manifest.name != tool_name:
+                raise ValueError(
+                    f"Manifest name '{manifest.name}' does not match "
+                    f"tool '{tool_name}'"
+                )
+            self.register_manifest(manifest)
         self._tool_handlers[tool_name] = handler
+
+    def get_manifest(self, tool_name: str) -> ToolManifest | None:
+        """Get the manifest for a tool (None if not registered)."""
+        return self._manifests.get(tool_name)
+
+    def manifests(self) -> tuple[ToolManifest, ...]:
+        """All registered manifests, sorted by tool name."""
+        return tuple(
+            self._manifests[name] for name in sorted(self._manifests)
+        )
+
+    def set_policy(self, policy: OperationPolicy) -> None:
+        """Attach a deployment policy (deny-by-default)."""
+        self._policy = policy
+
+    @property
+    def policy(self) -> OperationPolicy | None:
+        return self._policy
+
+    def policy_decision(self, tool_name: str) -> PolicyDecision:
+        """Check a tool against the attached policy.
+
+        Without a policy: always allowed. With a policy: a tool without
+        a manifest cannot be policy-checked → denied (deny-by-default).
+        """
+        if self._policy is None:
+            return PolicyDecision(True, False, "")
+        manifest = self._manifests.get(tool_name)
+        if manifest is None:
+            return PolicyDecision(
+                False, False,
+                f"Tool '{tool_name}' has no manifest; cannot policy-check",
+            )
+        return self._policy.decide(manifest)
 
     def authorize(self, context: ToolContext, tool_name: str) -> None:
         """Verify the agent has permission to use the tool.
@@ -159,6 +228,29 @@ class ToolRegistry:
                 success=False,
                 error=str(e),
                 error_code="permission_denied",
+                retryable=False,
+                agent_id=context.agent_id,
+                tool_name=tool_name,
+                tick=context.tick,
+            )
+
+        # Policy gate (v0.7.0): deny-by-default when a policy is attached.
+        decision = self.policy_decision(tool_name)
+        if not decision.allowed:
+            return ToolResult(
+                success=False,
+                error=decision.reason,
+                error_code="policy_denied",
+                retryable=False,
+                agent_id=context.agent_id,
+                tool_name=tool_name,
+                tick=context.tick,
+            )
+        if decision.requires_approval:
+            return ToolResult(
+                success=False,
+                error=decision.reason,
+                error_code="requires_approval",
                 retryable=False,
                 agent_id=context.agent_id,
                 tool_name=tool_name,

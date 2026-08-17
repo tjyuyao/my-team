@@ -89,6 +89,7 @@ from my_team.shared_kb import (
 )
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import SimulationState, TickConfig, TickEngine, TickResult
+from my_team.tool_manifest import builtin_manifests
 from my_team.transaction import EffectStatus, EffectType, StagedEffect, TransactionBuffer
 
 
@@ -544,12 +545,27 @@ class Simulation:
                 tick=context.tick,
             )
 
-        self._tool_registry.register_handler("read", handle_read)
-        self._tool_registry.register_handler("ls", handle_ls)
-        self._tool_registry.register_handler("write", handle_write)
-        self._tool_registry.register_handler("kb_write", handle_kb_write)
-        self._tool_registry.register_handler("send_email", handle_send_email)
-        self._tool_registry.register_handler("delegate", handle_delegate)
+        # Register handlers with their manifests (v0.7.0 — registration
+        # validates each manifest against the declarative contract).
+        manifests = builtin_manifests()
+        self._tool_registry.register_handler(
+            "read", handle_read, manifest=manifests["read"],
+        )
+        self._tool_registry.register_handler(
+            "ls", handle_ls, manifest=manifests["ls"],
+        )
+        self._tool_registry.register_handler(
+            "write", handle_write, manifest=manifests["write"],
+        )
+        self._tool_registry.register_handler(
+            "kb_write", handle_kb_write, manifest=manifests["kb_write"],
+        )
+        self._tool_registry.register_handler(
+            "send_email", handle_send_email, manifest=manifests["send_email"],
+        )
+        self._tool_registry.register_handler(
+            "delegate", handle_delegate, manifest=manifests["delegate"],
+        )
 
     def _create_runtime(self, config: AgentConfig) -> AgentRuntime:
         """Create an appropriate runtime for an agent based on config."""

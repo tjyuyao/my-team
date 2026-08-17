@@ -128,6 +128,11 @@ irreversible 并走补偿）。
 - ❌ 开放 Bash（OI-001：Manifest + 沙箱 + 审批协议完成前禁止）
 - ❌ 宿主机直连 `subprocess.run(shell=True)` 类执行
 - ❌ 多实例并发写同一 DB（SQLite 单写者；多实例是 v0.8+）
+- ❌ 插件打包/注册/信任/生命周期（install/update/signature）→ v0.8+；
+  ToolManifest 即插件契约单元（每个工具一个 frozen manifest +
+  注册即校验 + effect 声明；插件层只是"一组 manifest + 执行器"的聚合，
+  不改 tick 内核。角色逻辑经 custom runtime 挂载，业务状态经
+  KB/邮件/任务抽象表达）
 
 ## 验证
 
