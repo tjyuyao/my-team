@@ -693,16 +693,19 @@ tick = 0, 1, 2, 3, ...
 
 ## 8.2 一个时间步的阶段
 
-每个时间步分为以下阶段：
+每个时间步分为以下10个阶段：
 
 ```text
-Phase 1: Freeze
-Phase 2: Deliver
-Phase 3: Observe
-Phase 4: Decide
-Phase 5: Act
-Phase 6: Commit
-Phase 7: Audit
+Phase 1:  Freeze    — snapshot global state
+Phase 2:  Deliver   — deliver emails + generate NEW_EMAIL wake events
+Phase 3:  Schedule  — compute ready set from events + agent states
+Phase 4:  Observe   — ready agents read snapshot
+Phase 5:  Decide    — ready agents generate action plan
+Phase 6:  Validate  — validate action plans before execution (pre-validation)
+Phase 7:  Act       — execute validated actions, stage effects
+Phase 8:  Commit    — atomic commit of all staged effects
+Phase 9:  Publish   — generate wake events from committed effects; timeouts
+Phase 10: Audit     — record all events
 ```
 
 ### Phase 1：Freeze
@@ -721,21 +724,33 @@ Phase 7: Audit
 
 邮件进入目标 Agent 的 `inbox`。
 
-### Phase 3：Observe
+为每个收件人生成 `NEW_EMAIL` 唤醒事件（在 tick t+1 可见）。
 
-每个 Agent 读取：
+### Phase 3：Schedule
+
+调度器根据以下条件计算就绪集合：
+
+- 每个 Agent 的 `WakeCondition`
+- 当前待处理的唤醒事件
+- Agent 当前状态（只有 IDLE 或 WAITING_FOR_* 且事件已到达的 Agent 才可被调度）
+
+就绪 Agent 的事件被标记为 `CLAIMED`。每个 Agent 每 tick 最多一次 activation。
+
+### Phase 4：Observe
+
+被调度的 Agent 读取冻结快照：
 
 - 新到达的 E-mail
 - 当前任务状态
 - 自己的私人工作空间
 - 自己的私密记忆
 - 有权限的共享知识库快照
-- 之前持有的锁状态
+- 之前持有的锁状态（只有锁持有者能看到自己的 lock_token）
 - 系统通知
 
-### Phase 4：Decide
+### Phase 5：Decide
 
-每个 Agent 独立生成本时间步动作计划。
+被调度的 Agent 独立生成本时间步动作计划（`ActionPlan`）。
 
 例如：
 
@@ -743,32 +758,41 @@ Phase 7: Audit
 {
   "agent_id": "agent.research",
   "tick": 12,
-  "planned_actions": [
+  "actions": [
     {
-      "type": "send_email",
-      "email_type": "delegation"
-    },
-    {
-      "type": "write_private",
-      "path": "workspace/analysis.md"
-    },
-    {
-      "type": "request_lock",
-      "resource": "project/research/report.md"
+      "action_type": "delegate",
+      "tool_name": "delegate",
+      "payload": {
+        "recipient_agent_id": "agent.web_research",
+        "task_title": "收集市场数据"
+      }
     }
   ]
 }
 ```
 
-### Phase 5：Act
+### Phase 6：Validate（Pre-validation）
 
-所有 Agent 并行执行其计划。
+在执行前验证每个 Agent 的 ActionPlan：
 
-执行过程中产生的结果属于临时状态，不立即暴露给其他 Agent。
+1. **工具权限** — 每个动作使用的工具是否在 Agent 授权列表中
+2. **委派目标** — delegate 动作是否指向直接子 Agent
+3. **Payload 字段** — 必填字段是否齐全（如 read 需要 path）
+4. **激活预算** — 总动作数是否在限制内
 
-### Phase 6：Commit
+未通过验证的动作被标记为失败，不会进入 Act 阶段。
 
-系统按确定性规则提交动作：
+### Phase 7：Act
+
+被调度的 Agent 执行已验证的动作：
+
+- 执行过程中产生的结果属于临时状态，不立即暴露给其他 Agent
+- 未通过 Validate 的动作被跳过
+- 执行结果被记录到 `ActionResult` 列表
+
+### Phase 8：Commit
+
+系统按确定性规则提交所有阶段化的副作用：
 
 1. 状态转换
 2. E-mail 入队
@@ -778,9 +802,18 @@ Phase 7: Audit
 6. 记忆持久化
 7. 任务状态更新
 
-如果多个动作存在冲突，应采用显式冲突规则，而不是依赖运行顺序。
+**注意：** 当前实现为 stub，仅处理邮件队列。完整的事务模型（原子提交、回滚、冲突解决）待实现。
 
-### Phase 7：Audit
+### Phase 9：Publish
+
+从已提交的副作用生成下一 tick 可见的唤醒事件：
+
+- 已提交的邮件 → `NEW_EMAIL` 唤醒事件
+- 任务状态变化 → `CHILD_TASK_CHANGE` 唤醒事件给父任务所有者
+- 锁释放 → `LOCK_AVAILABLE` 唤醒事件给等待中的 Agent
+- Deadline 检查 → `DEADLINE_APPROACHING` 或 `TIMER_EXPIRY` 唤醒事件
+
+### Phase 10：Audit
 
 系统记录：
 
@@ -793,6 +826,7 @@ Phase 7: Audit
 - 锁事件
 - 错误和超时
 - 人类控制操作
+- Agent 激活事件
 
 ## 8.3 Tick 语义澄清
 
@@ -928,92 +962,109 @@ max_rounds = 3  # 最多 3 轮 LLM → Tool
 # 9. Agent 生命周期
 
 ```text
-created
-  ↓
-initialized
-  ↓
-idle ←──────────────────────────────┐
-  ↓ event                           │
-ready                               │
-  ↓ scheduler                       │
-observing                           │
-  ↓                                 │
-deciding                            │
-  ↓                                 │
-acting                              │
-  ├── waiting_for_tool ─────────────┤
-  ├── waiting_for_child ────────────┤
-  ├── waiting_for_mail ─────────────┤
-  ├── waiting_for_lock ─────────────┤
-  ├── waiting_for_human ────────────┤
-  ├── blocked (需要介入)            │
-  └── idle (任务完成) ──────────────┘
-  ↓ unrecoverable
-failed
-  ↓
-terminated
+created → initialized → idle
+                         ↑   │
+                         │   ↓ wake event
+                         │  ready
+                         │   │
+                         │   ↓ scheduler claim
+                         │  processing
+                         │   ├── waiting_for_llm ──────┐
+                         │   ├── waiting_for_tool ──────┤
+                         │   ├── waiting_for_child ─────┤
+                         │   ├── waiting_for_mail ──────┤
+                         │   ├── waiting_for_lock ──────┤
+                         │   ├── waiting_for_human ─────┤
+                         │   ├── blocked (需要介入)     │
+                         │   └── idle (完成) ───────────┘
+                         │
+                         ↓ unrecoverable
+                       failed
+                         ↓
+                      terminated
 ```
+
+### 状态分层
+
+| 层级 | 状态 | 说明 |
+|------|------|------|
+| 系统级 | created, initialized, terminated | 系统管理，不涉及调度 |
+| 调度级 | idle, ready, processing | 控制 agent 是否被调度 |
+| 等待级 | waiting_for_* | processing 的子状态，等待外部事件 |
+| 异常级 | blocked, failed, paused | 需要外部介入或不可恢复 |
 
 ## 9.1 状态定义
 
-### `idle`
+### 调度级状态
+
+#### `created`
+
+Agent 对象已创建，尚未初始化。
+
+#### `initialized`
+
+Agent 已完成系统初始化（邮箱、私有空间、工具注册）。
+
+#### `idle`
 
 Agent 没有待处理工作。不调用 LLM，不执行 observe/decide/act。
 
 触发条件（idle → ready）：
-- 收到新 E-mail
-- 收到工具结果
-- 子任务状态变化
-- 锁可用
-- 重试时间到达
-- 人类消息到达
-- 定时器到期
+- 收到新 E-mail（NEW_EMAIL 唤醒事件）
+- 收到工具结果（TOOL_RESULT 唤醒事件）
+- 子任务状态变化（CHILD_TASK_CHANGE 唤醒事件）
+- 锁可用（LOCK_AVAILABLE 唤醒事件）
+- 重试时间到达（RETRY_TIMER 唤醒事件）
+- 人类消息到达（HUMAN_MESSAGE 唤醒事件）
+- 任务 deadline 临近（DEADLINE_APPROACHING 唤醒事件）
+- 定时器到期（TIMER_EXPIRY 唤醒事件）
+- 系统启动（BOOTSTRAP 唤醒事件）
 
-### `ready`
+#### `ready`
 
 Agent 有待处理工作，等待调度器分配 activation。
 
-### `observing`
+#### `processing`
 
-Agent 正在执行 Phase 3（Observe），读取快照。
+Agent 正在执行 activation（Observe → Validate → Decide → Act → Commit）。
 
-### `deciding`
+### 等待级状态（PROCESSING 的子状态）
 
-Agent 正在执行 Phase 4（Decide），生成动作计划。
+#### `waiting_for_llm`
 
-### `acting`
+Agent 已提交 LLM 请求，等待模型响应。当前实现中 LLM 调用是同步的，此状态已建模但尚未实际使用。
 
-Agent 正在执行 Phase 5（Act），执行工具调用。
-
-### `waiting_for_tool`
+#### `waiting_for_tool`
 
 Agent 已提交工具调用请求，等待工具结果在后续 tick 到达。
 
-### `waiting_for_child`
+#### `waiting_for_child`
 
 Agent 已委派子任务，等待子 Agent 返回结果。
 
-### `waiting_for_mail`
+#### `waiting_for_mail`
 
 Agent 等待特定 E-mail（如人类回复、审查结果）。
 
-### `waiting_for_lock`
+#### `waiting_for_lock`
 
 Agent 等待获取共享资源的互斥锁。
 
-### `waiting_for_human`
+#### `waiting_for_human`
 
 Agent 需要人类决策才能继续。
 
-### `blocked`
+### 异常级状态
+
+#### `blocked`
 
 无法继续执行，需要上级或系统介入。
 
-### `paused`
+#### `paused`
 
 系统暂停状态。不推进时间，不执行 Agent 推理。
 
-### `failed`
+#### `failed`
 
 Agent 执行失败，且不可恢复。系统可以根据策略重试或终止。
 

@@ -3,7 +3,7 @@
 Per SPEC §3, §8, §10:
 - Combines AgentTree, MailSystem, TaskTree, SharedKB, TickEngine
 - Manages AgentRuntime instances per agent
-- Drives the 7-phase tick cycle with real agent execution
+- Drives the 10-phase tick cycle with real agent execution
 - Handles email delivery, tool execution, and state commit
 """
 
@@ -190,7 +190,7 @@ class Simulation:
             max_delegation_depth=self._config.max_delegation_depth,
         )
 
-        # Timeout checker (Phase 6.5: post-Commit, pre-Audit)
+        # Timeout checker (between Phase 8 Commit and Phase 9 Publish)
         self._timeout_checker = TimeoutChecker(
             task_tree=self._task_tree,
             lock_manager=self._lock_manager,
@@ -352,8 +352,8 @@ class Simulation:
         3. Schedule — compute ready set from events + agent states
         4. Observe  — ready agents read snapshot
         5. Decide   — ready agents generate action plan
-        6. Act      — ready agents execute actions, stage effects
-        7. Validate — validate staged effects
+        6. Validate — validate action plans before execution
+        7. Act      — execute validated actions, stage effects
         8. Commit   — atomic commit of all staged effects
         9. Publish  — generate wake events from committed effects; timeouts
         10. Audit   — record all events
@@ -695,7 +695,7 @@ class Simulation:
         plans: dict[str, ActionPlan],
         ready: list[ReadyCandidate],
     ) -> dict[str, list[ActionResult]]:
-        """Phase 7: Validate action plans before execution.
+        """Phase 6: Validate action plans before execution.
 
         Checks performed:
         1. Tool capability — each action's tool is in agent's allowed tools
@@ -795,7 +795,7 @@ class Simulation:
     def _phase_commit(
         self, tick: int, all_results: dict[str, list[ActionResult]]
     ) -> list[Email]:
-        """Phase 6: Commit staged effects.
+        """Phase 8: Commit staged effects.
 
         Currently handles email queueing from actions.
         Full transaction model TODO (review gap §8.4).
