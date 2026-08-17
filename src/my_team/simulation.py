@@ -73,7 +73,7 @@ from my_team.scheduler import AgentScheduler
 from my_team.shared_kb import LockManager, PermissionEngine, SharedKB
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import TickConfig, TickEngine, TickResult
-from my_team.transaction import EffectType, TransactionBuffer
+from my_team.transaction import EffectStatus, EffectType, StagedEffect, TransactionBuffer
 
 
 class SimulationConfig(BaseModel):
@@ -1372,91 +1372,150 @@ class Simulation:
         # Step 3: Commit
         committed = buffer.commit()
 
-        # Step 4: Apply committed effects to subsystems
+        # Step 4: Apply committed effects to subsystems.
+        # If any effect fails during application, previously applied
+        # effects in this tick are rolled back (in-memory reversal).
         committed_emails: list[Email] = []
-        for effect in committed:
-            if effect.effect_type == EffectType.FILE_WRITE:
-                # Write to private workspace
-                agent_id = effect.agent_id
-                path = effect.resource
-                content = effect.data.get("content", "")
-                home = self._private_store.agent_home(agent_id)
-                target = home / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+        applied: list[StagedEffect] = []
+        created_email_ids: list[str] = []
+        created_task_ids: list[str] = []
 
-            elif effect.effect_type == EffectType.EMAIL_SEND:
-                from my_team.models.email import EmailType
-                data = effect.data
-                email = self._mail_system.create_email(
-                    from_agent=data.get("from_agent", effect.agent_id),
-                    to=data.get("to", []),
-                    subject=data.get("subject", ""),
-                    body=data.get("body", ""),
-                    email_type=EmailType(data.get("email_type", "progress")),
-                    tick=tick,
-                    deliver_at_tick=tick + self._config.email_delivery_latency_ticks,
-                    task_id=data.get("task_id", ""),
-                )
-                committed_emails.append(email)
+        def _rollback() -> None:
+            """Reverse applied effects in reverse order."""
+            # Remove created tasks (in reverse creation order)
+            for task_id in reversed(created_task_ids):
+                try:
+                    self._task_tree._tasks.pop(task_id, None)
+                    self._task_tree._parent_map.pop(task_id, None)
+                    for owner, ids in list(self._task_tree._owner_map.items()):
+                        if task_id in ids:
+                            ids.remove(task_id)
+                except Exception:  # noqa: BLE001 — rollback must not fail
+                    pass
 
-            elif effect.effect_type == EffectType.TASK_CREATE:
-                from my_team.models.task import TaskPriority, TaskStatus
-                data = effect.data
-                self._task_tree.create(
-                    task_id=data.get("task_id", effect.resource),
-                    title=data.get("title", ""),
-                    description=data.get("description", ""),
-                    creator_agent_id=data.get("creator_agent_id", effect.agent_id),
-                    owner_agent_id=data.get("owner_agent_id", ""),
-                    parent_task_id=data.get("parent_task_id"),
-                    priority=TaskPriority.NORMAL,
-                    status=TaskStatus.ASSIGNED,
-                    tick=tick,
-                )
+            # Remove created emails (in reverse creation order)
+            for email_id in reversed(created_email_ids):
+                try:
+                    email = self._mail_system._all_emails.pop(email_id, None)
+                    if email is not None and email in self._mail_system._pending:
+                        self._mail_system._pending.remove(email)
+                except Exception:  # noqa: BLE001 — rollback must not fail
+                    pass
 
-            elif effect.effect_type == EffectType.TASK_UPDATE:
-                from my_team.models.task import TaskStatus
-                data = effect.data
-                task_id = effect.resource
-                if self._task_tree.exists(task_id):
-                    new_status = TaskStatus(data.get("status", "in_progress"))
-                    self._task_tree.update_status(
-                        task_id, new_status, tick=tick, allow_walk=True,
+            # Mark applied effects as rolled back
+            for ap in applied:
+                ap.status = EffectStatus.ROLLED_BACK
+
+        try:
+            for effect in committed:
+                if effect.effect_type == EffectType.FILE_WRITE:
+                    # Write to private workspace
+                    agent_id = effect.agent_id
+                    path = effect.resource
+                    content = effect.data.get("content", "")
+                    home = self._private_store.agent_home(agent_id)
+                    target = home / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
+
+                elif effect.effect_type == EffectType.EMAIL_SEND:
+                    from my_team.models.email import EmailType
+                    data = effect.data
+                    email = self._mail_system.create_email(
+                        from_agent=data.get("from_agent", effect.agent_id),
+                        to=data.get("to", []),
+                        subject=data.get("subject", ""),
+                        body=data.get("body", ""),
+                        email_type=EmailType(data.get("email_type", "progress")),
+                        tick=tick,
+                        deliver_at_tick=tick + self._config.email_delivery_latency_ticks,
+                        task_id=data.get("task_id", ""),
                     )
-                    task = self._task_tree.get(task_id)
-                    if data.get("summary"):
-                        task.metadata["summary"] = data["summary"]
-                    if data.get("artifacts"):
-                        task.metadata["artifacts"] = data["artifacts"]
+                    committed_emails.append(email)
+                    created_email_ids.append(email.email_id)
 
-            elif effect.effect_type in {
-                EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
-            }:
-                # Apply shared KB write via the internal commit path
-                # (permission/lock/version already validated in Phase 6-8)
-                data = effect.data
-                path = effect.resource
-                if effect.effect_type == EffectType.KB_WRITE:
-                    self._shared_kb._apply_committed(
-                        path=path,
-                        agent_id=effect.agent_id,
-                        content=data.get("content", ""),
-                        expected_version=data.get("expected_version", 0),
+                elif effect.effect_type == EffectType.TASK_CREATE:
+                    from my_team.models.task import TaskPriority, TaskStatus
+                    data = effect.data
+                    self._task_tree.create(
+                        task_id=data.get("task_id", effect.resource),
+                        title=data.get("title", ""),
+                        description=data.get("description", ""),
+                        creator_agent_id=data.get("creator_agent_id", effect.agent_id),
+                        owner_agent_id=data.get("owner_agent_id", ""),
+                        parent_task_id=data.get("parent_task_id"),
+                        priority=TaskPriority.NORMAL,
+                        status=TaskStatus.ASSIGNED,
                         tick=tick,
                     )
-                elif effect.effect_type == EffectType.KB_CREATE:
-                    self._shared_kb.create(
-                        path=path,
-                        agent_id=effect.agent_id,
-                        content=data.get("content", ""),
-                        tick=tick,
-                    )
-                elif effect.effect_type == EffectType.KB_DELETE:
-                    self._shared_kb.delete(
-                        path=path,
-                        agent_id=effect.agent_id,
-                    )
+                    created_task_ids.append(data.get("task_id", effect.resource))
+
+                elif effect.effect_type == EffectType.TASK_UPDATE:
+                    from my_team.models.task import TaskStatus
+                    data = effect.data
+                    task_id = effect.resource
+                    if self._task_tree.exists(task_id):
+                        new_status = TaskStatus(data.get("status", "in_progress"))
+                        self._task_tree.update_status(
+                            task_id, new_status, tick=tick, allow_walk=True,
+                        )
+                        task = self._task_tree.get(task_id)
+                        if data.get("summary"):
+                            task.metadata["summary"] = data["summary"]
+                        if data.get("artifacts"):
+                            task.metadata["artifacts"] = data["artifacts"]
+
+                elif effect.effect_type in {
+                    EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
+                }:
+                    # Apply shared KB write via the internal commit path
+                    # (permission/lock/version already validated in Phase 6-8)
+                    data = effect.data
+                    path = effect.resource
+                    if effect.effect_type == EffectType.KB_WRITE:
+                        self._shared_kb._apply_committed(
+                            path=path,
+                            agent_id=effect.agent_id,
+                            content=data.get("content", ""),
+                            expected_version=data.get("expected_version", 0),
+                            tick=tick,
+                        )
+                    elif effect.effect_type == EffectType.KB_CREATE:
+                        self._shared_kb.create(
+                            path=path,
+                            agent_id=effect.agent_id,
+                            content=data.get("content", ""),
+                            tick=tick,
+                        )
+                    elif effect.effect_type == EffectType.KB_DELETE:
+                        self._shared_kb.delete(
+                            path=path,
+                            agent_id=effect.agent_id,
+                        )
+
+                applied.append(effect)
+        except Exception as e:  # noqa: BLE001 — rollback on any apply failure
+            _rollback()
+            # Mark the failing effect as FAILED; any committed effects
+            # that were not applied (skipped by the exception) also FAIL
+            for eff in committed:
+                if eff.status == EffectStatus.COMMITTED:
+                    eff.status = EffectStatus.ROLLED_BACK
+            failing = committed[-1] if committed else None
+            if failing is not None and failing.status == EffectStatus.ROLLED_BACK:
+                failing.status = EffectStatus.FAILED
+                failing.error = str(e)
+            self._audit_log.record(
+                AuditEventType.TRANSACTION_ROLLBACK,
+                tick=tick,
+                details={
+                    "error": str(e),
+                    "rolled_back": [ap.effect_id for ap in applied],
+                },
+                success=False,
+                error=str(e),
+            )
+            return []
 
         # Record audit for committed effects
         for effect in committed:
