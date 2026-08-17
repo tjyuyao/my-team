@@ -3,8 +3,14 @@
 Per SPEC §3, §8, §10:
 - Combines AgentTree, MailSystem, TaskTree, SharedKB, TickEngine
 - Manages AgentRuntime instances per agent
-- Drives the 10-phase tick cycle with real agent execution
+- Drives the 9-phase tick cycle (kernel model) with real agent execution
 - Handles email delivery, tool execution, and state commit
+
+Architecture (v0.6.0):
+- Tick is the kernel's state commit unit, NOT the agent's ReAct cycle
+- Agent uses AgentContinuation for resumable ReAct state
+- External operations (LLM, tool) go through PendingOperationRegistry
+- Phase 5 (Decide) produces Intents, never blocks on external calls
 """
 
 from __future__ import annotations
@@ -46,7 +52,11 @@ from my_team.models.activation import (
     WakeupEvent,
 )
 from my_team.models.agent import AgentConfig
+
+# New v0.6.0 models
+from my_team.models.continuation import AgentContinuation
 from my_team.models.email import Email
+from my_team.pending_ops import OpType, PendingOperationRegistry
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
 from my_team.scheduler import AgentScheduler
@@ -80,9 +90,11 @@ class SimulationConfig(BaseModel):
 class AgentRuntimeState:
     """Authoritative runtime state for a single agent.
 
-    Holds the AgentStateMachine as the single source of truth for
-    agent lifecycle state. The scheduler reads from this, not from
-    its own internal state.
+    Holds:
+    - AgentStateMachine as the single source of truth for lifecycle state
+    - AgentContinuation for resumable ReAct state (v0.6.0)
+
+    The scheduler reads from this, not from its own internal state.
     """
 
     def __init__(self, agent_id: str) -> None:
@@ -91,6 +103,7 @@ class AgentRuntimeState:
             agent_id=agent_id,
             initial_state=AgentState.CREATED,
         )
+        self.continuation = AgentContinuation(agent_id=agent_id)
         self.active_activation_id: str | None = None
         self.last_activation_tick: int | None = None
 
@@ -121,8 +134,20 @@ class AgentRuntimeState:
         if self.state == AgentState.PROCESSING:
             self.state_machine.transition(waiting_state, tick=tick, reason="awaiting event")
 
+    def receive_llm_result(self, result: dict[str, Any], tick: int) -> None:
+        """Receive LLM result and transition to PROCESSING for next activation."""
+        self.continuation.receive_llm_result(result, tick)
+        # Agent will be re-activated by scheduler when LLM_RESULT event arrives
+
+    def receive_tool_result(self, result: dict[str, Any], tick: int) -> None:
+        """Receive tool result and transition to PROCESSING for next activation."""
+        self.continuation.receive_tool_result(result, tick)
+
     def __repr__(self) -> str:
-        return f"AgentRuntimeState({self.agent_id}, state={self.state.value})"
+        return (
+            f"AgentRuntimeState({self.agent_id}, state={self.state.value}, "
+            f"phase={self.continuation.phase.value})"
+        )
 
 
 class Simulation:
@@ -164,8 +189,11 @@ class Simulation:
         # Tool registry
         self._tool_registry = ToolRegistry()
 
-        # Transaction buffer for atomic commit
+        # Transaction buffer for staged-effect commit
         self._transaction_buffer = TransactionBuffer()
+
+        # Pending operation registry (v0.6.0 — async LLM/tool tracking)
+        self._pending_ops = PendingOperationRegistry()
 
         # Tick engine
         self._tick_engine = TickEngine(TickConfig(
@@ -479,54 +507,53 @@ class Simulation:
     # -- Tick execution (10 phases) -----------------------------------------
 
     def run_tick(self) -> TickResult:
-        """Execute one complete tick through all 10 phases.
+        """Execute one complete tick through the 9-phase kernel cycle.
+
+        Per SPEC §8.6: Tick is the kernel's state commit unit, NOT the
+        agent's ReAct cycle. Each phase is finite and non-blocking.
 
         Phases:
-        1. Freeze   — snapshot global state
-        2. Deliver  — deliver emails, generate NEW_EMAIL wake events
+        1. Ingest   — collect completed external events (LLM, tool, human)
+                      + deliver emails whose deliver_at_tick <= current_tick
+        2. Freeze   — snapshot global state
         3. Schedule — compute ready set from events + agent states
-        4. Observe  — ready agents read snapshot
-        5. Decide   — ready agents generate action plan
-        6. Validate — validate action plans before execution
-        7. Act      — execute validated actions, stage effects
-        8. Commit   — atomic commit of all staged effects
-        9. Publish  — generate wake events from committed effects; timeouts
-        10. Audit   — record all events
+        4. Resume   — restore agent continuation, read new events
+        5. Decide   — generate Intents (non-blocking, no sync LLM/tool)
+        6. Validate — validate Intents before execution
+        7. Commit   — apply staged effects, register pending operations
+        8. Publish  — dispatch pending ops, generate wake events; timeouts
+        9. Audit    — record all events
         """
         tick = self._tick_engine.current_tick
 
-        # Phase 1: Freeze — snapshot global state
-        snapshot = self._build_snapshot(tick)
-
-        # Phase 2: Deliver — deliver emails
+        # Phase 1: Ingest — collect completed external operations + deliver emails
+        self._phase_ingest(tick)
         delivered = self._phase_deliver(tick)
+
+        # Phase 2: Freeze — snapshot global state
+        snapshot = self._build_snapshot(tick)
 
         # Phase 3: Schedule — determine which agents activate
         ready = self._phase_schedule(tick)
 
-        # Phase 4: Observe — ready agents read from snapshot
+        # Phase 4: Resume — restore agent continuation, read new events
         observations = self._phase_observe(tick, snapshot, ready)
 
-        # Phase 5: Decide — ready agents generate action plan
+        # Phase 5: Decide — generate Intents (non-blocking)
         plans = self._phase_decide(tick, observations, ready)
 
-        # Phase 6: Validate — check action plans before execution
+        # Phase 6: Validate — check Intents before execution
         validated = self._phase_validate(tick, plans, ready)
 
-        # Phase 7: Act — execute validated actions through tool registry
+        # Phase 7: Commit — apply staged effects, register pending ops
         all_results = self._phase_act(tick, plans, ready, validated)
-
-        # Phase 8: Commit — atomic state update
         self._phase_commit(tick, all_results)
         self._transaction_buffer.clear()
 
-        # Phase 9: Publish — wake events + timeouts
+        # Phase 8: Publish — dispatch pending ops, generate wake events
         self._phase_publish(tick, delivered, all_results, ready)
 
-        # Phase 9: Publish — wake events + timeouts
-        self._phase_publish(tick, delivered, all_results, ready)
-
-        # Phase 10: Audit
+        # Phase 9: Audit
         self._phase_audit(tick, delivered, all_results, ready)
 
         # Complete activations and clean up scheduler
@@ -560,6 +587,60 @@ class Simulation:
         return results
 
     # -- Phase implementations ----------------------------------------------
+
+    def _phase_ingest(self, tick: int) -> None:
+        """Phase 1: Collect completed external operations.
+
+        Checks the PendingOperationRegistry for completed operations
+        and publishes them as WakeEvents for the current tick.
+        """
+        # Check for timed-out operations
+        expired = self._pending_ops.timeout_expired(tick)
+        for op in expired:
+            self._audit_log.record(
+                AuditEventType.TOOL_RESULT,
+                agent_id=op.agent_id,
+                tick=tick,
+                details={
+                    "request_id": op.request_id,
+                    "status": "timed_out",
+                    "op_type": op.op_type.value,
+                },
+                success=False,
+                error=f"Operation timed out at tick {tick}",
+            )
+
+        # Collect completed operations eligible for this tick
+        completed = self._pending_ops.collect_completed(tick)
+        for op in completed:
+            if op.op_type == OpType.LLM_REQUEST:
+                # LLM result ready → publish LLM_RESULT wake event
+                self._scheduler.enqueue_event(WakeupEvent(
+                    event_type=WakeEventType.TOOL_RESULT,  # reuse TOOL_RESULT for now
+                    target_agent_id=op.agent_id,
+                    tick=tick,
+                    source_agent_id="llm_gateway",
+                    task_id=op.task_id,
+                    details={
+                        "request_id": op.request_id,
+                        "result_type": "llm_result",
+                        "result": op.result,
+                    },
+                ))
+            elif op.op_type == OpType.TOOL_REQUEST:
+                # Tool result ready → publish TOOL_RESULT wake event
+                self._scheduler.enqueue_event(WakeupEvent(
+                    event_type=WakeEventType.TOOL_RESULT,
+                    target_agent_id=op.agent_id,
+                    tick=tick,
+                    source_agent_id="tool_executor",
+                    task_id=op.task_id,
+                    details={
+                        "request_id": op.request_id,
+                        "result_type": "tool_result",
+                        "result": op.result,
+                    },
+                ))
 
     def _get_agent_states(self) -> dict[str, AgentState]:
         """Get current state of all agents for scheduler.
