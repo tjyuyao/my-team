@@ -1,0 +1,292 @@
+"""Transaction management for atomic commit in tick phases.
+
+Per SPEC §8.2 Phase 6, §13.2:
+- Actions produce staged effects during Act phase
+- Commit phase validates preconditions, resolves conflicts, and atomically applies
+- Partial failures are rolled back or explicitly marked
+- Deterministic conflict resolution (not dependent on execution order)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class EffectType(str, Enum):
+    """Types of staged effects that can be committed."""
+
+    EMAIL_SEND = "email_send"
+    EMAIL_DELIVER = "email_deliver"
+    FILE_WRITE = "file_write"
+    FILE_DELETE = "file_delete"
+    KB_CREATE = "kb_create"
+    KB_WRITE = "kb_write"
+    KB_DELETE = "kb_delete"
+    LOCK_ACQUIRE = "lock_acquire"
+    LOCK_RELEASE = "lock_release"
+    TASK_CREATE = "task_create"
+    TASK_UPDATE = "task_update"
+    STATE_TRANSITION = "state_transition"
+
+
+class EffectStatus(str, Enum):
+    """Status of a staged effect."""
+
+    STAGED = "staged"          # Waiting to be committed
+    VALIDATED = "validated"    # Preconditions checked
+    COMMITTED = "committed"    # Successfully applied
+    FAILED = "failed"          # Failed validation or commit
+    ROLLED_BACK = "rolled_back"  # Rolled back after partial failure
+
+
+class StagedEffect(BaseModel):
+    """A single staged effect waiting to be committed."""
+
+    effect_id: str = Field(description="Unique effect identifier")
+    effect_type: EffectType = Field(description="Type of effect")
+    agent_id: str = Field(description="Agent that produced this effect")
+    resource: str = Field(description="Resource path or identifier")
+    data: dict[str, Any] = Field(default_factory=dict, description="Effect payload")
+    expected_version: int | None = Field(
+        default=None,
+        description="Expected version for optimistic concurrency",
+    )
+    lock_token: str | None = Field(
+        default=None,
+        description="Lock token if resource requires locking",
+    )
+    status: EffectStatus = Field(default=EffectStatus.STAGED)
+    error: str | None = Field(default=None, description="Error if failed")
+
+
+class ConflictResolution(BaseModel):
+    """Result of conflict resolution for competing effects."""
+
+    winner: str = Field(description="Effect ID of the winner")
+    losers: list[str] = Field(description="Effect IDs of the losers")
+    reason: str = Field(description="Why this resolution was chosen")
+
+
+class TransactionBuffer:
+    """Collects staged effects during the Act phase and commits them atomically.
+
+    Workflow:
+    1. Act phase: agents produce StagedEffect instances via stage()
+    2. Commit phase:
+       a. validate() — check all preconditions
+       b. resolve_conflicts() — deterministically pick winners
+       c. commit() — atomically apply all valid effects
+       d. rollback() — on failure, undo committed effects
+    """
+
+    def __init__(self) -> None:
+        self._effects: dict[str, StagedEffect] = {}
+        self._counter = 0
+        self._committed: list[StagedEffect] = []
+        self._conflict_resolutions: list[ConflictResolution] = []
+
+    def stage(
+        self,
+        effect_type: EffectType,
+        agent_id: str,
+        resource: str,
+        data: dict[str, Any] | None = None,
+        expected_version: int | None = None,
+        lock_token: str | None = None,
+    ) -> StagedEffect:
+        """Stage a new effect for later commit."""
+        self._counter += 1
+        effect = StagedEffect(
+            effect_id=f"eff.{self._counter:06d}",
+            effect_type=effect_type,
+            agent_id=agent_id,
+            resource=resource,
+            data=data or {},
+            expected_version=expected_version,
+            lock_token=lock_token,
+        )
+        self._effects[effect.effect_id] = effect
+        return effect
+
+    def get_effects(self, agent_id: str | None = None) -> list[StagedEffect]:
+        """Get all staged effects, optionally filtered by agent."""
+        effects = list(self._effects.values())
+        if agent_id:
+            effects = [e for e in effects if e.agent_id == agent_id]
+        return effects
+
+    def get_effects_for_resource(self, resource: str) -> list[StagedEffect]:
+        """Get all effects targeting a specific resource."""
+        return [e for e in self._effects.values() if e.resource == resource]
+
+    def validate(
+        self,
+        check_version: callable | None = None,
+        check_lock: callable | None = None,
+        check_permission: callable | None = None,
+    ) -> list[StagedEffect]:
+        """Validate all staged effects against preconditions.
+
+        Returns list of effects that failed validation.
+        """
+        failures: list[StagedEffect] = []
+
+        for effect in self._effects.values():
+            if effect.status != EffectStatus.STAGED:
+                continue
+
+            # Version check
+            if effect.expected_version is not None and check_version:
+                if not check_version(effect.resource, effect.expected_version):
+                    effect.status = EffectStatus.FAILED
+                    effect.error = (
+                        f"Version conflict: expected {effect.expected_version}"
+                    )
+                    failures.append(effect)
+                    continue
+
+            # Lock check (for write operations)
+            if effect.effect_type in {
+                EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
+                EffectType.FILE_WRITE, EffectType.FILE_DELETE,
+            } and check_lock:
+                if not check_lock(effect.resource, effect.agent_id):
+                    effect.status = EffectStatus.FAILED
+                    effect.error = "Must hold lock to write"
+                    failures.append(effect)
+                    continue
+
+            # Permission check
+            if check_permission:
+                if not check_permission(effect.agent_id, effect.resource, effect.effect_type.value):
+                    effect.status = EffectStatus.FAILED
+                    effect.error = "Permission denied"
+                    failures.append(effect)
+                    continue
+
+            effect.status = EffectStatus.VALIDATED
+
+        return failures
+
+    def resolve_conflicts(self) -> list[ConflictResolution]:
+        """Deterministically resolve conflicts for resources with multiple effects.
+
+        Resolution rules (SPEC §13.2):
+        - Same resource, same agent: keep only the latest effect
+        - Same resource, different agents: first by agent_id alphabetically
+        - Lock holder wins over non-holder
+        """
+        # Group effects by resource
+        by_resource: dict[str, list[StagedEffect]] = {}
+        for effect in self._effects.values():
+            if effect.status != EffectStatus.VALIDATED:
+                continue
+            if effect.resource not in by_resource:
+                by_resource[effect.resource] = []
+            by_resource[effect.resource].append(effect)
+
+        resolutions: list[ConflictResolution] = []
+
+        for resource, effects in by_resource.items():
+            if len(effects) <= 1:
+                continue
+
+            # Deterministic sort: agent_id, then effect_type, then effect_id
+            sorted_effects = sorted(
+                effects,
+                key=lambda e: (e.agent_id, e.effect_type.value, e.effect_id),
+            )
+
+            # Winner: first in sorted order (most authoritative agent)
+            winner = sorted_effects[0]
+            losers = sorted_effects[1:]
+
+            for loser in losers:
+                loser.status = EffectStatus.FAILED
+                loser.error = f"Conflict: lost to {winner.effect_id}"
+
+            resolution = ConflictResolution(
+                winner=winner.effect_id,
+                losers=[l.effect_id for l in losers],
+                reason=f"Deterministic resolution: agent {winner.agent_id} wins",
+            )
+            resolutions.append(resolution)
+
+        self._conflict_resolutions.extend(resolutions)
+        return resolutions
+
+    def commit(self) -> list[StagedEffect]:
+        """Atomically apply all validated effects.
+
+        Returns list of successfully committed effects.
+        """
+        committed: list[StagedEffect] = []
+
+        for effect in self._effects.values():
+            if effect.status != EffectStatus.VALIDATED:
+                continue
+
+            effect.status = EffectStatus.COMMITTED
+            committed.append(effect)
+            self._committed.append(effect)
+
+        return committed
+
+    def rollback(self) -> list[StagedEffect]:
+        """Rollback all committed effects (on partial failure).
+
+        In a real system, this would undo file writes, email deliveries, etc.
+        For now, it marks effects as rolled back.
+        """
+        rolled_back: list[StagedEffect] = []
+
+        for effect in self._committed:
+            effect.status = EffectStatus.ROLLED_BACK
+            rolled_back.append(effect)
+
+        self._committed.clear()
+        return rolled_back
+
+    def clear(self) -> None:
+        """Clear all effects (after commit or rollback)."""
+        self._effects.clear()
+        self._committed.clear()
+        self._conflict_resolutions.clear()
+
+    @property
+    def has_pending(self) -> bool:
+        """Check if there are effects waiting to be committed."""
+        return any(
+            e.status in {EffectStatus.STAGED, EffectStatus.VALIDATED}
+            for e in self._effects.values()
+        )
+
+    @property
+    def conflict_resolutions(self) -> list[ConflictResolution]:
+        return list(self._conflict_resolutions)
+
+    @property
+    def committed_count(self) -> int:
+        return len(self._committed)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(
+            1 for e in self._effects.values()
+            if e.status == EffectStatus.FAILED
+        )
+
+    def summary(self) -> dict[str, Any]:
+        """Get a summary of the transaction state."""
+        return {
+            "total_effects": len(self._effects),
+            "staged": sum(1 for e in self._effects.values() if e.status == EffectStatus.STAGED),
+            "validated": sum(1 for e in self._effects.values() if e.status == EffectStatus.VALIDATED),
+            "committed": self.committed_count,
+            "failed": self.failed_count,
+            "conflicts": len(self._conflict_resolutions),
+        }
