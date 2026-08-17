@@ -77,7 +77,9 @@ class WakeupEvent(BaseModel):
     """An event that may wake an agent, per SPEC §9.2.
 
     Events produced in tick t are only visible in tick t+1's
-    Deliver/Schedule phase.
+    Deliver/Schedule phase.  ``visible_at_tick`` makes this explicit
+    (default: tick + 1) — ``_matches`` uses it instead of relying on
+    ordering side-effects.
     """
 
     event_id: str = Field(
@@ -87,6 +89,13 @@ class WakeupEvent(BaseModel):
     event_type: WakeEventType = Field(description="Type of wake event")
     target_agent_id: str = Field(description="Agent to be woken")
     tick: int = Field(description="Tick when event was produced")
+    visible_at_tick: int = Field(
+        default=-1,
+        description=(
+            "Tick from which this event is eligible for matching. "
+            "Defaults to tick+1 (set at enqueue time). -1 means unset."
+        ),
+    )
     source_agent_id: str = Field(
         default="",
         description="Agent that produced this event",

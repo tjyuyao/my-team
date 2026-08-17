@@ -41,13 +41,13 @@ def _bootstrap_agent(sim: Simulation, agent_id: str) -> None:
         agent_id,
         WakeCondition(
             event_types=cond.event_types | {WakeEventType.BOOTSTRAP},
-            wake_at_tick=0,
+            wake_at_tick=0, visible_at_tick=0,
         ),
     )
     sim.scheduler.enqueue_event(WakeupEvent(
         event_type=WakeEventType.BOOTSTRAP,
         target_agent_id=agent_id,
-        tick=0,
+        tick=0, visible_at_tick=0,
         source_agent_id="system",
     ))
 

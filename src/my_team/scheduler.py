@@ -49,7 +49,7 @@ def _matches(
     """Check if a wake event matches an agent's wake condition.
 
     Matching rules:
-    - event.tick <= tick (not a future event)
+    - tick >= visible_at_tick (event is no longer fresh)
     - tick >= condition.wake_at_tick (agent is eligible)
     - event.event_type in condition.event_types
     - condition.task_ids is empty OR event.task_id in condition.task_ids
@@ -57,7 +57,9 @@ def _matches(
     - condition.thread_ids is empty OR event.thread_id in condition.thread_ids
     - condition.sender_ids is empty OR event.source_agent_id in condition.sender_ids
     """
-    if event.tick > tick:
+    # Use explicit visible_at_tick when set; fall back to tick+1 default
+    visible = event.visible_at_tick if event.visible_at_tick >= 0 else event.tick + 1
+    if tick < visible:
         return False
     if tick < condition.wake_at_tick:
         return False
@@ -126,8 +128,11 @@ class AgentScheduler:
         """Enqueue a wake event for processing.
 
         Events are only eligible for matching in subsequent calls to
-        compute_ready_set() — not immediately.
+        compute_ready_set() — not immediately.  Sets
+        ``visible_at_tick`` to ``tick + 1`` if not already set.
         """
+        if event.visible_at_tick < 0:
+            event.visible_at_tick = event.tick + 1
         self._events.append(QueuedEvent(event=event))
 
     def compute_ready_set(

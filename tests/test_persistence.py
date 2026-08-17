@@ -141,7 +141,7 @@ class TestSaveLoadRoundtrip:
         sim._scheduler.enqueue_event(WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.research",
-            tick=0,
+            tick=0, visible_at_tick=0,
             source_agent_id="agent.root",
         ))
 

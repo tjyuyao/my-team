@@ -3,6 +3,8 @@
 **Phase:** v0.9 收口
 **Source:** SPEC §3、§14；OI-003 P1-6/P1-7/P2-8
 **Priority:** medium
+**Completed:** 2026-08-18
+**Tests:** 676 passed（+7），ruff clean，mypy clean（37 source files）
 
 ## 目标
 仓库内版本号、阶段模型、事件可见性语义、快照版本使用保持一致，
@@ -24,7 +26,7 @@
 - 排队 op 的冻结视图绑定。
 
 ## 验收标准
-- [ ] `__version__` 与 pyproject 一致
-- [ ] 事件只在 `visible_at_tick` 后参与匹配
-- [ ] 排队 op 在 workspace 变更后不会读到更新于提交后的文件
-- [ ] 新增测试；`uv run pytest -q` 全绿；`ruff`/`mypy` 通过
+- [x] `__version__` 与 pyproject 一致（均为 "0.9.0"）
+- [x] 事件只在 `visible_at_tick` 后参与匹配（显式字段，_matches 用它）
+- [x] 排队 op 在 workspace 变更后不会读到更新于提交后的文件（_submission_view 绑定）
+- [x] 新增 test_consistency_cleanup（+7 tests）；`uv run pytest -q` 全绿；`ruff`/`mypy` 通过

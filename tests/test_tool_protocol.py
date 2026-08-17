@@ -155,7 +155,7 @@ class TestToolRequestBuiltAtAct:
         sim.scheduler.enqueue_event(WakeupEvent(
             event_type=WakeEventType.BOOTSTRAP,
             target_agent_id="agent.research",
-            tick=0,
+            tick=0, visible_at_tick=0,
             source_agent_id="system",
         ))
         return sim, executor, agent
@@ -277,7 +277,7 @@ class TestIngestAuditContract:
         )
         sim.scheduler.enqueue_event(WakeupEvent(
             event_type=WakeEventType.BOOTSTRAP,
-            target_agent_id="agent.research", tick=0,
+            target_agent_id="agent.research", tick=0, visible_at_tick=0,
             source_agent_id="system",
         ))
 

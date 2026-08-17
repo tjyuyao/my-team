@@ -42,13 +42,12 @@ from my_team.agent_runtime import (
 from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
-from my_team.delegation import DelegationProtocol
 from my_team.executor_registry import (
     ExecutorRegistry,
     ExecutorTier,
     requires_executor,
 )
-from my_team.file_ops import FileOps, FileOpsAuditEntry, FileOpsAuditLog
+from my_team.file_ops import FileOpsAuditEntry, FileOpsAuditLog
 from my_team.human_control import HumanControl
 from my_team.mailbox import MailSystem
 from my_team.models.activation import (
@@ -304,7 +303,8 @@ class Simulation:
             deterministic_mode=self._config.deterministic_mode,
         ))
 
-        # Human control
+        # Human control (pause/resume/view; tick duration apply is NOT
+        # wired — see dead-module-cleanup TODO)
         self._human_control = HumanControl(
             tick_engine=self._tick_engine,
             agent_tree=self._agent_tree,
@@ -312,14 +312,6 @@ class Simulation:
             mail_system=self._mail_system,
             shared_kb=self._shared_kb,
             audit_log=self._audit_log,
-        )
-
-        # Delegation protocol
-        self._delegation = DelegationProtocol(
-            agent_tree=self._agent_tree,
-            task_tree=self._task_tree,
-            mail_system=self._mail_system,
-            max_delegation_depth=self._config.max_delegation_depth,
         )
 
         # Timeout checker (between Phase 8 Commit and Phase 9 Publish)
@@ -337,12 +329,6 @@ class Simulation:
 
         # Agent runtime states (authoritative state source)
         self._agent_runtime_states: dict[str, AgentRuntimeState] = {}
-
-        # File ops
-        self._file_ops = FileOps(
-            private_store=self._private_store,
-            audit_log=self._file_ops_audit,
-        )
 
         # Initialize
         self._register_tool_handlers()
@@ -1066,10 +1052,6 @@ class Simulation:
     @property
     def human_control(self) -> HumanControl:
         return self._human_control
-
-    @property
-    def delegation(self) -> DelegationProtocol:
-        return self._delegation
 
     @property
     def scheduler(self) -> AgentScheduler:
@@ -1880,6 +1862,7 @@ class Simulation:
                 event_type=WakeEventType.TOOL_RESULT,  # reuse TOOL_RESULT
                 target_agent_id=op.agent_id,
                 tick=tick,
+                visible_at_tick=tick,  # Ingest→Schedule same tick
                 source_agent_id="llm_gateway",
                 task_id=op.task_id,
                 details={
@@ -1893,6 +1876,7 @@ class Simulation:
                 event_type=WakeEventType.TOOL_RESULT,
                 target_agent_id=op.agent_id,
                 tick=tick,
+                visible_at_tick=tick,  # Ingest→Schedule same tick
                 source_agent_id="tool_executor",
                 task_id=op.task_id,
                 details={
@@ -1927,6 +1911,7 @@ class Simulation:
                         event_type=WakeEventType.BOOTSTRAP,
                         target_agent_id=agent_config.agent_id,
                         tick=tick,
+                        visible_at_tick=tick,  # immediate visibility
                         source_agent_id="system",
                     ))
 
@@ -2062,16 +2047,18 @@ class Simulation:
     def _phase_deliver(self, tick: int) -> list[Email]:
         """Phase 2: Deliver emails and generate NEW_EMAIL wake events.
 
-        Wake events are enqueued for tick+1 visibility.
+        Wake events are enqueued during Deliver (before Schedule), so
+        they are visible in the same tick's Schedule phase.
         """
         delivered = self._mail_system.deliver(tick)
-        # Generate wake events for recipients — visible in tick+1
+        # Generate wake events for recipients — visible this tick
         for email in delivered:
             for recipient in email.to:
                 self._scheduler.enqueue_event(WakeupEvent(
                     event_type=WakeEventType.NEW_EMAIL,
                     target_agent_id=recipient,
-                    tick=tick,  # produced at tick t, visible at tick t+1
+                    tick=tick,
+                    visible_at_tick=tick,  # same-tick visibility
                     source_agent_id=email.from_agent,
                     task_id=email.task_id or "",
                     thread_id=email.thread_id or "",
@@ -2359,6 +2346,16 @@ class Simulation:
                                 deadline_tick=tick + intent.timeout_ticks,
                                 arguments=dict(intent.arguments),
                             )
+                            # T8: bind submission-tick workspace view so
+                            # dispatch reads from the frozen view at submit
+                            # time, not the current tick's snapshot.
+                            agent_view = (
+                                (snapshot or {})
+                                .get("private_files", {})
+                                .get(agent_id)
+                            )
+                            if agent_view is not None:
+                                op.metadata["_submission_view"] = agent_view
                         if runtime_state:
                             # P0-2: snapshot continuation before mutation
                             c = runtime_state.continuation
@@ -2946,16 +2943,22 @@ class Simulation:
                 # request_id lets the handler register its live
                 # subprocess for physical cancel (P2-10); read_view
                 # gives file tools the frozen snapshot.
+                # T8: prefer the submission-tick frozen view (bound at
+                # Act) over the current tick's snapshot, preserving read
+                # consistency for queued ops.
+                read_view = op.metadata.get("_submission_view")
+                if read_view is None:
+                    read_view = (
+                        (self._last_snapshot or {})
+                        .get("private_files", {})
+                        .get(op.agent_id)
+                    )
                 context = ToolContext(
                     agent_id=op.agent_id,
                     tick=tick,
                     allowed_tools=self._tool_context_allowed(op.agent_id),
                     request_id=op.request_id,
-                    read_view=(
-                        (self._last_snapshot or {})
-                        .get("private_files", {})
-                        .get(op.agent_id)
-                    ),
+                    read_view=read_view,
                 )
                 tr = self._tool_registry.execute(
                     context=context,

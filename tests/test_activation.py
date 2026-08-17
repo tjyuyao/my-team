@@ -40,6 +40,7 @@ class TestWakeCondition:
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
             tick=1,
+            visible_at_tick=1,
             task_id="any.task",
             resource="any/resource",
         )
@@ -56,12 +57,14 @@ class TestWakeCondition:
             event_type=WakeEventType.CHILD_TASK_CHANGE,
             target_agent_id="agent.a",
             tick=1,
+            visible_at_tick=1,
             task_id="task.001",
         )
         no_match = WakeupEvent(
             event_type=WakeEventType.CHILD_TASK_CHANGE,
             target_agent_id="agent.a",
             tick=1,
+            visible_at_tick=1,
             task_id="task.999",
         )
         assert _matches(cond, match, tick=1)
@@ -77,12 +80,14 @@ class TestWakeCondition:
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
             tick=1,
+            visible_at_tick=1,
             source_agent_id="agent.root",
         )
         no_match = WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
             tick=1,
+            visible_at_tick=1,
             source_agent_id="agent.other",
         )
         assert _matches(cond, match, tick=1)
@@ -171,7 +176,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.BOOTSTRAP,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
         assert len(ready) == 1
@@ -194,7 +199,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.BOOTSTRAP,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.PAUSED})
         assert len(ready) == 0
@@ -207,7 +212,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
-            tick=5,  # future
+            tick=5, visible_at_tick=5,
         ))
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
         assert len(ready) == 0
@@ -221,7 +226,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.BOOTSTRAP,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         # tick 2: not yet eligible
         ready = sched.compute_ready_set(2, {"agent.a": AgentState.IDLE})
@@ -238,12 +243,12 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.CHILD_TASK_CHANGE,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
         assert len(ready) == 1
@@ -257,7 +262,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.BOOTSTRAP,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
         candidate = ready[0]
@@ -273,7 +278,7 @@ class TestAgentScheduler:
         event = WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         )
         sched.enqueue_event(event)
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
@@ -299,7 +304,7 @@ class TestAgentScheduler:
         event = WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         )
         sched.enqueue_event(event)
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
@@ -320,7 +325,7 @@ class TestAgentScheduler:
             sched.enqueue_event(WakeupEvent(
                 event_type=WakeEventType.BOOTSTRAP,
                 target_agent_id=aid,
-                tick=0,
+                tick=0, visible_at_tick=0,
             ))
         states = {aid: AgentState.IDLE for aid in ["agent.a", "agent.b", "agent.c"]}
         ready = sched.compute_ready_set(0, states)
@@ -338,7 +343,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         # agent.b has no matching event
         ready = sched.compute_ready_set(0, {
@@ -357,7 +362,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
         assert len(ready) == 0
@@ -377,7 +382,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.NEW_EMAIL,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         # Make eligible but don't schedule
         sched.compute_ready_set(0, {"agent.a": AgentState.PAUSED})
@@ -394,7 +399,7 @@ class TestAgentScheduler:
         sched.enqueue_event(WakeupEvent(
             event_type=WakeEventType.BOOTSTRAP,
             target_agent_id="agent.a",
-            tick=0,
+            tick=0, visible_at_tick=0,
         ))
         ready = sched.compute_ready_set(0, {"agent.a": AgentState.IDLE})
         act = sched.begin_activation(ready[0], 0)

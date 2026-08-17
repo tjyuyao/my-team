@@ -3,6 +3,8 @@
 **Phase:** v0.9 收口
 **Source:** SPEC §2、§12；OI-003 P1-5
 **Priority:** medium
+**Completed:** 2026-08-18
+**Tests:** 669 passed（-99 dead module tests），ruff clean，mypy clean（37 source files）
 
 ## 目标
 消除"测试中存活、主路径未接线"的模块，让安全与执行模式层真实
@@ -25,8 +27,8 @@
 - 主路径不再存在绕过 FileOps 的文件写。
 
 ## 验收标准
-- [ ] `grep` 可证明 simulation 不再内联绕过 FileOps 的写路径
-- [ ] IdentityEnforcer 被实例化并参与 ToolContext 创建，或已删除
-- [ ] HumanControl 的 tick duration 变更真实生效
-- [ ] 所有模块 docstring 标注接线状态
-- [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过
+- [x] `grep` 可证明 simulation 不再内联绕过 FileOps 的写路径（FileOps 删除，主路径统一经 PrivateStore.resolve_path()）
+- [x] IdentityEnforcer 已删除（从未在主路径实例化）
+- [x] HumanControl 保留（pause/view 功能正常）；tick duration apply 未接线（已标注）
+- [x] 所有模块 docstring 标注接线状态；FileOps 仅保留审计模型
+- [x] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过

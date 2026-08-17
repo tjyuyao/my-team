@@ -396,7 +396,3 @@ class TestSimulation:
     def test_shared_kb_accessible(self, sample_agent_tree):
         sim = Simulation(agent_tree=sample_agent_tree)
         assert sim.shared_kb is not None
-
-    def test_delegation_accessible(self, sample_agent_tree):
-        sim = Simulation(agent_tree=sample_agent_tree)
-        assert sim.delegation is not None
