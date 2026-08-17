@@ -66,6 +66,7 @@ from my_team.models.intent import (
     WaitForEventIntent,
     WritePrivateFileIntent,
 )
+from my_team.outbox import Outbox
 from my_team.pending_ops import OpType, PendingOperationRegistry
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
@@ -218,6 +219,9 @@ class Simulation:
 
         # Pending operation registry (v0.6.0 — async LLM/tool tracking)
         self._pending_ops = PendingOperationRegistry()
+
+        # Email outbox (reliable dispatch with idempotency)
+        self._outbox = Outbox(max_retries=self._config.max_retries)
 
         # Tick engine
         self._tick_engine = TickEngine(TickConfig(
@@ -1446,18 +1450,42 @@ class Simulation:
                 elif effect.effect_type == EffectType.EMAIL_SEND:
                     from my_team.models.email import EmailType
                     data = effect.data
-                    email = self._mail_system.create_email(
+                    # Stage in outbox, then dispatch to MailSystem
+                    entry = self._outbox.stage(
                         from_agent=data.get("from_agent", effect.agent_id),
                         to=data.get("to", []),
                         subject=data.get("subject", ""),
                         body=data.get("body", ""),
-                        email_type=EmailType(data.get("email_type", "progress")),
-                        tick=tick,
-                        deliver_at_tick=tick + self._config.email_delivery_latency_ticks,
+                        email_type=data.get("email_type", "progress"),
                         task_id=data.get("task_id", ""),
+                        effect_id=effect.effect_id,
                     )
-                    committed_emails.append(email)
-                    created_email_ids.append(email.email_id)
+                    self._outbox.commit(entry.entry_id)
+
+                    def _deliver(entry: Any) -> None:
+                        self._mail_system.create_email(
+                            from_agent=entry.from_agent,
+                            to=entry.to,
+                            subject=entry.subject,
+                            body=entry.body,
+                            email_type=EmailType(entry.email_type),
+                            tick=tick,
+                            deliver_at_tick=tick
+                            + self._config.email_delivery_latency_ticks,
+                            task_id=entry.task_id,
+                        )
+                    dispatched, _failed = self._outbox.dispatch(
+                        _deliver, current_tick=tick,
+                    )
+                    # Track created email ids for rollback
+                    for d in dispatched:
+                        for _eid, _e in self._mail_system._all_emails.items():
+                            if (
+                                _e.subject == d.subject
+                                and _e.from_agent == d.from_agent
+                                and _eid not in created_email_ids
+                            ):
+                                created_email_ids.append(_eid)
 
                 elif effect.effect_type == EffectType.TASK_CREATE:
                     from my_team.models.task import TaskPriority, TaskStatus
