@@ -22,9 +22,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from my_team.agent_runtime import (
-    ActionContext,
-    ActionPlan,
     ActionResult,
+    AgentAction,
     AgentObservation,
     AgentRuntime,
     AgentSnapshot,
@@ -56,6 +55,15 @@ from my_team.models.agent import AgentConfig
 # New v0.6.0 models
 from my_team.models.continuation import AgentContinuation
 from my_team.models.email import Email
+from my_team.models.intent import (
+    DelegateIntent,
+    Intent,
+    SendEmailIntent,
+    SubmitLLMRequest,
+    SubmitToolRequest,
+    WaitForEventIntent,
+    WritePrivateFileIntent,
+)
 from my_team.pending_ops import OpType, PendingOperationRegistry
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
@@ -118,11 +126,25 @@ class AgentRuntimeState:
         self.state_machine.start(tick=tick, reason="system init")
 
     def begin_activation(self, tick: int) -> None:
-        """idle → ready → processing"""
+        """idle/ready/waiting_for_* → processing"""
         if self.state == AgentState.IDLE:
             self.state_machine.wake_up(tick=tick, reason="scheduler activation")
         if self.state == AgentState.READY:
             self.state_machine.begin_processing(tick=tick, reason="activation start")
+        elif self.state in {
+            AgentState.WAITING_FOR_LLM,
+            AgentState.WAITING_FOR_TOOL,
+            AgentState.WAITING_FOR_CHILD,
+            AgentState.WAITING_FOR_MAIL,
+            AgentState.WAITING_FOR_LOCK,
+            AgentState.WAITING_FOR_HUMAN,
+        }:
+            # Result arrived — resume the activation
+            self.state_machine.transition(
+                AgentState.PROCESSING,
+                tick=tick,
+                reason="result received, resuming activation",
+            )
 
     def complete_activation(self, tick: int) -> None:
         """processing → idle (or waiting_for_* if agent chose to wait)"""
@@ -613,6 +635,14 @@ class Simulation:
         # Collect completed operations eligible for this tick
         completed = self._pending_ops.collect_completed(tick)
         for op in completed:
+            # Deliver the result to the agent's continuation
+            runtime_state = self._agent_runtime_states.get(op.agent_id)
+            if runtime_state:
+                if op.op_type == OpType.LLM_REQUEST:
+                    runtime_state.receive_llm_result(op.result, tick)
+                elif op.op_type == OpType.TOOL_REQUEST:
+                    runtime_state.receive_tool_result(op.result, tick)
+
             if op.op_type == OpType.LLM_REQUEST:
                 # LLM result ready → publish LLM_RESULT wake event
                 self._scheduler.enqueue_event(WakeupEvent(
@@ -830,9 +860,14 @@ class Simulation:
         tick: int,
         observations: dict[str, AgentObservation],
         ready: list[ReadyCandidate] | None = None,
-    ) -> dict[str, ActionPlan]:
-        """Phase 5: Ready agents generate an action plan."""
-        plans: dict[str, ActionPlan] = {}
+    ) -> dict[str, list[Any]]:
+        """Phase 5: Ready agents produce non-blocking Intents.
+
+        v0.6.0: calls decide_intents() — the agent never blocks on
+        LLM/tool calls here. Rule-based agents produce ActionPlans via
+        decide() which are converted to Intents by BaseAgent.
+        """
+        intents: dict[str, list[Any]] = {}
         if ready is not None:
             active_ids = {c.agent_id for c in ready}
         else:
@@ -843,120 +878,300 @@ class Simulation:
                 continue
             obs = observations.get(agent_id)
             if obs:
-                plans[agent_id] = runtime.decide(obs)
-        return plans
+                continuation = self._agent_runtime_states[agent_id].continuation
+                intents[agent_id] = runtime.decide_intents(
+                    obs, continuation=continuation,
+                )
+        return intents
 
     def _phase_act(
         self,
         tick: int,
-        plans: dict[str, ActionPlan],
+        plans: dict[str, list[Intent]],
         ready: list[ReadyCandidate] | None = None,
         validated: dict[str, list[ActionResult]] | None = None,
     ) -> dict[str, list[ActionResult]]:
-        """Phase 7: Execute validated actions through tool registry.
+        """Phase 7: Convert validated Intents into staged effects.
 
-        Only actions that passed validation in Phase 6 are executed.
-        Pre-validated results are merged with execution results.
+        Only intents that passed validation in Phase 6 are processed.
+        Each intent type maps to:
+
+        - SubmitLLMRequest   → register PendingOperation, agent → WAITING_FOR_LLM
+        - SubmitToolRequest  → local tools (read/ls) execute directly;
+                               remote tools register PendingOperation
+        - SendEmailIntent    → stage EMAIL_SEND effect
+        - DelegateIntent     → stage TASK_CREATE + EMAIL_SEND effects
+        - WritePrivateFileIntent → stage FILE_WRITE effect
+        - WaitForEventIntent → agent → waiting state
         """
         all_results: dict[str, list[ActionResult]] = {}
 
-        for agent_id, plan in plans.items():
-            # Collect validated action indices
-            validated_actions: set[int] = set()
+        for agent_id, intent_list in plans.items():
+            # Determine which intents passed validation
+            validated_idx: set[int] = set()
             if validated and agent_id in validated:
                 for i, vr in enumerate(validated[agent_id]):
                     if vr.success:
-                        validated_actions.add(i)
+                        validated_idx.add(i)
 
-            # Build filtered plan with only validated actions
-            filtered_actions = [
-                a for i, a in enumerate(plan.actions)
-                if i in validated_actions
-            ]
+            results: list[ActionResult] = []
+            runtime_state = self._agent_runtime_states.get(agent_id)
 
-            if not filtered_actions:
-                # All actions failed validation — record validation failures
-                if validated and agent_id in validated:
-                    all_results[agent_id] = [
-                        vr for vr in validated[agent_id] if not vr.success
-                    ]
-                continue
-
-            filtered_plan = ActionPlan(
-                agent_id=agent_id,
-                tick=tick,
-                actions=filtered_actions,
-            )
-
-            runtime = self._runtimes.get(agent_id)
-            if runtime:
-                context = ActionContext(
-                    agent_id=agent_id,
-                    tick=tick,
-                    tool_context=ToolContext(
-                        agent_id=agent_id,
-                        tick=tick,
-                        allowed_tools=self._tool_registry.get_allowed_tools(agent_id),
-                    ),
+            for i, intent in enumerate(intent_list):
+                action = AgentAction(
+                    action_type=intent.intent_type.value,
+                    tool_name=getattr(intent, "tool_name", ""),
+                    payload=dict(intent.payload),
                 )
-                exec_results = runtime.act(filtered_plan, context)
-                # Merge validation failures + execution results
-                val_failures = [
-                    vr for vr in validated.get(agent_id, [])
-                    if not vr.success
-                ] if validated else []
-                all_results[agent_id] = val_failures + exec_results
+
+                if i not in validated_idx:
+                    # Validation failure — record from validate phase
+                    if validated and agent_id in validated and i < len(validated[agent_id]):
+                        results.append(validated[agent_id][i])
+                    continue
+
+                # SubmitLLMRequest → async LLM registration
+                if isinstance(intent, SubmitLLMRequest):
+                    op = self._pending_ops.submit(
+                        op_type=OpType.LLM_REQUEST,
+                        agent_id=agent_id,
+                        created_tick=tick,
+                        eligible_tick=tick + 1,
+                        deadline_tick=tick + intent.timeout_ticks,
+                        task_id=intent.task_id,
+                        metadata={
+                            "request_id": intent.request_id,
+                            "model": intent.model,
+                        },
+                    )
+                    if runtime_state:
+                        runtime_state.continuation.advance_to_waiting_llm(
+                            op.request_id, tick,
+                        )
+                        runtime_state.transition_to_waiting(
+                            AgentState.WAITING_FOR_LLM, tick,
+                        )
+                    results.append(ActionResult(
+                        action=action,
+                        success=True,
+                        result_data={
+                            "request_id": op.request_id,
+                            "status": "pending",
+                        },
+                    ))
+                    continue
+
+                # SubmitToolRequest → local tools execute, remote register
+                if isinstance(intent, SubmitToolRequest):
+                    if intent.tool_name in {"read", "ls"}:
+                        # Local tools execute synchronously
+                        runtime = self._runtimes.get(agent_id)
+                        if runtime:
+                            tool_context = ToolContext(
+                                agent_id=agent_id,
+                                tick=tick,
+                                allowed_tools=self._tool_context_allowed(agent_id),
+                            )
+                            tr = self._tool_registry.execute(
+                                context=tool_context,
+                                tool_name=intent.tool_name,
+                                **intent.arguments,
+                            )
+                            results.append(ActionResult(
+                                action=action,
+                                success=tr.success,
+                                result_data=tr.data,
+                                error=tr.error,
+                            ))
+                        else:
+                            results.append(ActionResult(
+                                action=action, success=False,
+                                error=f"No runtime for '{agent_id}'",
+                            ))
+                    else:
+                        # Remote tool → register pending operation
+                        op = self._pending_ops.submit(
+                            op_type=OpType.TOOL_REQUEST,
+                            agent_id=agent_id,
+                            created_tick=tick,
+                            eligible_tick=tick + 1,
+                            deadline_tick=tick + intent.timeout_ticks,
+                            task_id=intent.task_id,
+                            metadata={"request_id": intent.request_id},
+                        )
+                        if runtime_state:
+                            runtime_state.continuation.advance_to_waiting_tool(
+                                op.request_id, tick,
+                            )
+                            runtime_state.transition_to_waiting(
+                                AgentState.WAITING_FOR_TOOL, tick,
+                            )
+                        results.append(ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={
+                                "request_id": op.request_id,
+                                "status": "pending",
+                            },
+                        ))
+                    continue
+
+                # SendEmailIntent → stage EMAIL_SEND
+                if isinstance(intent, SendEmailIntent):
+                    self._transaction_buffer.stage(
+                        effect_type=EffectType.EMAIL_SEND,
+                        agent_id=agent_id,
+                        resource=f"email:{agent_id}",
+                        data={
+                            "from_agent": agent_id,
+                            "to": intent.to,
+                            "subject": intent.subject,
+                            "body": intent.body,
+                            "email_type": intent.email_type,
+                            "task_id": intent.task_id,
+                        },
+                    )
+                    results.append(ActionResult(
+                        action=action, success=True,
+                        result_data={"staged": True},
+                    ))
+                    continue
+
+                # DelegateIntent → stage TASK_CREATE + EMAIL_SEND
+                if isinstance(intent, DelegateIntent):
+                    from uuid import uuid4
+                    task_id = f"task.{tick}.{uuid4().hex[:8]}"
+                    self._transaction_buffer.stage(
+                        effect_type=EffectType.TASK_CREATE,
+                        agent_id=agent_id,
+                        resource=task_id,
+                        data={
+                            "task_id": task_id,
+                            "title": intent.task_title,
+                            "description": intent.task_description,
+                            "creator_agent_id": agent_id,
+                            "owner_agent_id": intent.recipient_agent_id,
+                            "parent_task_id": intent.parent_task_id or None,
+                        },
+                    )
+                    self._transaction_buffer.stage(
+                        effect_type=EffectType.EMAIL_SEND,
+                        agent_id=agent_id,
+                        resource=f"email:{agent_id}",
+                        data={
+                            "from_agent": agent_id,
+                            "to": [intent.recipient_agent_id],
+                            "subject": f"[DELEGATE] {intent.task_title}",
+                            "body": intent.task_description,
+                            "email_type": "delegation",
+                            "task_id": task_id,
+                        },
+                    )
+                    results.append(ActionResult(
+                        action=action, success=True,
+                        result_data={"task_id": task_id, "staged": True},
+                    ))
+                    continue
+
+                # WritePrivateFileIntent → stage FILE_WRITE
+                if isinstance(intent, WritePrivateFileIntent):
+                    self._transaction_buffer.stage(
+                        effect_type=EffectType.FILE_WRITE,
+                        agent_id=agent_id,
+                        resource=intent.path,
+                        data={"content": intent.content},
+                    )
+                    results.append(ActionResult(
+                        action=action, success=True,
+                        result_data={"staged": True},
+                    ))
+                    continue
+
+                # WaitForEventIntent → agent waits for specific event
+                if isinstance(intent, WaitForEventIntent):
+                    if runtime_state:
+                        waiting_state = AgentState(intent.waiting_state)
+                        runtime_state.transition_to_waiting(waiting_state, tick)
+                    results.append(ActionResult(
+                        action=action, success=True,
+                        result_data={"waiting": intent.waiting_state},
+                    ))
+                    continue
+
+                # Unknown intent — record as failure
+                results.append(ActionResult(
+                    action=action,
+                    success=False,
+                    error=f"Unsupported intent type: {intent.intent_type}",
+                ))
+
+            all_results[agent_id] = results
 
         return all_results
+
+    def _tool_context_allowed(self, agent_id: str) -> frozenset[str]:
+        """Get allowed tools for an agent (helper for intent execution)."""
+        return self._tool_registry.get_allowed_tools(agent_id)
 
     def _phase_validate(
         self,
         tick: int,
-        plans: dict[str, ActionPlan],
+        plans: dict[str, list[Intent]],
         ready: list[ReadyCandidate],
     ) -> dict[str, list[ActionResult]]:
-        """Phase 6: Validate action plans before execution.
+        """Phase 6: Validate Intents before execution.
 
         Checks performed:
-        1. Tool capability — each action's tool is in agent's allowed tools
-        2. Delegation target — delegate actions target direct children
-        3. Action payload — required fields present
-        4. Activation budget — total actions within limit
+        1. Tool capability — SubmitToolRequest tool is in agent's allowed tools
+        2. Delegation target — DelegateIntent targets direct children
+        3. Payload fields — WritePrivateFileIntent has path, SendEmailIntent has to
+        4. Activation budget — total intents within limit
 
-        Invalid actions are converted to failed Results. Valid actions pass through.
+        Invalid intents are converted to failed Results. Valid intents pass through.
         """
         validated: dict[str, list[ActionResult]] = {}
 
         for candidate in ready:
             agent_id = candidate.agent_id
-            plan = plans.get(agent_id)
-            if plan is None:
+            intent_list = plans.get(agent_id)
+            if intent_list is None:
                 continue
 
             allowed_tools = self._tool_registry.get_allowed_tools(agent_id)
             results: list[ActionResult] = []
 
-            for action in plan.actions:
-                # Check 1: tool capability
-                if action.tool_name and action.tool_name not in allowed_tools:
-                    results.append(ActionResult(
-                        action=action,
-                        success=False,
-                        error=f"Tool '{action.tool_name}' not authorized for '{agent_id}'",
-                    ))
-                    self._audit_log.record(
-                        AuditEventType.PERMISSION_DENIED,
-                        agent_id=agent_id,
-                        tick=tick,
-                        details={"tool": action.tool_name, "action_type": action.action_type},
-                        success=False,
-                        error="Tool not authorized",
-                    )
-                    continue
+            for intent in intent_list:
+                # Build a synthetic AgentAction for the result record
+                action = AgentAction(
+                    action_type=intent.intent_type.value,
+                    tool_name=getattr(intent, "tool_name", ""),
+                    payload=dict(intent.payload),
+                )
+
+                # Check 1: tool capability (SubmitToolRequest)
+                if isinstance(intent, SubmitToolRequest):
+                    if intent.tool_name not in allowed_tools:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"Tool '{intent.tool_name}' not authorized "
+                                f"for '{agent_id}'"
+                            ),
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.PERMISSION_DENIED,
+                            agent_id=agent_id,
+                            tick=tick,
+                            details={"tool": intent.tool_name, "intent": intent.intent_type.value},
+                            success=False,
+                            error="Tool not authorized",
+                        )
+                        continue
 
                 # Check 2: delegation target validation
-                if action.action_type == "delegate":
-                    target_id = action.payload.get("recipient_agent_id", "")
+                if isinstance(intent, DelegateIntent):
+                    target_id = intent.recipient_agent_id
                     if not self._agent_tree.can_delegate_to(agent_id, target_id):
                         results.append(ActionResult(
                             action=action,
@@ -969,24 +1184,37 @@ class Simulation:
                         continue
 
                 # Check 3: required payload fields
-                if action.tool_name == "read" and "path" not in action.payload:
-                    results.append(ActionResult(
-                        action=action,
-                        success=False,
-                        error="read action requires 'path' field",
-                    ))
-                    continue
-
-                if action.tool_name == "write":
-                    if "path" not in action.payload or "content" not in action.payload:
+                if isinstance(intent, WritePrivateFileIntent):
+                    if not intent.path:
                         results.append(ActionResult(
                             action=action,
                             success=False,
-                            error="write action requires 'path' and 'content' fields",
+                            error="write intent requires 'path' field",
                         ))
                         continue
 
-                # Passed validation — will be executed in Act phase
+                if isinstance(intent, SendEmailIntent):
+                    if not intent.to:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error="send_email intent requires 'to' field",
+                        ))
+                        continue
+
+                if isinstance(intent, DelegateIntent):
+                    if not intent.recipient_agent_id or not intent.task_title:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                "delegate intent requires 'recipient_agent_id' "
+                                "and 'task_title' fields"
+                            ),
+                        ))
+                        continue
+
+                # Passed validation — will be staged in Act phase
                 results.append(ActionResult(
                     action=action,
                     success=True,

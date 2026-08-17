@@ -5,6 +5,10 @@ Per SPEC §8.2 (Phases 3-5), §10, §15.1:
 - AgentRuntime defines observe/decide/act protocol
 - Tool registry enforces per-agent tool permissions
 - Root Agent restricted to read/write/ls/delegate only
+
+v0.6.0: decide() produces list[Intent] — finite, non-blocking steps in
+the agent's ReAct continuation. ActionPlan remains as the internal
+parsing result of LLM responses.
 """
 
 from __future__ import annotations
@@ -15,6 +19,14 @@ from types import MappingProxyType
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+from my_team.models.intent import (
+    DelegateIntent,
+    Intent,
+    SendEmailIntent,
+    SubmitToolRequest,
+    WritePrivateFileIntent,
+)
 
 # ---------------------------------------------------------------------------
 # ToolContext — identity binding for every tool call
@@ -296,6 +308,59 @@ class ActionResult(BaseModel):
     error: str | None = Field(default=None, description="Error if failed")
 
 
+def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
+    """Convert a legacy ActionPlan into a list of Intents.
+
+    This bridges the old rule-based agent interface (which produces
+    AgentAction lists) to the v0.6.0 Intent model. Rule-based agents
+    (BaseAgent subclasses) can keep producing ActionPlans; the system
+    converts them to Intents before staging.
+
+    Mapping:
+      - delegate   → DelegateIntent
+      - send_email → SendEmailIntent
+      - write      → WritePrivateFileIntent
+      - read/ls    → SubmitToolRequest
+    """
+    intents: list[Intent] = []
+    for action in plan.actions:
+        payload = action.payload or {}
+        if action.action_type == "delegate":
+            intents.append(DelegateIntent(
+                agent_id=plan.agent_id,
+                task_id=payload.get("task_id", ""),
+                recipient_agent_id=payload.get("recipient_agent_id", ""),
+                task_title=payload.get("task_title", ""),
+                task_description=payload.get("task_description", ""),
+                parent_task_id=payload.get("parent_task_id", ""),
+                deadline_tick=payload.get("deadline_tick"),
+            ))
+        elif action.action_type == "send_email":
+            intents.append(SendEmailIntent(
+                agent_id=plan.agent_id,
+                task_id=payload.get("task_id", ""),
+                to=list(payload.get("to", [])),
+                subject=payload.get("subject", ""),
+                body=payload.get("body", ""),
+                email_type=payload.get("email_type", "progress"),
+            ))
+        elif action.action_type == "write":
+            intents.append(WritePrivateFileIntent(
+                agent_id=plan.agent_id,
+                task_id=payload.get("task_id", ""),
+                path=payload.get("path", ""),
+                content=payload.get("content", ""),
+            ))
+        elif action.action_type in {"read", "ls"}:
+            intents.append(SubmitToolRequest(
+                agent_id=plan.agent_id,
+                task_id=payload.get("task_id", ""),
+                tool_name=action.tool_name or action.action_type,
+                arguments=payload,
+            ))
+    return intents
+
+
 class ActionContext(BaseModel):
     """Context for action execution (SPEC §8.2 Phase 5)."""
 
@@ -341,12 +406,33 @@ class AgentRuntime(Protocol):
         ...
 
     def decide(self, observation: AgentObservation) -> ActionPlan:
-        """Phase 4 (Decide): Generate an action plan.
+        """Phase 4 (Decide): Generate an action plan (legacy interface).
 
-        The agent analyzes its observations and produces a list of
-        planned actions. No side effects occur during this phase.
+        Rule-based agents produce an ActionPlan. The system converts it
+        to Intents via action_plan_to_intents(). LLM agents should
+        override decide_intents() instead — this method is retained for
+        backward compatibility with rule-based agents.
+        """
+        ...
 
-        In a real system, this is where LLM inference happens.
+    def decide_intents(
+        self,
+        observation: AgentObservation,
+        continuation: Any = None,
+    ) -> list[Intent]:
+        """Phase 5 (Decide, v0.6.0): Produce non-blocking Intents.
+
+        The agent analyzes its observations and produces 0 or more
+        Intents — finite, non-blocking steps in its ReAct continuation.
+        No side effects occur during this phase.
+
+        Intents can be:
+          - SubmitLLMRequest  (async LLM call, does NOT block)
+          - SubmitToolRequest (async tool call)
+          - SendEmailIntent / DelegateIntent / WritePrivateFileIntent
+          - WaitForEventIntent / CompleteTaskIntent / FailTaskIntent
+
+        The default implementation converts decide()'s ActionPlan.
         """
         ...
 
@@ -419,6 +505,21 @@ class BaseAgent:
             tick=observation.tick,
             actions=[],
         )
+
+    def decide_intents(
+        self,
+        observation: AgentObservation,
+        continuation: Any = None,
+    ) -> list[Intent]:
+        """Default decide_intents: convert decide()'s ActionPlan to Intents.
+
+        Rule-based agents keep overriding decide() to produce
+        ActionPlans; the system converts them to Intents automatically.
+        LLM agents override this method directly to produce
+        SubmitLLMRequest intents.
+        """
+        plan = self.decide(observation)
+        return action_plan_to_intents(plan)
 
     def act(
         self,
