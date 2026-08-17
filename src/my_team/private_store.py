@@ -18,6 +18,20 @@ from pydantic import BaseModel, Field
 PRIVATE_SUBDIRS = ["inbox", "outbox", "workspace", "memory", "task_state", "logs"]
 
 
+def _is_under_path(child: Path, parent: Path) -> bool:
+    """Check if child path is strictly under parent (or equal to it).
+
+    Uses Path.is_relative_to when available (Python 3.9+), with a
+    fallback that prevents sibling-directory prefix matching.
+    """
+    if hasattr(child, "is_relative_to"):
+        return child.is_relative_to(parent)
+    # Fallback: compare resolved strings with trailing separator
+    parent_str = str(parent).rstrip("/") + "/"
+    child_str = str(child).rstrip("/")
+    return child_str == str(parent).rstrip("/") or child_str.startswith(parent_str)
+
+
 class PrivateStoreConfig(BaseModel):
     """Configuration for the private store."""
 
@@ -102,7 +116,10 @@ class PrivateStore:
         """Resolve a relative path within an agent's private space.
 
         The relative_path is resolved relative to the agent's home directory.
-        Path traversal (../) is sanitized to prevent escaping the workspace.
+        Path traversal (../), symlinks, and absolute paths are handled:
+        - ../ traversal is caught by resolve() + containment check
+        - Symlinks are followed by resolve() — if target is outside home, denied
+        - Absolute paths are normalized relative to home
 
         Raises:
             AccessDeniedError: If the resolved path escapes the agent's workspace.
@@ -110,11 +127,13 @@ class PrivateStore:
         home = self.agent_home(agent_id)
 
         # Normalize and resolve, then check it's still under home
-        # Use PurePath to avoid filesystem operations for path normalization
+        # resolve() follows symlinks, so symlink escapes are caught
         candidate = (home / relative_path).resolve()
         home_resolved = home.resolve()
 
-        if not str(candidate).startswith(str(home_resolved)):
+        # Use Path.is_relative_to for robust containment check (Python 3.9+)
+        # Falls back to manual check for older versions
+        if not _is_under_path(candidate, home_resolved):
             raise AccessDeniedError(agent_id, relative_path)
 
         return candidate
@@ -122,11 +141,12 @@ class PrivateStore:
     def check_access(self, agent_id: str, target_path: str | Path) -> bool:
         """Check if an agent has access to a given path.
 
-        Access is granted only if the path is within the agent's own workspace.
+        Access is granted only if the resolved path is within the agent's own workspace.
+        Symlinks are resolved before checking.
         """
         target = Path(target_path).resolve()
         home = self.agent_home(agent_id).resolve()
-        return str(target).startswith(str(home))
+        return _is_under_path(target, home)
 
     def assert_access(self, agent_id: str, target_path: str | Path) -> None:
         """Assert that an agent has access to a path. Raises on denial."""

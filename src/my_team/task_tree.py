@@ -207,6 +207,28 @@ class TaskTree:
             task.transition_to(TaskStatus.EXPIRED, tick)
         return task
 
+    def cancel_task(self, task_id: str, tick: int) -> list[Task]:
+        """Cancel a task and cascade to all non-terminal children.
+
+        Per review gap: parent cancel → child cascade.
+        Returns list of all tasks that were cancelled (including the root).
+        Already-completed or already-cancelled children are skipped.
+        """
+        cancelled: list[Task] = []
+        stack = [task_id]
+        while stack:
+            tid = stack.pop()
+            if tid not in self._tasks:
+                continue
+            task = self._tasks[tid]
+            if not task.is_terminal:
+                task.transition_to(TaskStatus.CANCELLED, tick)
+                cancelled.append(task)
+            # Queue children for cascade (even if parent was already terminal,
+            # we still check children for non-terminal state)
+            stack.extend(self._child_map_children(tid))
+        return cancelled
+
     def subtree(self, task_id: str) -> list[Task]:
         """Get all tasks in the subtree rooted at task_id (including self)."""
         if task_id not in self._tasks:
