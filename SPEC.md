@@ -1093,6 +1093,77 @@ pause = 在下一个 Commit boundary 停止状态转换
 
 ---
 
+# 8.7 工具契约与策略（v0.7.0）
+
+工具是**声明式对象**（ToolManifest），不是内核里的一堆 if/else。
+内核只读 manifest 来执行策略，从不检查工具代码——这是未来插件
+契约单元（v0.8+ 插件注册表 = 一组 manifest + 执行器的聚合，
+不改 tick 内核）。
+
+## ToolManifest（frozen dataclass，注册即校验）
+
+```text
+name / version / input_schema / output_schema / capabilities
+execution_class   — PURE / READ_ONLY / LOCAL_DETERMINISTIC /
+                     STAGED_MUTATION / SANDBOXED_PROCESS /
+                     EXTERNAL_IRREVERSIBLE
+effect_types      — 声明的副作用类型（EffectType）
+deterministic / idempotent / reversible
+requires_network / filesystem_scopes / max_runtime_ms / max_output_bytes
+supports_cancel / requires_approval / retry_policy
+```
+
+注册校验（ToolManifestError）：
+- 必填：name、version；schema 必须是 dict
+- 一致性：READ_ONLY/PURE 不得声明 effect_types；STAGED_MUTATION
+  必须声明 ≥1 个 effect_types；PURE 必须 deterministic；
+  EXTERNAL_IRREVERSIBLE 必须 reversible=False
+- effect_types / filesystem_scopes 必须属于已知枚举
+
+内置工具映射（v0.7.0）：
+read/ls → READ_ONLY（冻结快照视图）；write/kb_write → STAGED_MUTATION；
+send_email/delegate → STAGED_MUTATION（outbox 暂存，回滚丢弃）；
+apply_patch → STAGED_MUTATION（FILE_PATCH，Act 期校验 + Commit 期落地，
+file_previous 回滚）；run_tests → SANDBOXED_PROCESS（超时 + 输出截断）；
+git_diff/git_status → READ_ONLY（workspace 作用域）。
+
+## OperationPolicy（部署期控制面，默认拒绝）
+
+```text
+allowed（白名单，未列出即拒绝）/ requires_approval / max_wall_time_ms
+max_output_bytes / network_access（默认拒绝）/ filesystem_scope
+retry_policy / reversible
+```
+
+策略决策（decide）：白名单 → 审批 → 网络 → 文件系统作用域 →
+墙钟/输出上限 → 不可逆。注册即校验：requires_approval ⊆ allowed。
+
+## 两阶段 Validate 原则
+
+```text
+PreValidate（Phase 6）  — "是否允许尝试？"（能力、manifest、策略、
+                          budget、重复 request_id、task 有效性/deadline）
+CommitValidate（Phase 8）— "现在是否仍可提交？"（lock token、KB version、
+                          task 未取消/未终态/deadline 未过、配额仍够）
+```
+
+失败语义：PreValidate 失败 → intent 不进入 Act；CommitValidate 失败
+→ effect 局部 FAILED，绝不触发整 tick 回滚。Act 期的 budget 复查
+（registry + 本 tick 提交数）封堵 PreValidate→提交之间的窗口。
+
+## 工具执行约束（v0.7.0 现有能力）
+
+- 本地沙箱工具（run_tests/git_diff/git_status）：list 命令、无 shell、
+  进程组超时终止（start_new_session + killpg）、输出截断、固定 cwd
+- 完整沙箱协议（只读挂载、网络默认拒绝、资源上限、审批策略、
+  Bash Worker）→ KANBAN/OPEN_ISSUE/OI-001，完成前禁止开放 Bash
+- 远程工具：经 PendingOperationRegistry；超时/取消唤醒携带结构化
+  错误（{error, timed_out|cancelled, request_id}）；取消需 manifest
+  supports_cancel（LLM 请求恒可取消，无外部副作用）；取消只通知，
+  绝不投递结果
+
+---
+
 # 9. Agent 生命周期
 
 ```text

@@ -1,8 +1,9 @@
 # v0.7.0 Implementation Plan — Snapshot-Consistent, Policy-Controlled Tool Runtime
 
 **Created:** 2026-08-17
-**Status:** TODO
+**Status:** P1 DONE (f77846f..18f6964) — P2 dispositioned, open for v0.8+
 **Label:** v0.7.0 — Snapshot-consistent and policy-controlled tool runtime
+**Milestone:** KANBAN/MILESTONE/2026-08-17-v0.7.0.md
 
 ## Goal
 
@@ -26,7 +27,7 @@ ToolManifest
 
 ## P1: Must Complete
 
-### 1. Tool Manifest + OperationPolicy
+### 1. Tool Manifest + OperationPolicy — ✅ DONE (f77846f)
 
 **Acceptance:**
 - `ToolManifest`（frozen dataclass）：name、version、input/output
@@ -45,7 +46,7 @@ ToolManifest
   网络策略、文件系统作用域、需人工审批、effect 审计、版本记录
   （v0.6.0 审查 §十 测试清单）
 
-### 2. Two-Phase Validate 强化
+### 2. Two-Phase Validate 强化 — ✅ DONE (27835fc)
 
 **Acceptance:**
 - PreValidate(Intent) 增加：deadline、budget、idempotency、
@@ -56,7 +57,7 @@ ToolManifest
 - 核心原则固化为注释/SPEC：PreValidate 检查"是否允许尝试"；
   CommitValidate 检查"现在是否仍可提交"
 
-### 3. 受限工具（先于 Bash）
+### 3. 受限工具（先于 Bash）— ✅ DONE (24ff837)
 
 按审查 §十三 顺序加入：
 
@@ -76,7 +77,7 @@ ToolManifest
 `apply_patch` 与 `run_tests` 的副作用可审计、可回滚（或声明
 irreversible 并走补偿）。
 
-### 4. 工具超时与取消
+### 4. 工具超时与取消 — ✅ DONE (18f6964)
 
 **Acceptance:**
 - 超时：工具进程被终止（process group），op 标记 TIMED_OUT，
@@ -85,28 +86,37 @@ irreversible 并走补偿）。
   不发布（v0.6.0 已有 registry 语义）
 - 超时/取消审计记录
 
-## P2: Should Complete
+## P2: Should Complete — 处置：延后 v0.8+（评估见 MILESTONE §5）
 
 ### 5. Typed AgentSnapshot Views
 
 - `AgentSnapshot` 从 dict 改为类型化视图：EmailView、TaskView、
   KBResourceView、LockView、FileView
 - 读一致性与 v0.6.0 冻结视图合并（一份只读视图，两种语义）
+- **处置：延后（v0.8+）** — 高破坏性重构（~15 个测试文件消费 dict
+  形态），冻结视图语义已由 v0.6.0 实现，原型阶段收益低于成本
 
 ### 6. BoundedMicroLoop 重新观察
 
 - 第二轮 micro-loop 使用重新冻结的快照（stale snapshot 修复）
+- **处置：N/A（现架构不存在）** — tick 内核不接线 micro-loop
+  executor（simulation.py 中 execution_mode 零引用）；意图内核每
+  tick 的 Act 都基于冻结快照，无 stale-snapshot 窗口
 
 ### 7. Provider 429/5xx 重试 + token/cost 预算
 
 - provider 级重试（退避）与 v0.6.0 agent 驱动重试并存
 - 每 agent / task / simulation 的 token/cost 上限，超限在
   PreValidate 拒绝
+- **处置：部分延后** — 模拟架构中 provider 是外部 harness（异步
+  完成 op），同步重试不适用；重试属 provider 实现层（同 OI-002）。
+  token/cost 预算需定价表（FakeLLM 无计价），留 v0.8
 
 ### 8. 内容寻址 / 版本化文件历史
 
 - workspace 版本化：`write` → 版本 n；读视图为冻结版本
 - 二进制文件纳入快照（v0.6.0 明确排除）
+- **处置：延后（可选）** — 与 P2-5 同属视图/历史重构
 
 ## 迁移顺序（建议）
 
