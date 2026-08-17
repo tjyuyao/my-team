@@ -311,7 +311,10 @@ class TestBuiltinManifests:
     def test_all_builtins_registered(self) -> None:
         sim = Simulation(agent_tree=_make_tree())
         names = {m.name for m in sim._tool_registry.manifests()}
-        assert names == {"read", "ls", "write", "kb_write", "send_email", "delegate"}
+        assert names == {
+            "read", "ls", "write", "kb_write", "send_email", "delegate",
+            "apply_patch", "run_tests", "git_diff", "git_status",
+        }
 
     def test_execution_classes(self) -> None:
         sim = Simulation(agent_tree=_make_tree())

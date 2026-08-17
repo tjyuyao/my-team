@@ -69,6 +69,7 @@ from my_team.models.intent import (
 )
 from my_team.models.task import Task, TaskPriority, TaskStatus
 from my_team.outbox import Outbox, OutboxEntry
+from my_team.patch_ops import PatchError, apply_patch
 from my_team.pending_ops import (
     OpType,
     PendingOperation,
@@ -77,6 +78,7 @@ from my_team.pending_ops import (
 from my_team.persistence import SCHEMA_VERSION, SimulationStore
 from my_team.private_store import PrivateStore, PrivateStoreConfig
 from my_team.reliability import TimeoutChecker
+from my_team.sandbox_tools import run_sandboxed_process
 from my_team.scheduler import AgentScheduler, QueuedEvent
 from my_team.shared_kb import (
     LockInfo,
@@ -545,6 +547,145 @@ class Simulation:
                 tick=context.tick,
             )
 
+        def handle_apply_patch(
+            context: ToolContext, path: str = "", patch: str = "", **_kw: Any,
+        ) -> Any:
+            """Apply a unified diff to a private-workspace file.
+
+            Format validation + conflict detection happen HERE (Act),
+            against the agent's frozen view; the parsed result is staged
+            as a FILE_PATCH effect and applied at Commit (rollback via
+            the same file_previous mechanism as FILE_WRITE).
+            """
+            if not path:
+                return ToolResult(
+                    success=False, error="apply_patch requires 'path'",
+                    error_code="invalid_patch", retryable=False,
+                    agent_id=context.agent_id, tool_name="apply_patch",
+                    tick=context.tick,
+                )
+            if not patch:
+                return ToolResult(
+                    success=False, error="apply_patch requires 'patch'",
+                    error_code="invalid_patch", retryable=False,
+                    agent_id=context.agent_id, tool_name="apply_patch",
+                    tick=context.tick,
+                )
+            # Target content: the frozen view if available (same-tick
+            # consistency), else the live file. Missing file = "" (the
+            # patch may create a new file).
+            view = context.read_view
+            if view is not None:
+                content = view["files"].get(path) or ""
+            else:
+                home = self._private_store.agent_home(context.agent_id)
+                target = home / path
+                if target.exists() and target.is_file():
+                    content = target.read_text(encoding="utf-8")
+                else:
+                    content = ""
+            try:
+                new_content = apply_patch(content, patch)
+            except PatchError as e:
+                return ToolResult(
+                    success=False,
+                    error=f"patch rejected: {e}",
+                    error_code="patch_conflict" if e.conflict else "invalid_patch",
+                    retryable=False,
+                    agent_id=context.agent_id, tool_name="apply_patch",
+                    tick=context.tick,
+                )
+            self._transaction_buffer.stage(
+                effect_type=EffectType.FILE_PATCH,
+                agent_id=context.agent_id,
+                resource=path,
+                data={"content": new_content, "patch": patch},
+            )
+            return ToolResult(
+                success=True, data={"staged": True},
+                agent_id=context.agent_id, tool_name="apply_patch",
+                tick=context.tick,
+            )
+
+        def handle_run_tests(
+            context: ToolContext, test_path: str = "", **_kw: Any,
+        ) -> Any:
+            """Run pytest in the sandbox (timeout + output truncation).
+
+            The sandbox protocol beyond this (read-only mount, network
+            deny-by-default, resource limits) is OI-001's scope. The
+            run sees the COMMITTED state (Act runs before Commit applies
+            this tick's staged writes).
+            """
+            manifest = self._tool_registry.get_manifest("run_tests")
+            assert manifest is not None  # builtin, registered at startup
+            timeout_ms = manifest.max_runtime_ms or 60_000
+            max_output = manifest.max_output_bytes or 200_000
+            cmd = ["uv", "run", "pytest", "-q"]
+            if test_path:
+                cmd.append(test_path)
+            res = run_sandboxed_process(
+                cmd,
+                timeout_ms=timeout_ms,
+                max_output_bytes=max_output,
+                cwd=str(Path.cwd()),
+            )
+            return ToolResult(
+                success=res["success"],
+                data=res,
+                error=(
+                    None if res["success"] else
+                    f"tests failed (exit {res['exit_code']})"
+                    + (" [timed out]" if res["timed_out"] else "")
+                ),
+                retryable=not res["timed_out"],
+                agent_id=context.agent_id, tool_name="run_tests",
+                tick=context.tick,
+            )
+
+        def handle_git_diff(
+            context: ToolContext, path: str = "", **_kw: Any,
+        ) -> Any:
+            """Read-only git diff on the workspace (committed state)."""
+            manifest = self._tool_registry.get_manifest("git_diff")
+            assert manifest is not None  # builtin, registered at startup
+            cmd = ["git", "diff", "--"]
+            if path:
+                cmd = ["git", "diff", "--", path]
+            res = run_sandboxed_process(
+                cmd,
+                timeout_ms=manifest.max_runtime_ms or 10_000,
+                max_output_bytes=manifest.max_output_bytes or 200_000,
+                cwd=str(Path.cwd()),
+            )
+            return ToolResult(
+                success=res["success"],
+                data=res,
+                error=None if res["success"] else res["stderr"],
+                agent_id=context.agent_id, tool_name="git_diff",
+                tick=context.tick,
+            )
+
+        def handle_git_status(
+            context: ToolContext, **_kw: Any,
+        ) -> Any:
+            """Read-only git status --short on the workspace."""
+            manifest = self._tool_registry.get_manifest("git_status")
+            assert manifest is not None  # builtin, registered at startup
+            res = run_sandboxed_process(
+                ["git", "status", "--short"],
+                timeout_ms=manifest.max_runtime_ms or 10_000,
+                max_output_bytes=manifest.max_output_bytes or 200_000,
+                cwd=str(Path.cwd()),
+            )
+            return ToolResult(
+                success=res["success"],
+                data=res,
+                error=None if res["success"] else res["stderr"],
+                agent_id=context.agent_id, tool_name="git_status",
+                tick=context.tick,
+            )
+
         # Register handlers with their manifests (v0.7.0 — registration
         # validates each manifest against the declarative contract).
         manifests = builtin_manifests()
@@ -565,6 +706,20 @@ class Simulation:
         )
         self._tool_registry.register_handler(
             "delegate", handle_delegate, manifest=manifests["delegate"],
+        )
+        self._tool_registry.register_handler(
+            "apply_patch", handle_apply_patch,
+            manifest=manifests["apply_patch"],
+        )
+        self._tool_registry.register_handler(
+            "run_tests", handle_run_tests, manifest=manifests["run_tests"],
+        )
+        self._tool_registry.register_handler(
+            "git_diff", handle_git_diff, manifest=manifests["git_diff"],
+        )
+        self._tool_registry.register_handler(
+            "git_status", handle_git_status,
+            manifest=manifests["git_status"],
         )
 
     def _create_runtime(self, config: AgentConfig) -> AgentRuntime:
@@ -2239,9 +2394,13 @@ class Simulation:
 
         try:
             for effect in committed:
-                if effect.effect_type == EffectType.FILE_WRITE:
+                if effect.effect_type in {
+                    EffectType.FILE_WRITE, EffectType.FILE_PATCH,
+                }:
                     # Write to private workspace (previous content
-                    # captured so rollback can restore it)
+                    # captured so rollback can restore it). FILE_PATCH
+                    # carries the full NEW content computed at Act —
+                    # commit is a plain write.
                     agent_id = effect.agent_id
                     path = effect.resource
                     content = effect.data.get("content", "")

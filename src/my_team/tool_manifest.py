@@ -357,4 +357,78 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         idempotent=False,
         reversible=True,
     )
-    return {m.name: m for m in (read, ls, write, kb_write, send_email, delegate)}
+    # v0.7.0 restricted tools (P1-3) — the safe set that precedes Bash
+    # (see KANBAN/OPEN_ISSUE/OI-001.md).
+    apply_patch = ToolManifest(
+        name="apply_patch",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        input_schema={
+            "path": {"type": "string"},
+            "patch": {"type": "string"},
+        },
+        output_schema={"staged": {"type": "boolean"}},
+        capabilities=("filesystem:patch",),
+        effect_types=(EffectType.FILE_PATCH,),
+        filesystem_scopes=("private",),
+        deterministic=True,
+        idempotent=False,   # context-dependent — conflict → reject
+        reversible=True,    # rolled back via file_previous like FILE_WRITE
+        max_output_bytes=1_000_000,
+    )
+    run_tests = ToolManifest(
+        name="run_tests",
+        version="1.0.0",
+        execution_class=ExecutionClass.SANDBOXED_PROCESS,
+        input_schema={"test_path": {"type": "string"}},
+        output_schema={
+            "success": {"type": "boolean"},
+            "stdout": {"type": "string"},
+            "stderr": {"type": "string"},
+            "exit_code": {"type": "integer"},
+        },
+        capabilities=("test:run",),
+        effect_types=(),
+        filesystem_scopes=("workspace",),
+        deterministic=False,    # depends on test results
+        idempotent=True,
+        reversible=True,
+        requires_network=False,  # uv uses the synced environment
+        max_runtime_ms=60_000,
+        max_output_bytes=200_000,
+    )
+    git_diff = ToolManifest(
+        name="git_diff",
+        version="1.0.0",
+        execution_class=ExecutionClass.READ_ONLY,
+        input_schema={"path": {"type": "string"}},
+        output_schema={"stdout": {"type": "string"}},
+        capabilities=("git:diff",),
+        effect_types=(),
+        filesystem_scopes=("workspace",),
+        deterministic=False,    # output depends on repo state
+        idempotent=True,
+        max_runtime_ms=10_000,
+        max_output_bytes=200_000,
+    )
+    git_status = ToolManifest(
+        name="git_status",
+        version="1.0.0",
+        execution_class=ExecutionClass.READ_ONLY,
+        input_schema={},
+        output_schema={"stdout": {"type": "string"}},
+        capabilities=("git:status",),
+        effect_types=(),
+        filesystem_scopes=("workspace",),
+        deterministic=False,
+        idempotent=True,
+        max_runtime_ms=10_000,
+        max_output_bytes=200_000,
+    )
+    return {
+        m.name: m
+        for m in (
+            read, ls, write, kb_write, send_email, delegate,
+            apply_patch, run_tests, git_diff, git_status,
+        )
+    }

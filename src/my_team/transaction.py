@@ -29,6 +29,7 @@ class EffectType(str, Enum):
     EMAIL_SEND = "email_send"
     EMAIL_DELIVER = "email_deliver"
     FILE_WRITE = "file_write"
+    FILE_PATCH = "file_patch"
     FILE_DELETE = "file_delete"
     KB_CREATE = "kb_create"
     KB_WRITE = "kb_write"
@@ -47,6 +48,7 @@ _EXTERNAL_EFFECT_TYPES: frozenset[EffectType] = frozenset({
     EffectType.EMAIL_SEND,
     EffectType.EMAIL_DELIVER,
     EffectType.FILE_WRITE,
+    EffectType.FILE_PATCH,
     EffectType.FILE_DELETE,
 })
 
@@ -194,7 +196,7 @@ class TransactionBuffer:
             # and lock_token of the staged effect
             if effect.effect_type in {
                 EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
-                EffectType.FILE_WRITE, EffectType.FILE_DELETE,
+                EffectType.FILE_WRITE, EffectType.FILE_PATCH, EffectType.FILE_DELETE,
             } and check_lock:
                 if not check_lock(
                     effect.resource, effect.agent_id, effect.lock_token
