@@ -101,7 +101,9 @@ class TestValidation:
             EffectType.KB_WRITE, "agent.a", "report.md",
         )
 
-        def check_lock(resource: str, agent_id: str) -> bool:
+        def check_lock(
+            resource: str, agent_id: str, lock_token: str | None = None,
+        ) -> bool:
             return False  # no lock held
 
         failures = buf.validate(check_lock=check_lock)
@@ -127,7 +129,7 @@ class TestValidation:
 
         failures = buf.validate(
             check_version=lambda r, v: True,
-            check_lock=lambda r, a: True,
+            check_lock=lambda r, a, t=None: True,
             check_permission=lambda a, r, o: True,
         )
         assert len(failures) == 0

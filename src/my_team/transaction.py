@@ -156,6 +156,8 @@ class TransactionBuffer:
     ) -> list[StagedEffect]:
         """Validate all staged effects against preconditions.
 
+        check_lock signature: (resource, agent_id, lock_token) -> bool
+
         Returns list of effects that failed validation.
         """
         failures: list[StagedEffect] = []
@@ -174,12 +176,15 @@ class TransactionBuffer:
                     failures.append(effect)
                     continue
 
-            # Lock check (for write operations)
+            # Lock check (for write operations) — verifies both ownership
+            # and lock_token of the staged effect
             if effect.effect_type in {
                 EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
                 EffectType.FILE_WRITE, EffectType.FILE_DELETE,
             } and check_lock:
-                if not check_lock(effect.resource, effect.agent_id):
+                if not check_lock(
+                    effect.resource, effect.agent_id, effect.lock_token
+                ):
                     effect.status = EffectStatus.FAILED
                     effect.error = "Must hold lock to write"
                     failures.append(effect)

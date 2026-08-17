@@ -1030,12 +1030,19 @@ class Simulation:
             current = self._shared_kb.versions.get_version(resource)
             return current == expected
 
-        def check_lock(resource: str, agent_id: str) -> bool:
+        def check_lock(
+            resource: str, agent_id: str, lock_token: str | None = None,
+        ) -> bool:
             # Private workspace writes don't need locks.
             # Only enforce lock checks for shared KB resources.
             if resource.startswith(("shared-kb/", "project/")):
                 lock = self._lock_manager.get_lock(resource)
-                return lock is not None and lock.owner_agent_id == agent_id
+                if lock is None or lock.owner_agent_id != agent_id:
+                    return False
+                # If the effect carries a lock_token, verify it matches
+                if lock_token and lock.lock_token != lock_token:
+                    return False
+                return True
             return True
 
         def check_permission(agent_id: str, resource: str, op: str) -> bool:
