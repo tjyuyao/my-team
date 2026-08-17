@@ -1105,13 +1105,23 @@ pause = 在下一个 Commit boundary 停止状态转换
 ```text
 name / version / input_schema / output_schema / capabilities
 execution_class   — PURE / READ_ONLY / LOCAL_DETERMINISTIC /
-                     STAGED_MUTATION / SANDBOXED_PROCESS /
-                     EXTERNAL_IRREVERSIBLE
+                     STAGED_MUTATION / LOCAL_PROCESS /
+                     SANDBOXED_PROCESS / EXTERNAL_IRREVERSIBLE
 effect_types      — 声明的副作用类型（EffectType）
+possible_side_effects — 文档化的可能副作用（LOCAL_PROCESS 必须声明：
+                     file_write_local / process_spawn / possible_network…）
 deterministic / idempotent / reversible
 requires_network / filesystem_scopes / max_runtime_ms / max_output_bytes
 supports_cancel / requires_approval / retry_policy
 ```
+
+**执行类诚实分类**：LOCAL_PROCESS（宿主子进程，强制超时/进程组终止/
+输出截断/无 shell/固定 cwd，但**继承环境与 PATH，无只读挂载、无网络
+拒绝、无资源上限**）与 SANDBOXED_PROCESS（真正隔离：只读挂载 + 网络
+默认拒绝 + 资源上限 + 审批）是两回事。只有真实隔离的工具才能声明
+SANDBOXED_PROCESS；当前内置工具无一达到（run_tests = LOCAL_PROCESS，
+manifest 声明 possible_side_effects 与 requires_network=True）。
+完整沙箱协议见 OI-001。
 
 注册校验（ToolManifestError）：
 - 必填：name、version；schema 必须是 dict
@@ -1123,9 +1133,11 @@ supports_cancel / requires_approval / retry_policy
 内置工具映射（v0.7.0）：
 read/ls → READ_ONLY（冻结快照视图）；write/kb_write → STAGED_MUTATION；
 send_email/delegate → STAGED_MUTATION（outbox 暂存，回滚丢弃）；
-apply_patch → STAGED_MUTATION（FILE_PATCH，Act 期校验 + Commit 期落地，
-file_previous 回滚）；run_tests → SANDBOXED_PROCESS（超时 + 输出截断）；
-git_diff/git_status → READ_ONLY（workspace 作用域）。
+apply_patch → STAGED_MUTATION（FILE_PATCH：Act 期对冻结视图校验，
+携带 base_hash，**应用时刻**复查当前内容 hash —— 同 tick 写入使
+patch 过期 → 局部 patch_conflict，绝不静默覆盖）；
+run_tests → LOCAL_PROCESS；git_diff/git_status → READ_ONLY
+（workspace 作用域，cwd 固定为仓库根，命令由系统构造）。
 
 ## OperationPolicy（部署期控制面，默认拒绝）
 
@@ -1138,29 +1150,54 @@ retry_policy / reversible
 策略决策（decide）：白名单 → 审批 → 网络 → 文件系统作用域 →
 墙钟/输出上限 → 不可逆。注册即校验：requires_approval ⊆ allowed。
 
-## 两阶段 Validate 原则
+## 多阶段 Validate 原则
 
 ```text
-PreValidate（Phase 6）  — "是否允许尝试？"（能力、manifest、策略、
-                          budget、重复 request_id、task 有效性/deadline）
-CommitValidate（Phase 8）— "现在是否仍可提交？"（lock token、KB version、
-                          task 未取消/未终态/deadline 未过、配额仍够）
+PreValidate（Phase 6）      — "是否允许尝试？"（能力、manifest、策略、
+                               budget、重复 request_id、task 有效性/
+                               deadline）
+Executor Admission（未来）   — "执行器是否可接受？"（worker 可用性、
+                               容量、配额分配、审批流）
+CommitValidate（Phase 8）    — "现在是否仍可提交？"（lock token、KB
+                               version、task 未取消/未终态/deadline
+                               未过、配额仍够）
+Apply-time check（Commit 内）— "应用时仍一致？"（FILE_PATCH base-hash
+                               复查，可见同 tick 已应用的写入）
 ```
 
-失败语义：PreValidate 失败 → intent 不进入 Act；CommitValidate 失败
-→ effect 局部 FAILED，绝不触发整 tick 回滚。Act 期的 budget 复查
-（registry + 本 tick 提交数）封堵 PreValidate→提交之间的窗口。
+失败语义：PreValidate 失败 → intent 不进入 Act（带结构化 error_code：
+CAPABILITY_DENIED / TOOL_MANIFEST_MISSING / POLICY_DENIED /
+APPROVAL_REQUIRED / BUDGET_EXCEEDED / DUPLICATE_REQUEST_ID /
+TASK_NOT_FOUND / DEADLINE_EXCEEDED / INVALID_ARGUMENT，审计 details
+同步记录）；CommitValidate 失败 → effect 局部 FAILED，绝不触发整
+tick 回滚。Admission 阶段在无 worker 池的内核中尚未实现（v0.8）。
+
+## Effect 分组原子性
+
+```text
+group_id + atomicity="group" — 组成员同生共死
+  DelegateIntent = TASK_CREATE + EMAIL_SEND（一组）
+  组内任一成员 CommitValidate 失败或冲突落败 → 全体 FAILED（局部，
+  无整 tick 回滚）
+atomicity="per_effect"（默认）— 独立失败
+```
 
 ## 工具执行约束（v0.7.0 现有能力）
 
-- 本地沙箱工具（run_tests/git_diff/git_status）：list 命令、无 shell、
-  进程组超时终止（start_new_session + killpg）、输出截断、固定 cwd
+- 本地进程工具（run_tests/git_diff/git_status）：list 命令强制（str
+  命令被 Popen 视为 shell 调用，显式拒绝）、进程组超时终止
+  （start_new_session + killpg，无孤儿）、输出截断（带标记）、固定
+  cwd。run_tests 的 possible_side_effects 已声明（执行测试代码 =
+  执行不可信代码：conftest/plugin/import/subprocess/可能网络）
 - 完整沙箱协议（只读挂载、网络默认拒绝、资源上限、审批策略、
   Bash Worker）→ KANBAN/OPEN_ISSUE/OI-001，完成前禁止开放 Bash
 - 远程工具：经 PendingOperationRegistry；超时/取消唤醒携带结构化
   错误（{error, timed_out|cancelled, request_id}）；取消需 manifest
-  supports_cancel（LLM 请求恒可取消，无外部副作用）；取消只通知，
-  绝不投递结果
+  supports_cancel；取消是**逻辑取消**——结果被栅栏、绝不投递，但
+  外部执行器无法从内核中止（executor_cancel_requested=False），且
+  provider 端副作用（费用/日志/处理）无法撤销
+  （CancellationResult.external_effects_possible=True）；LLM 请求可
+  逻辑取消 + fencing，不保证撤销 provider 端处理
 
 ---
 

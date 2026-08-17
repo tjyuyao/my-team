@@ -1,9 +1,21 @@
 # v0.7.0 Implementation Plan — Snapshot-Consistent, Policy-Controlled Tool Runtime
 
 **Created:** 2026-08-17
-**Status:** P1 DONE (f77846f..18f6964) — P2 dispositioned, open for v0.8+
-**Label:** v0.7.0 — Snapshot-consistent and policy-controlled tool runtime
+**Status:** P1 DONE + review round (f77846f..be4765e) — P2 dispositioned, open for v0.8+
+**Label:** v0.7.0 — Manifest-based policy-controlled tool runtime **prototype**
 **Milestone:** KANBAN/MILESTONE/2026-08-17-v0.7.0.md
+
+## 审查轮次修订（be4765e）
+
+- FILE_PATCH 携带 base_hash/patch_hash/new_content_hash；应用时刻
+  复查（同 tick 写 → 局部 patch_conflict）
+- Effect 分组原子性（group_id + atomicity；delegate 组）
+- 结构化 error_code（ActionResult + 审计 details）
+- ExecutionClass.LOCAL_PROCESS；run_tests 重分类 + possible_side_
+  effects + requires_network=True
+- scheduler claim 回滚 requeue
+- cancel_operation → CancellationResult（逻辑取消语义 + LLM 措辞修正）
+- v0.8.0 计划建立（KANBAN/TODO/2026-08-17-v080-implementation-plan.md）
 
 ## Goal
 
