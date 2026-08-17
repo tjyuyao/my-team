@@ -53,7 +53,7 @@ from my_team.models.activation import (
 from my_team.models.agent import AgentConfig
 
 # New v0.6.0 models
-from my_team.models.continuation import AgentContinuation
+from my_team.models.continuation import AgentContinuation, ContinuationPhase
 from my_team.models.email import Email
 from my_team.models.intent import (
     DelegateIntent,
@@ -882,6 +882,9 @@ class Simulation:
                 intents[agent_id] = runtime.decide_intents(
                     obs, continuation=continuation,
                 )
+                # If the agent just processed a pending result, finalize
+                if continuation.phase == ContinuationPhase.PROCESSING_RESULT:
+                    continuation.finalize_result_processing(tick)
         return intents
 
     def _phase_act(

@@ -135,6 +135,19 @@ class AgentContinuation(BaseModel):
         self.react_turn += 1
         self._log("llm_result_received", tick=tick)
 
+    def finalize_result_processing(self, tick: int) -> None:
+        """Reset phase after the agent has processed the received result.
+
+        Called after decide_intents() consumes last_llm_result. Clears
+        the result so the next activation starts fresh (either a new
+        LLM request or new tool intents).
+        """
+        if self.phase == ContinuationPhase.PROCESSING_RESULT:
+            self.phase = ContinuationPhase.READY_TO_DECIDE
+            self.last_llm_result = {}
+            self.last_tool_result = {}
+            self._log("result_processed", tick=tick)
+
     def receive_tool_result(self, result: dict[str, Any], tick: int) -> None:
         """Receive tool result and transition to PROCESSING_RESULT."""
         self.phase = ContinuationPhase.PROCESSING_RESULT
