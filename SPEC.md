@@ -1199,11 +1199,13 @@ atomicity="per_effect"（默认）— 独立失败
   （CancellationResult.external_effects_possible=True）；LLM 请求可
   逻辑取消 + fencing，不保证撤销 provider 端处理
 
-## 执行等级（sandboxed_python 分层，v0.8 设计）
+## 执行等级（sandboxed_python 分层）
 
 `sandboxed_python` 不是单一工具，而是受策略约束的 Python 执行
 服务（2026-08-17 设计评审定稿）。按执行等级分列；等级差异体现在
-manifest 能力声明 + 执行环境参数，共用同一 worker 子进程引擎：
+manifest 能力声明 + 执行环境参数，共用同一 worker 子进程引擎。
+**L0/L1 已实现（v0.8.0，经 Executor Admission + Phase 9 dispatch
+执行，支持物理取消）；L2 未实现（依赖 P2-7 沙箱基础设施）。**
 
 | 等级 | 工具名 | 能力 | execution_class |
 |---|---|---|---|

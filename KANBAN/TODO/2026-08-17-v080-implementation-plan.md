@@ -1,9 +1,26 @@
 # v0.8.0 Implementation Plan — Durable, Fenced, Isolated Tool Operations
 
 **Created:** 2026-08-17（v0.7.0 review 后）
-**Status:** TODO
+**Status:** P1 全部完成 + P2-9/10（f941f52..12b9b9f，5 commits）；
+P2-7/8/11 开放（见 MILESTONE/2026-08-17-v0.8.0.md）
 **2026-08-17 设计评审：** sandboxed_python 分层定稿（L0–L4 → P1-7 与
 SPEC §8.7「执行等级」）
+
+## 实施完成情况（f941f52..12b9b9f）
+
+- ✅ P1-1/2 持久化闭环（outbox dispatch 每 commit 无条件运行 +
+  跨重启延续测试）
+- ✅ P1-3 ToolRequest/ToolResult 契约（manifest_hash/input_hash/
+  workspace_version/state_epoch，系统注入）
+- ✅ P1-4/5 Executor Admission + 分级（Act 按执行类路由；Phase 9
+  dispatch；TOOL_DISPATCHED 审计）
+- ✅ P1-6 请求幂等（seen-requests 持久化，重放拒绝）
+- ✅ P1-7 sandboxed_python L0/L1（python_compute / python_transform）
+- ✅ P2-9 跨进程恢复（FAILED op 结构化唤醒 + 多次重启收敛测试）
+- ✅ P2-10 取消物理化（进程组终止，executor_cancel_confirmed=True）
+- ⬜ P2-7 run_tests 真实隔离（SANDBOXED_PROCESS 前置）
+- ⬜ P2-8 Snapshot 矩阵
+- ⬜ P2-11 token/cost 预算
 **Label:** v0.8.0 — Durable, fenced, and isolated tool operations
 
 ## 定位
