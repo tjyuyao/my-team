@@ -153,10 +153,15 @@ class TransactionBuffer:
         check_version: Callable[..., bool] | None = None,
         check_lock: Callable[..., bool] | None = None,
         check_permission: Callable[..., bool] | None = None,
+        check_task: Callable[[StagedEffect], str | None] | None = None,
     ) -> list[StagedEffect]:
         """Validate all staged effects against preconditions.
 
         check_lock signature: (resource, agent_id, lock_token) -> bool
+        check_task signature: (effect) -> error message or None; applies
+        to TASK_UPDATE effects (task still exists / not cancelled /
+        not already terminal). CommitValidate: "is it still committable
+        now?"
 
         Returns list of effects that failed validation.
         """
@@ -165,6 +170,15 @@ class TransactionBuffer:
         for effect in self._effects.values():
             if effect.status != EffectStatus.STAGED:
                 continue
+
+            # Task check (TASK_UPDATE effects must target a live task)
+            if effect.effect_type == EffectType.TASK_UPDATE and check_task:
+                error = check_task(effect)
+                if error is not None:
+                    effect.status = EffectStatus.FAILED
+                    effect.error = error
+                    failures.append(effect)
+                    continue
 
             # Version check
             if effect.expected_version is not None and check_version:

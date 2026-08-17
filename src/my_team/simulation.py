@@ -67,7 +67,7 @@ from my_team.models.intent import (
     WaitForEventIntent,
     WritePrivateFileIntent,
 )
-from my_team.models.task import Task
+from my_team.models.task import Task, TaskPriority, TaskStatus
 from my_team.outbox import Outbox, OutboxEntry
 from my_team.pending_ops import (
     OpType,
@@ -1493,6 +1493,11 @@ class Simulation:
         - WaitForEventIntent → agent → waiting state
         """
         all_results: dict[str, list[ActionResult]] = {}
+        # LLM submissions per agent THIS tick — commit-time budget
+        # re-check: PreValidate counted the registry (which does not yet
+        # include this tick's submissions), so two agents could both
+        # pass; this closes the window before ops are submitted.
+        submitted_llm: dict[str, int] = {}
 
         for agent_id, intent_list in plans.items():
             # Determine which intents passed validation
@@ -1520,6 +1525,29 @@ class Simulation:
 
                 # SubmitLLMRequest → async LLM registration
                 if isinstance(intent, SubmitLLMRequest):
+                    # Commit-time budget re-check (配额仍够): registry
+                    # in-flight + this tick's submissions for this agent
+                    in_flight = (
+                        self._pending_ops.count_in_flight(
+                            agent_id, op_type=OpType.LLM_REQUEST,
+                        )
+                        + submitted_llm.get(agent_id, 0)
+                    )
+                    if in_flight >= self._config.max_concurrent_llm_requests:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"LLM budget exceeded for '{agent_id}' "
+                                f"at commit time ({in_flight} in flight, "
+                                f"max "
+                                f"{self._config.max_concurrent_llm_requests})"
+                            ),
+                        ))
+                        continue
+                    submitted_llm[agent_id] = (
+                        submitted_llm.get(agent_id, 0) + 1
+                    )
                     op = self._pending_ops.submit(
                         op_type=OpType.LLM_REQUEST,
                         agent_id=agent_id,
@@ -1755,15 +1783,24 @@ class Simulation:
         plans: dict[str, list[Intent]],
         ready: list[ReadyCandidate],
     ) -> dict[str, list[ActionResult]]:
-        """Phase 6: Validate Intents before execution.
+        """Phase 6: PreValidate Intents before execution.
+
+        Principle: PreValidate checks "is this attempt ALLOWED TO TRY?" —
+        capability, policy, manifest, task validity. CommitValidate
+        (Phase 8) separately checks "is it still COMMITTABLE now?" —
+        locks, versions, task liveness, deadlines. PreValidate is
+        side-effect-free: invalid intents become failed Results, valid
+        intents pass through to Act for staging.
 
         Checks performed:
-        1. Tool capability — SubmitToolRequest tool is in agent's allowed tools
+        1. Tool capability — SubmitToolRequest tool in agent's allowed tools
+        1b. LLM budget — per-agent in-flight cap
+        1c. Duplicate request_id — within plan + cross-tick (registry)
+        1d. Tool manifest + operation policy (v0.7.0)
         2. Delegation target — DelegateIntent targets direct children
-        3. Payload fields — WritePrivateFileIntent has path, SendEmailIntent has to
-        4. Activation budget — total intents within limit
-
-        Invalid intents are converted to failed Results. Valid intents pass through.
+        3. Payload fields — WritePrivateFileIntent has path,
+           SendEmailIntent has to, DelegateIntent has recipient/title
+        4. Task validity — referenced task exists, deadline not passed
         """
         validated: dict[str, list[ActionResult]] = {}
 
@@ -1874,6 +1911,108 @@ class Simulation:
                         continue
                     seen_request_ids.add(intent.request_id)
 
+                # Check 1d: tool manifest + operation policy (v0.7.0).
+                # PreValidate principle: "is this attempt allowed to try?"
+                # — the manifest must exist (tools are declarative
+                # objects), and the deployment policy must allow it.
+                if isinstance(intent, SubmitToolRequest):
+                    manifest = self._tool_registry.get_manifest(
+                        intent.tool_name,
+                    )
+                    if manifest is None:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"Tool '{intent.tool_name}' has no "
+                                "registered manifest"
+                            ),
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.PERMISSION_DENIED,
+                            agent_id=agent_id,
+                            tick=tick,
+                            details={
+                                "tool": intent.tool_name,
+                                "reason": "no_manifest",
+                            },
+                            success=False,
+                            error="Tool has no manifest",
+                        )
+                        continue
+                    decision = self._tool_registry.policy_decision(
+                        intent.tool_name,
+                    )
+                    if not decision.allowed:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=decision.reason,
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.PERMISSION_DENIED,
+                            agent_id=agent_id,
+                            tick=tick,
+                            details={
+                                "tool": intent.tool_name,
+                                "reason": "policy_denied",
+                            },
+                            success=False,
+                            error=decision.reason,
+                        )
+                        continue
+                    if decision.requires_approval:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"Tool '{intent.tool_name}' requires "
+                                "human approval"
+                            ),
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.PERMISSION_DENIED,
+                            agent_id=agent_id,
+                            tick=tick,
+                            details={
+                                "tool": intent.tool_name,
+                                "reason": "requires_approval",
+                            },
+                            success=False,
+                            error="Tool requires human approval",
+                        )
+                        continue
+
+                # Check 4: task validity + deadline (v0.7.0 hardening).
+                # An intent referencing a task must reference an EXISTING
+                # task; a task whose deadline has passed cannot be worked
+                # on further (the TimeoutChecker expires it at Publish).
+                if intent.task_id:
+                    if not self._task_tree.exists(intent.task_id):
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"Task '{intent.task_id}' not found"
+                            ),
+                        ))
+                        continue
+                    task = self._task_tree.get(intent.task_id)
+                    if (
+                        task.deadline_tick is not None
+                        and task.deadline_tick < tick
+                    ):
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"Task '{intent.task_id}' deadline passed "
+                                f"(deadline_tick={task.deadline_tick} < "
+                                f"tick={tick})"
+                            ),
+                        ))
+                        continue
+
                 # Check 2: delegation target validation
                 if isinstance(intent, DelegateIntent):
                     target_id = intent.recipient_agent_id
@@ -1950,15 +2089,50 @@ class Simulation:
     ) -> list[Email]:
         """Phase 8: Commit staged effects atomically.
 
-        1. Validate effects (version, lock, permission checks)
+        1. Validate effects (version, lock, permission, task checks)
         2. Resolve conflicts (deterministic, by agent_id)
         3. Commit all validated effects
         4. Apply committed effects to subsystems
         5. On failure, rollback
+
+        CommitValidate principle: PreValidate (Phase 6) checks "is this
+        attempt allowed to try?"; CommitValidate checks "is it still
+        committable NOW?" — lock token still valid, KB version still
+        matches, task not cancelled/terminal, deadline not passed.
         """
         buffer = self._transaction_buffer
 
         # Step 1: Validate
+        def check_task(effect: StagedEffect) -> str | None:
+            """TASK_UPDATE must target an existing, live task.
+
+            Guards the apply path: update_status() would raise on an
+            invalid transition (e.g. completing a cancelled/completed
+            task) and trigger a FULL-TICK rollback; failing the effect
+            here keeps the failure local and deterministic.
+            """
+            if effect.effect_type != EffectType.TASK_UPDATE:
+                return None
+            task_id = effect.resource
+            if not self._task_tree.exists(task_id):
+                return f"Task '{task_id}' not found"
+            task = self._task_tree.get(task_id)
+            if task.status == TaskStatus.CANCELLED:
+                return f"Task '{task_id}' is cancelled"
+            if task.is_terminal:
+                return (
+                    f"Task '{task_id}' is already terminal "
+                    f"({task.status.value})"
+                )
+            if (
+                task.deadline_tick is not None
+                and task.deadline_tick < tick
+            ):
+                return (
+                    f"Task '{task_id}' deadline passed "
+                    f"(deadline_tick={task.deadline_tick} < tick={tick})"
+                )
+            return None
         def check_version(resource: str, expected: int) -> bool:
             current = self._shared_kb.versions.get_version(resource)
             return current == expected
@@ -1991,6 +2165,7 @@ class Simulation:
             check_version=check_version,
             check_lock=check_lock,
             check_permission=check_permission,
+            check_task=check_task,
         )
 
         # Step 2: Resolve conflicts
@@ -2122,7 +2297,6 @@ class Simulation:
                                 created_email_ids.append(_eid)
 
                 elif effect.effect_type == EffectType.TASK_CREATE:
-                    from my_team.models.task import TaskPriority, TaskStatus
                     data = effect.data
                     self._task_tree.create(
                         task_id=data.get("task_id", effect.resource),
@@ -2138,7 +2312,6 @@ class Simulation:
                     created_task_ids.append(data.get("task_id", effect.resource))
 
                 elif effect.effect_type == EffectType.TASK_UPDATE:
-                    from my_team.models.task import TaskStatus
                     data = effect.data
                     task_id = effect.resource
                     if self._task_tree.exists(task_id):
