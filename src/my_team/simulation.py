@@ -27,6 +27,7 @@ from my_team.agent_runtime import (
     SubAgent,
     ToolContext,
     ToolRegistry,
+    ToolResult,
     _proxy,
     _proxy_nested,
 )
@@ -52,6 +53,7 @@ from my_team.scheduler import AgentScheduler
 from my_team.shared_kb import LockManager, PermissionEngine, SharedKB
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import TickConfig, TickEngine, TickResult
+from my_team.transaction import EffectType, TransactionBuffer
 
 
 class SimulationConfig(BaseModel):
@@ -162,6 +164,9 @@ class Simulation:
         # Tool registry
         self._tool_registry = ToolRegistry()
 
+        # Transaction buffer for atomic commit
+        self._transaction_buffer = TransactionBuffer()
+
         # Tick engine
         self._tick_engine = TickEngine(TickConfig(
             tick_duration_value=self._config.tick_duration_value,
@@ -213,6 +218,7 @@ class Simulation:
         )
 
         # Initialize
+        self._register_tool_handlers()
         self._initialize()
 
     def _initialize(self) -> None:
@@ -264,6 +270,135 @@ class Simulation:
                 agent_id=agent_id,
                 details={"role": agent_config.role, "tools": list(tools)},
             )
+
+    def _register_tool_handlers(self) -> None:
+        """Register tool handlers that connect ToolRegistry to subsystems.
+
+        Write tools (write, send_email, delegate) stage effects in the
+        TransactionBuffer. Read tools (read, ls) execute directly.
+        """
+        # Read-only tools — execute directly
+        def handle_read(context: ToolContext, path: str = "", **_kw: Any) -> Any:
+            home = self._private_store.agent_home(context.agent_id)
+            target = home / path
+            if not target.exists() or not target.is_file():
+                return ToolResult(
+                    success=False, error=f"File not found: {path}",
+                    agent_id=context.agent_id, tool_name="read",
+                    tick=context.tick,
+                )
+            content = target.read_text(encoding="utf-8")
+            return ToolResult(
+                success=True, data={"content": content},
+                agent_id=context.agent_id, tool_name="read",
+                tick=context.tick,
+            )
+
+        def handle_ls(context: ToolContext, path: str = "", **_kw: Any) -> Any:
+            home = self._private_store.agent_home(context.agent_id)
+            target = home / path if path else home
+            if not target.exists():
+                return ToolResult(
+                    success=False, error=f"Directory not found: {path}",
+                    agent_id=context.agent_id, tool_name="ls",
+                    tick=context.tick,
+                )
+            entries = sorted(p.name for p in target.iterdir())
+            return ToolResult(
+                success=True, data={"entries": entries},
+                agent_id=context.agent_id, tool_name="ls",
+                tick=context.tick,
+            )
+
+        def handle_write(
+            context: ToolContext, path: str = "", content: str = "", **_kw: Any,
+        ) -> Any:
+            # Stage as a file write effect — committed in Phase 8
+            self._transaction_buffer.stage(
+                effect_type=EffectType.FILE_WRITE,
+                agent_id=context.agent_id,
+                resource=path,
+                data={"content": content},
+            )
+            return ToolResult(
+                success=True, data={"staged": True},
+                agent_id=context.agent_id, tool_name="write",
+                tick=context.tick,
+            )
+
+        def handle_send_email(
+            context: ToolContext,
+            to: list[str] | None = None,
+            subject: str = "",
+            body: str = "",
+            **_kw: Any,
+        ) -> Any:
+            # Stage as an email send effect — committed in Phase 8
+            self._transaction_buffer.stage(
+                effect_type=EffectType.EMAIL_SEND,
+                agent_id=context.agent_id,
+                resource=f"email:{context.agent_id}",
+                data={
+                    "from_agent": context.agent_id,
+                    "to": to or [],
+                    "subject": subject,
+                    "body": body,
+                },
+            )
+            return ToolResult(
+                success=True, data={"staged": True},
+                agent_id=context.agent_id, tool_name="send_email",
+                tick=context.tick,
+            )
+
+        def handle_delegate(
+            context: ToolContext,
+            recipient_agent_id: str = "",
+            task_title: str = "",
+            task_description: str = "",
+            **_kw: Any,
+        ) -> Any:
+            # Create task + send delegation email — staged as two effects
+            from uuid import uuid4
+            task_id = f"task.{context.tick}.{uuid4().hex[:8]}"
+            self._transaction_buffer.stage(
+                effect_type=EffectType.TASK_CREATE,
+                agent_id=context.agent_id,
+                resource=task_id,
+                data={
+                    "task_id": task_id,
+                    "title": task_title,
+                    "description": task_description,
+                    "creator_agent_id": context.agent_id,
+                    "owner_agent_id": recipient_agent_id,
+                    "parent_task_id": None,
+                },
+            )
+            self._transaction_buffer.stage(
+                effect_type=EffectType.EMAIL_SEND,
+                agent_id=context.agent_id,
+                resource=f"email:{context.agent_id}",
+                data={
+                    "from_agent": context.agent_id,
+                    "to": [recipient_agent_id],
+                    "subject": f"[DELEGATE] {task_title}",
+                    "body": task_description,
+                    "email_type": "delegation",
+                    "task_id": task_id,
+                },
+            )
+            return ToolResult(
+                success=True,
+                data={"task_id": task_id, "staged": True},
+                agent_id=context.agent_id, tool_name="delegate",
+                tick=context.tick,
+            )
+
+        self._tool_registry.register_handler("read", handle_read)
+        self._tool_registry.register_handler("ls", handle_ls)
+        self._tool_registry.register_handler("write", handle_write)
+        self._tool_registry.register_handler("send_email", handle_send_email)
+        self._tool_registry.register_handler("delegate", handle_delegate)
 
     def _create_runtime(self, config: AgentConfig) -> AgentRuntime:
         """Create an appropriate runtime for an agent based on config."""
@@ -383,6 +518,10 @@ class Simulation:
 
         # Phase 8: Commit — atomic state update
         self._phase_commit(tick, all_results)
+        self._transaction_buffer.clear()
+
+        # Phase 9: Publish — wake events + timeouts
+        self._phase_publish(tick, delivered, all_results, ready)
 
         # Phase 9: Publish — wake events + timeouts
         self._phase_publish(tick, delivered, all_results, ready)
@@ -795,17 +934,97 @@ class Simulation:
     def _phase_commit(
         self, tick: int, all_results: dict[str, list[ActionResult]]
     ) -> list[Email]:
-        """Phase 8: Commit staged effects.
+        """Phase 8: Commit staged effects atomically.
 
-        Currently handles email queueing from actions.
-        Full transaction model TODO (review gap §8.4).
+        1. Validate effects (version, lock, permission checks)
+        2. Resolve conflicts (deterministic, by agent_id)
+        3. Commit all validated effects
+        4. Apply committed effects to subsystems
+        5. On failure, rollback
         """
+        buffer = self._transaction_buffer
+
+        # Step 1: Validate
+        def check_version(resource: str, expected: int) -> bool:
+            current = self._shared_kb.versions.get_version(resource)
+            return current == expected
+
+        def check_lock(resource: str, agent_id: str) -> bool:
+            lock = self._lock_manager.get_lock(resource)
+            return lock is not None and lock.owner_agent_id == agent_id
+
+        def check_permission(agent_id: str, resource: str, op: str) -> bool:
+            return self._permission_engine.check(
+                principal=agent_id, path=resource, operation=op,
+            )
+
+        buffer.validate(
+            check_version=check_version,
+            check_lock=check_lock,
+            check_permission=check_permission,
+        )
+
+        # Step 2: Resolve conflicts
+        buffer.resolve_conflicts()
+
+        # Step 3: Commit
+        committed = buffer.commit()
+
+        # Step 4: Apply committed effects to subsystems
         committed_emails: list[Email] = []
-        for agent_id, results in all_results.items():
-            for result in results:
-                if result.success and result.action.action_type == "send_email":
-                    # Email was already queued by the action handler
-                    pass
+        for effect in committed:
+            if effect.effect_type == EffectType.FILE_WRITE:
+                # Write to private workspace
+                agent_id = effect.agent_id
+                path = effect.resource
+                content = effect.data.get("content", "")
+                home = self._private_store.agent_home(agent_id)
+                target = home / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+
+            elif effect.effect_type == EffectType.EMAIL_SEND:
+                from my_team.models.email import EmailType
+                data = effect.data
+                email = self._mail_system.create_email(
+                    from_agent=data.get("from_agent", effect.agent_id),
+                    to=data.get("to", []),
+                    subject=data.get("subject", ""),
+                    body=data.get("body", ""),
+                    email_type=EmailType(data.get("email_type", "progress")),
+                    tick=tick,
+                    deliver_at_tick=tick + self._config.email_delivery_latency_ticks,
+                    task_id=data.get("task_id", ""),
+                )
+                committed_emails.append(email)
+
+            elif effect.effect_type == EffectType.TASK_CREATE:
+                from my_team.models.task import TaskPriority
+                data = effect.data
+                self._task_tree.create(
+                    task_id=data.get("task_id", effect.resource),
+                    title=data.get("title", ""),
+                    description=data.get("description", ""),
+                    creator_agent_id=data.get("creator_agent_id", effect.agent_id),
+                    owner_agent_id=data.get("owner_agent_id", ""),
+                    parent_task_id=data.get("parent_task_id"),
+                    priority=TaskPriority.NORMAL,
+                    tick=tick,
+                )
+
+        # Record audit for committed effects
+        for effect in committed:
+            self._audit_log.record(
+                AuditEventType.TRANSACTION_COMMIT,
+                agent_id=effect.agent_id,
+                tick=tick,
+                details={
+                    "effect_id": effect.effect_id,
+                    "effect_type": effect.effect_type.value,
+                    "resource": effect.resource,
+                },
+            )
+
         return committed_emails
 
     def _phase_audit(
