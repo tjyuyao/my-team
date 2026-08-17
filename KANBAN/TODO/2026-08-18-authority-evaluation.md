@@ -45,6 +45,18 @@
 - `DecisionClaim` / `AuthorityGrant`（7 元组）模型 + 求值函数。
 - 与 `simulation.py` Phase 6（Validate）/ Phase 8（Commit）接点定义。
 
+## 实现状态（2026-08-18，独立推进）
+- ✅ 核心已实现为独立模块 `src/my_team/authority.py`（零内核依赖）：
+  Domain 8 枚举、AuthorityGrant 7 元组（含 JSON 字符串强制转换）、
+  DecisionRequest/Result/Claim、resolve/resolve_claim/claim_overall、
+  check_delegation_monotonic（不变量 4 静态半）。
+- ✅ 语义锁定（v1，已写入模块 docstring）：裁决按 domain 聚合所有
+  subject 的 grant（subject 非过滤器，veto/竞争 final 无条件适用）；
+  requester 持 final → ALLOWED，否则 WAITING（对应用人审批流）；
+  requester 自身同意隐含；priority 平局 → UNRESOLVED。
+- ⏳ 待办：与 simulation.py Validate/Commit 的接点（依赖 process-model
+  落地，因 DecisionClaim 需 process_instance_id）。
+
 ## 验收标准
 - [ ] 多 final 无 composition → `unresolved`（不随机、不 last-writer）
 - [ ] 任一生效 veto → `blocked`
