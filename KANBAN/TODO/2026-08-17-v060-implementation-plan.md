@@ -1,7 +1,7 @@
 # v0.6.0 Implementation Plan — Async LLM + Continuation Runtime
 
 **Created:** 2026-08-17
-**Status:** TODO (all P1 done)
+**Status:** TODO (P1 + P2 done)
 **Label:** v0.6.0 — Async LLM runtime with continuation-based agents
 
 ## Goal
@@ -62,7 +62,7 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 
 ## P2: Should Complete
 
-### 6. Outbox Persistence + Idempotent Delivery
+### 6. Outbox Persistence + Idempotent Delivery ❌ NOT STARTED
 
 **Priority:** P2
 **Acceptance:**
@@ -71,21 +71,21 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
 - Failed dispatches retry up to N times
 - Idempotency key prevents duplicate delivery
 
-### 7. SharedKB Single Write Entry
+### 7. SharedKB Single Write Entry ✅ DONE (commit `8e6b386`)
 
-**Priority:** P2
-**Acceptance:**
-- `SharedKB.write()` → `SharedKB._apply_committed()` (internal)
-- `stage_kb_write()` as only public write API
-- KB write E2E: permission → lock → version → commit → version increment
+- ✅ `SharedKB.write()` → `SharedKB._apply_committed()` (internal)
+- ✅ `handle_kb_write` tool handler stages KB_WRITE effects
+- ✅ KB E2E: permission → lock → version → commit → version increment
+- ✅ Fixed latent bug: LockManager `__len__` made `lock_manager or LockManager()` replace the empty manager — SharedKB and Simulation used DIFFERENT lock managers
+- ✅ 8 tests in `test_kb_e2e.py`
 
-### 8. Cross-Effect Commit Rollback
+### 8. Cross-Effect Commit Rollback ✅ DONE (commit `79209cd`)
 
-**Priority:** P2
-**Acceptance:**
-- If TASK_CREATE succeeds but EMAIL_SEND fails, rollback task
-- If FILE_WRITE fails, rollback other committed effects in same tick
-- `_phase_commit` collects rollback actions during application
+- ✅ TASK_CREATE failure rolls back staged EMAIL_SEND
+- ✅ Rollback removes created tasks and emails (reverse order)
+- ✅ TRANSACTION_ROLLBACK audit event recorded
+- ✅ Prior tick state preserved
+- ✅ 4 tests in `test_commit_rollback.py`
 
 ## P3: Nice to Have
 
@@ -121,8 +121,8 @@ ReAct is the agent's behavioral protocol; Tick is the kernel's advancement proto
  4. ✅ Async tool requests                                 — db6f9c2
  5. ✅ Full task completion E2E                            — 43c5ce4
  6. Outbox persistence                                    — next (P2)
- 7. SharedKB single entry
- 8. Commit rollback
+ 7. ✅ SharedKB single entry                               — 8e6b386
+ 8. ✅ Commit rollback                                     — 79209cd
  9. Pause semantics
 10. LLM budget
 11. SQLite persistence
