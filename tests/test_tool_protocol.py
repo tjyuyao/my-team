@@ -128,7 +128,7 @@ class TestToolRequestBuiltAtAct:
 
     def _submit(self) -> tuple[Simulation, FakeToolExecutor, ToolFlowAgent]:
         sim = Simulation(agent_tree=_make_tree())
-        register_remote_tool(sim._tool_registry, "web_search")
+        register_remote_tool(sim, "web_search")
         executor = FakeToolExecutor(latency_ticks=1)
         executor.register_result("agent.research", "web_search", [
             {"success": True, "summary": "Market growing"},
@@ -258,7 +258,7 @@ class TestIngestAuditContract:
 
     def test_tool_result_audit_carries_contract(self) -> None:
         sim = Simulation(agent_tree=_make_tree())
-        register_remote_tool(sim._tool_registry, "web_search")
+        register_remote_tool(sim, "web_search")
         agent = ToolFlowAgent("agent.research")
         agent._tool_registry = sim._tool_registry
         sim._runtimes["agent.research"] = agent

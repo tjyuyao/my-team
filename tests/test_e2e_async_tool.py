@@ -128,7 +128,7 @@ class TestAsyncToolFlow:
 
     def _setup(self) -> tuple[Simulation, FakeToolExecutor, ToolFlowAgent]:
         sim = Simulation(agent_tree=_make_tree())
-        register_remote_tool(sim._tool_registry, "web_search")
+        register_remote_tool(sim, "web_search")
         executor = FakeToolExecutor(latency_ticks=1)
         executor.register_result("agent.research", "web_search", [
             {"success": True, "summary": "Market growing 10% YoY"},
@@ -205,7 +205,7 @@ class TestAsyncToolFlow:
     def test_tool_error_result(self) -> None:
         """Tool error result is delivered to the agent's continuation."""
         sim = Simulation(agent_tree=_make_tree())
-        register_remote_tool(sim._tool_registry, "web_search")
+        register_remote_tool(sim, "web_search")
         executor = FakeToolExecutor(latency_ticks=1)
         executor.register_result("agent.research", "web_search", [
             {"success": False, "error": "Rate limited"},
@@ -233,7 +233,7 @@ class TestHybridAsyncFlow:
         from my_team.fake_llm import FakeLLMProvider
 
         sim = Simulation(agent_tree=_make_tree())
-        register_remote_tool(sim._tool_registry, "web_search")
+        register_remote_tool(sim, "web_search")
         llm = FakeLLMProvider(latency_ticks=1)
         tool = FakeToolExecutor(latency_ticks=1)
         tool.register_result("agent.research", "web_search", [

@@ -131,7 +131,7 @@ class ToolFlowAgent(BaseAgent):
 
 def _setup_tool_flow() -> tuple[Simulation, FakeToolExecutor, ToolFlowAgent]:
     sim = Simulation(agent_tree=_make_tree())
-    register_remote_tool(sim._tool_registry, "web_search")
+    register_remote_tool(sim, "web_search")
     executor = FakeToolExecutor(latency_ticks=1)
     executor.register_result("agent.research", "web_search", [
         {"success": True, "summary": "Market growing 10% YoY"},
@@ -171,13 +171,15 @@ class TestPendingOpRestartContinuation:
         agent2._tool_registry = sim2._tool_registry
         sim2._runtimes["agent.research"] = agent2
 
-        # Wait state + op restored with request identity + epoch
+        # Wait state + op restored with request identity + epoch.
+        # Status is SUBMITTED or PENDING — dispatch claimed the op at
+        # the submitting tick's publish; both survive restart.
         assert rs2.state == AgentState.WAITING_FOR_TOOL
         op = sim2._pending_ops.get_by_agent("agent.research")[0]
         assert op.request_id == op_before.request_id
         assert op.op_type == OpType.TOOL_REQUEST
         assert op.metadata.get("tool_name") == "web_search"
-        assert op.status == OpStatus.SUBMITTED
+        assert op.status in {OpStatus.SUBMITTED, OpStatus.PENDING}
         assert op.state_epoch == sim2.state_epoch == sim.state_epoch
 
         # External executor completes the op AFTER restart

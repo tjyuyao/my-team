@@ -148,9 +148,9 @@ class TestCancelOperation:
         sim = Simulation(agent_tree=_make_tree(
             ["web_search", "web_nocancel"],
         ))
-        register_remote_tool(sim._tool_registry, "web_search",
+        register_remote_tool(sim, "web_search",
                              supports_cancel=True)
-        register_remote_tool(sim._tool_registry, "web_nocancel",
+        register_remote_tool(sim, "web_nocancel",
                              supports_cancel=False)
         agent = ToolSubmitAgent("agent.research", tool)
         agent._tool_registry = sim._tool_registry
@@ -167,10 +167,11 @@ class TestCancelOperation:
         assert not result.accepted
         assert "supports_cancel" in result.reason
         assert result.result_fenced is False
-        # Op still in flight, agent still waiting
+        # Op still in flight, agent still waiting (dispatch may have
+        # claimed it: SUBMITTED → PENDING)
         op = sim._pending_ops.get_by_id(request_id)
         assert op is not None
-        assert op.status == OpStatus.SUBMITTED
+        assert op.status in {OpStatus.SUBMITTED, OpStatus.PENDING}
 
     def test_cancel_wakes_agent_with_notice(self) -> None:
         sim, request_id = self._sim_with_pending_tool("web_search")

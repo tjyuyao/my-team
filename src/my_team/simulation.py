@@ -41,6 +41,11 @@ from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
 from my_team.delegation import DelegationProtocol
+from my_team.executor_registry import (
+    ExecutorRegistry,
+    ExecutorTier,
+    requires_executor,
+)
 from my_team.file_ops import FileOps, FileOpsAuditEntry, FileOpsAuditLog
 from my_team.human_control import HumanControl
 from my_team.mailbox import MailSystem
@@ -73,6 +78,7 @@ from my_team.outbox import Outbox, OutboxEntry
 from my_team.patch_ops import PatchError, apply_patch
 from my_team.pending_ops import (
     CancellationResult,
+    OpStatus,
     OpType,
     PendingOperation,
     PendingOperationRegistry,
@@ -94,7 +100,7 @@ from my_team.shared_kb import (
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import SimulationState, TickConfig, TickEngine, TickResult
 from my_team.tool_manifest import builtin_manifests
-from my_team.tool_protocol import ToolRequest, hash_payload
+from my_team.tool_protocol import ToolRequest, ToolResultContract, hash_payload
 from my_team.transaction import EffectStatus, EffectType, StagedEffect, TransactionBuffer
 
 
@@ -246,6 +252,7 @@ class Simulation:
 
         # Pending operation registry (v0.6.0 — async LLM/tool tracking)
         self._pending_ops = PendingOperationRegistry()
+        self._executors = ExecutorRegistry()
 
         # State epoch — incremented on rollback/restore. External results
         # carry the epoch they were submitted under; results from an older
@@ -784,6 +791,18 @@ class Simulation:
             manifest=manifests["git_status"],
         )
 
+        # Executor registration (v0.8.0 P1-4/5): LOCAL_PROCESS tools are
+        # dispatched to a TRUSTED_IN_PROCESS executor (host subprocess
+        # with timeout/truncation — sandbox_tools). Remote tools are
+        # admitted by UNTRUSTED_OUT_OF_PROCESS executors registered by
+        # the harness (tests/tool_helpers.py).
+        for tool in ("run_tests",):
+            self._executors.register(
+                tool,
+                tier=ExecutorTier.TRUSTED_IN_PROCESS,
+                max_concurrent=2,
+            )
+
     def _create_runtime(self, config: AgentConfig) -> AgentRuntime:
         """Create an appropriate runtime for an agent based on config."""
         if config.role == "root_decision_agent":
@@ -1119,6 +1138,7 @@ class Simulation:
                     op.model_dump(mode="json")
                     for op in self._pending_ops._operations.values()
                 ],
+                "seen_requests": self._pending_ops.seen_requests_snapshot(),
             },
             "kb": {
                 "resources": [
@@ -1246,11 +1266,14 @@ class Simulation:
         }
         self._outbox._max_retries = ob["max_retries"]
 
-        # Pending operations
+        # Pending operations (+ request_id history for replay dedupe)
         self._pending_ops._operations = {
             op["request_id"]: PendingOperation.model_validate(op)
             for op in state["pending_ops"]["operations"]
         }
+        self._pending_ops.restore_seen_requests(
+            state["pending_ops"].get("seen_requests", {}),
+        )
 
         # Shared KB (resources + versions + permissions)
         kb = state["kb"]
@@ -1962,7 +1985,20 @@ class Simulation:
 
                 # SubmitToolRequest → local tools execute, remote register
                 if isinstance(intent, SubmitToolRequest):
-                    if intent.tool_name in {"read", "ls", "kb_write", "kb_create"}:
+                    # Routing by execution class (v0.8.0 P1-4/5), not a
+                    # hardcoded name list: PURE/READ_ONLY/STAGED_MUTATION
+                    # tools are kernel-executed at Act (frozen view);
+                    # LOCAL_PROCESS/SANDBOXED_PROCESS/EXTERNAL_IRREVERSIBLE
+                    # tools become pending ops and go through Executor
+                    # Admission + dispatch in Phase 9.
+                    manifest = self._tool_registry.get_manifest(
+                        intent.tool_name,
+                    )
+                    kernel_executed = (
+                        manifest is not None
+                        and not requires_executor(manifest.execution_class)
+                    )
+                    if kernel_executed:
                         # Local tools execute synchronously against the
                         # frozen per-agent file view (Freeze snapshot).
                         runtime = self._runtimes.get(agent_id)
@@ -2298,9 +2334,11 @@ class Simulation:
                         )
                         continue
 
-                # Check 1c: duplicate request_id — an agent cannot
-                # reuse a request_id that is already in flight (registry)
-                # or appears twice in the same plan (seen_request_ids).
+                # Check 1c: duplicate request_id — an agent cannot reuse
+                # a request_id that is already in flight (registry),
+                # appears twice in the same plan (seen_request_ids), or
+                # was EVER submitted before (persisted history — replay
+                # protection across restart, v0.8.0 P1-6).
                 if isinstance(intent, (SubmitLLMRequest, SubmitToolRequest)):
                     if (
                         intent.request_id
@@ -2309,6 +2347,9 @@ class Simulation:
                             or self._pending_ops.find_in_flight_request_id(
                                 agent_id, intent.request_id,
                             ) is not None
+                            or self._pending_ops.is_seen(
+                                agent_id, intent.request_id,
+                            )
                         )
                     ):
                         results.append(ActionResult(
@@ -2513,13 +2554,146 @@ class Simulation:
         all_results: dict[str, list[ActionResult]],
         ready: list[ReadyCandidate],
     ) -> None:
-        """Phase 9: Generate wake events from committed effects; timeout checks.
+        """Phase 9: Dispatch pending ops, generate wake events; timeout checks.
 
         Events generated here are only visible in tick+1.
         """
+        # Executor Admission + dispatch of SUBMITTED ops (v0.8.0 P1-4/5)
+        self._phase_dispatch(tick)
+
         # Timeout checks
         self._timeout_checker.check_task_timeouts(tick)
         self._timeout_checker.check_lock_timeouts(tick)
+
+    def _phase_dispatch(self, tick: int) -> None:
+        """Executor Admission + dispatch of SUBMITTED tool ops.
+
+        For each SUBMITTED TOOL_REQUEST op:
+          1. Admission — an executor must be registered for the tool,
+             its tier must match the manifest's execution class, and it
+             must have capacity (count-based, includes this op).
+          2. TRUSTED_IN_PROCESS executors run the tool synchronously
+             (host subprocess bounded by the manifest's max_runtime_ms)
+             and complete the op with a structured ToolResultContract;
+             out-of-process executors claim the op (→ PENDING) and
+             complete it out-of-band.
+          3. Denied — the op completes with a structured error so
+             Ingest wakes the agent (it decides retry / fail /
+             escalate).
+        Capacity-full ops stay SUBMITTED and are re-admitted on a later
+        tick (backpressure).
+        """
+        registry = self._pending_ops
+        for op in list(registry._operations.values()):
+            if op.op_type != OpType.TOOL_REQUEST or op.status != OpStatus.SUBMITTED:
+                continue
+            if op.tool_request is not None:
+                tool_name = op.tool_request.tool_name
+                arguments = op.tool_request.arguments
+            else:
+                tool_name = op.metadata.get("tool_name", "")
+                arguments = op.metadata.get("arguments", {})
+
+            # Capacity counts ops CLAIMED by the executor (PENDING);
+            # SUBMITTED ops are still queued and charge nothing. The
+            # op being admitted is not yet counted.
+            in_flight = sum(
+                1 for o in registry._operations.values()
+                if o.op_type == OpType.TOOL_REQUEST
+                and o.status is OpStatus.PENDING
+                and (
+                    (o.tool_request.tool_name if o.tool_request is not None else "")
+                    or o.metadata.get("tool_name", "")
+                ) == tool_name
+            )
+            manifest = self._tool_registry.get_manifest(tool_name)
+            admitted, reason, retryable = self._executors.admit(
+                tool_name, manifest, in_flight,
+            )
+            if not admitted:
+                if retryable:
+                    # Capacity pressure: stay SUBMITTED, re-admit next
+                    # tick (backpressure) — no error to the agent.
+                    continue
+                # Permanent denial → structured error to the agent
+                self._audit_log.record(
+                    AuditEventType.TOOL_DISPATCHED,
+                    agent_id=op.agent_id,
+                    tick=tick,
+                    details={
+                        "request_id": op.request_id,
+                        "tool_name": tool_name,
+                        "status": "admission_denied",
+                        "reason": reason,
+                    },
+                    success=False,
+                    error=reason,
+                )
+                registry.complete(
+                    op.request_id,
+                    result={
+                        "success": False,
+                        "error": reason,
+                        "error_code": "admission_denied",
+                    },
+                )
+                continue
+
+            tier = self._executors.tier(tool_name)
+            if tier == ExecutorTier.TRUSTED_IN_PROCESS:
+                # In-process executor: run now (manifest-bounded).
+                context = ToolContext(
+                    agent_id=op.agent_id,
+                    tick=tick,
+                    allowed_tools=self._tool_context_allowed(op.agent_id),
+                )
+                tr = self._tool_registry.execute(
+                    context=context,
+                    tool_name=tool_name,
+                    **arguments,
+                )
+                data = dict(tr.data or {})
+                if not tr.success:
+                    data.setdefault("success", False)
+                    data.setdefault("error", tr.error or "")
+                    data.setdefault("error_code", tr.error_code or "")
+                registry.complete_tool(
+                    op.request_id,
+                    ToolResultContract(
+                        request_id=op.request_id,
+                        status="completed" if tr.success else "failed",
+                        data=data,
+                        output_hash=hash_payload(data),
+                        state_epoch=op.state_epoch,
+                    ),
+                )
+                self._audit_log.record(
+                    AuditEventType.TOOL_DISPATCHED,
+                    agent_id=op.agent_id,
+                    tick=tick,
+                    details={
+                        "request_id": op.request_id,
+                        "tool_name": tool_name,
+                        "status": "executed",
+                        "executor_tier": tier.value,
+                        "success": tr.success,
+                    },
+                )
+            else:
+                # Out-of-process executor: claim the op; the executor
+                # completes it out-of-band (e.g. the test harness).
+                op.status = OpStatus.PENDING
+                self._audit_log.record(
+                    AuditEventType.TOOL_DISPATCHED,
+                    agent_id=op.agent_id,
+                    tick=tick,
+                    details={
+                        "request_id": op.request_id,
+                        "tool_name": tool_name,
+                        "status": "dispatched",
+                        "executor_tier": tier.value if tier is not None else "",
+                    },
+                )
 
     def _phase_commit(
         self, tick: int, all_results: dict[str, list[ActionResult]]

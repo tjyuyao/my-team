@@ -135,6 +135,35 @@ class PendingOperationRegistry:
 
     def __init__(self) -> None:
         self._operations: dict[str, PendingOperation] = {}
+        # Agent-chosen request_id history (v0.8.0 P1-6): persisted
+        # across restart so a replayed request_id is rejected — no
+        # double charging / double side effects. Keyed by the agent's
+        # request_id (op.metadata["request_id"]), scoped per agent.
+        self._seen_requests: dict[str, dict[str, Any]] = {}
+
+    def record_submitted(self, op: PendingOperation) -> None:
+        """Remember the agent-chosen request_id of a submitted op."""
+        req = op.metadata.get("request_id")
+        if not req:
+            return
+        self._seen_requests[req] = {
+            "status": op.status.value,
+            "op_type": op.op_type.value,
+            "tool_name": op.metadata.get("tool_name", ""),
+            "agent_id": op.agent_id,
+        }
+
+    def is_seen(self, agent_id: str, request_id: str) -> bool:
+        """Whether this agent ever submitted the request_id (any status)."""
+        seen = self._seen_requests.get(request_id)
+        return seen is not None and seen.get("agent_id") == agent_id
+
+    def seen_requests_snapshot(self) -> dict[str, Any]:
+        """Persisted history (request_id → submission record)."""
+        return dict(self._seen_requests)
+
+    def restore_seen_requests(self, snapshot: dict[str, Any]) -> None:
+        self._seen_requests = dict(snapshot or {})
 
     def submit(
         self,
@@ -166,6 +195,7 @@ class PendingOperationRegistry:
             state_epoch=state_epoch,
         )
         self._operations[op.request_id] = op
+        self.record_submitted(op)
         return op
 
     def complete(

@@ -38,6 +38,7 @@ class AuditEventType(str, Enum):
     # Tool calls
     TOOL_CALL = "tool.call"
     TOOL_RESULT = "tool.result"
+    TOOL_DISPATCHED = "tool.dispatched"  # Executor admission/dispatch (v0.8)
 
     # File operations
     FILE_READ = "file.read"
