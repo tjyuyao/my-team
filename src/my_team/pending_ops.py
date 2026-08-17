@@ -177,9 +177,16 @@ class PendingOperationRegistry:
         self,
         request_id: str,
     ) -> PendingOperation | None:
-        """Cancel an operation."""
+        """Cancel an in-flight operation (SUBMITTED/PENDING).
+
+        Terminal or completed operations cannot be cancelled; a late
+        result for a cancelled operation is ignored (complete() returns
+        early for CANCELLED) — the result is never published.
+        """
         op = self._operations.get(request_id)
         if op is None:
+            return None
+        if op.status not in {OpStatus.SUBMITTED, OpStatus.PENDING}:
             return None
         op.status = OpStatus.CANCELLED
         return op

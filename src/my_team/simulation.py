@@ -630,6 +630,15 @@ class Simulation:
                 max_output_bytes=max_output,
                 cwd=str(Path.cwd()),
             )
+            if res["timed_out"]:
+                self._audit_log.record(
+                    AuditEventType.TOOL_TIMEOUT,
+                    agent_id=context.agent_id,
+                    tick=context.tick,
+                    details={"tool": "run_tests", "timeout_ms": timeout_ms},
+                    success=False,
+                    error=f"run_tests timed out after {timeout_ms}ms",
+                )
             return ToolResult(
                 success=res["success"],
                 data=res,
@@ -638,6 +647,7 @@ class Simulation:
                     f"tests failed (exit {res['exit_code']})"
                     + (" [timed out]" if res["timed_out"] else "")
                 ),
+                error_code="tool_timeout" if res["timed_out"] else None,
                 retryable=not res["timed_out"],
                 agent_id=context.agent_id, tool_name="run_tests",
                 tick=context.tick,
@@ -658,10 +668,20 @@ class Simulation:
                 max_output_bytes=manifest.max_output_bytes or 200_000,
                 cwd=str(Path.cwd()),
             )
+            if res["timed_out"]:
+                self._audit_log.record(
+                    AuditEventType.TOOL_TIMEOUT,
+                    agent_id=context.agent_id,
+                    tick=context.tick,
+                    details={"tool": "git_diff"},
+                    success=False,
+                    error="git_diff timed out",
+                )
             return ToolResult(
                 success=res["success"],
                 data=res,
                 error=None if res["success"] else res["stderr"],
+                error_code="tool_timeout" if res["timed_out"] else None,
                 agent_id=context.agent_id, tool_name="git_diff",
                 tick=context.tick,
             )
@@ -678,10 +698,20 @@ class Simulation:
                 max_output_bytes=manifest.max_output_bytes or 200_000,
                 cwd=str(Path.cwd()),
             )
+            if res["timed_out"]:
+                self._audit_log.record(
+                    AuditEventType.TOOL_TIMEOUT,
+                    agent_id=context.agent_id,
+                    tick=context.tick,
+                    details={"tool": "git_status"},
+                    success=False,
+                    error="git_status timed out",
+                )
             return ToolResult(
                 success=res["success"],
                 data=res,
                 error=None if res["success"] else res["stderr"],
+                error_code="tool_timeout" if res["timed_out"] else None,
                 agent_id=context.agent_id, tool_name="git_status",
                 tick=context.tick,
             )
@@ -823,6 +853,83 @@ class Simulation:
     def resume(self) -> None:
         """Resume the simulation from a paused state."""
         self._tick_engine.resume()
+
+    def cancel_operation(
+        self,
+        request_id: str,
+        agent_id: str | None = None,
+    ) -> PendingOperation | None:
+        """Cancel an in-flight operation (v0.7.0 P1-4).
+
+        Rules:
+        - Only SUBMITTED/PENDING ops can be cancelled (registry-level)
+        - TOOL_REQUEST ops require the tool's manifest to declare
+          supports_cancel; LLM requests are always cancellable (they
+          carry no external side effect — the pending response is
+          simply discarded)
+        - The agent is NOT left hanging: it is woken with a structured
+          {error, cancelled, request_id} notice (mirrors the timeout
+          path), never with the op's result
+        - Cancelled ops audit OP_CANCELLED and are removed from the
+          registry; a late result is fenced by complete() (never
+          published)
+
+        Returns the cancelled op, or None if not cancellable (missing,
+        wrong agent, terminal/completed, or manifest denies cancel).
+        """
+        op = self._pending_ops.get_by_id(request_id)
+        if op is None:
+            return None
+        if agent_id is not None and op.agent_id != agent_id:
+            return None
+        if op.op_type == OpType.TOOL_REQUEST:
+            tool_name = op.metadata.get("tool_name", "")
+            manifest = self._tool_registry.get_manifest(tool_name)
+            if manifest is None or not manifest.supports_cancel:
+                return None
+
+        cancelled = self._pending_ops.cancel(request_id)
+        if cancelled is None:
+            return None
+
+        self._audit_log.record(
+            AuditEventType.OP_CANCELLED,
+            agent_id=op.agent_id,
+            tick=self._tick_engine.current_tick,
+            details={
+                "request_id": request_id,
+                "op_type": op.op_type.value,
+                "tool_name": op.metadata.get("tool_name", ""),
+                "reason": (
+                    "manifest supports_cancel"
+                    if op.op_type == OpType.TOOL_REQUEST
+                    else "system"
+                ),
+            },
+            success=True,
+            error=None,
+        )
+
+        # Wake the waiting agent with a structured cancellation notice
+        # (the RESULT is never delivered — only the notice).
+        runtime_state = self._agent_runtime_states.get(op.agent_id)
+        if (
+            runtime_state is not None
+            and runtime_state.continuation.pending_request_id == request_id
+        ):
+            notice: dict[str, Any] = {
+                "error": f"Operation cancelled (request {request_id})",
+                "cancelled": True,
+                "request_id": request_id,
+            }
+            if op.op_type == OpType.LLM_REQUEST:
+                runtime_state.receive_llm_result(notice, self._tick_engine.current_tick)
+            elif op.op_type == OpType.TOOL_REQUEST:
+                runtime_state.receive_tool_result(notice, self._tick_engine.current_tick)
+            self._enqueue_result_wake(op, self._tick_engine.current_tick, result=notice)
+
+        self._pending_ops.remove(request_id)
+        return op
 
     @classmethod
     def from_config_file(cls, path: str | Path) -> Simulation:

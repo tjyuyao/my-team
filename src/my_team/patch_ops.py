@@ -142,11 +142,11 @@ def apply_patch(content: str, patch_text: str) -> str:
                     f"hunk {hunk} claims a new file but content exists",
                     conflict=True,
                 )
-            if any(l[0] in (" ", "-") for l in hunk.lines):
+            if any(ln[0] in (" ", "-") for ln in hunk.lines):
                 raise PatchError(
                     "new-file hunk contains context/removed lines"
                 )
-            added = [l[1:] for l in hunk.lines if l[0] == "+"]
+            added = [ln[1:] for ln in hunk.lines if ln[0] == "+"]
             out = added
             continue
 
@@ -160,9 +160,9 @@ def apply_patch(content: str, patch_text: str) -> str:
         # Strict context match: context + removed lines must equal the
         # current content at position.
         idx = pos
-        for l in hunk.lines:
-            if l[0] in ("-", " "):
-                expected = l[1:]
+        for ln in hunk.lines:
+            if ln[0] in ("-", " "):
+                expected = ln[1:]
                 actual = old_lines[idx] if idx < len(old_lines) else None
                 if actual != expected:
                     raise PatchError(
@@ -174,7 +174,7 @@ def apply_patch(content: str, patch_text: str) -> str:
                 idx += 1
 
         out.extend(old_lines[cursor:pos])
-        out.extend(l[1:] for l in hunk.lines if l[0] in (" ", "+"))
+        out.extend(ln[1:] for ln in hunk.lines if ln[0] in (" ", "+"))
         cursor = idx
 
     out.extend(old_lines[cursor:])

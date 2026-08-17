@@ -21,6 +21,7 @@ def register_remote_tool(
     *,
     input_schema: dict[str, Any] | None = None,
     requires_network: bool = True,
+    supports_cancel: bool = True,
 ) -> None:
     """Register a manifest for a mock remote tool (external executor).
 
@@ -36,6 +37,7 @@ def register_remote_tool(
             execution_class=ExecutionClass.EXTERNAL_IRREVERSIBLE,
             input_schema=input_schema or {},
             requires_network=requires_network,
+            supports_cancel=supports_cancel,
             reversible=False,
         ),
     )

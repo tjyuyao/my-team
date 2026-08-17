@@ -89,6 +89,10 @@ class AuditEventType(str, Enum):
     # Result fencing (v0.6.0 hardening)
     STALE_RESULT = "result.stale"
 
+    # Operation lifecycle (v0.7.0 P1-4)
+    OP_CANCELLED = "op.cancelled"
+    TOOL_TIMEOUT = "tool.timeout"
+
 
 class AuditEntry(BaseModel):
     """A single audit log entry."""
