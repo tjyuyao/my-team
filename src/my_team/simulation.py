@@ -1604,6 +1604,9 @@ class Simulation:
                 "External results are quarantined until resume."
             )
 
+        # Apply pending tick duration changes at tick boundary
+        self._human_control.apply_pending_duration_changes()
+
         tick = self._tick_engine.current_tick
         self._last_tick_phases = [
             "ingest", "freeze", "schedule", "observe", "decide",
@@ -2283,6 +2286,16 @@ class Simulation:
                         metadata={
                             "request_id": intent.request_id,
                             "model": intent.model,
+                            "messages": [
+                                m.model_dump() if hasattr(m, "model_dump") else m
+                                for m in intent.messages
+                            ],
+                            "tools": [
+                                t.model_dump() if hasattr(t, "model_dump") else t
+                                for t in intent.tools
+                            ],
+                            "temperature": intent.temperature,
+                            "max_tokens": intent.max_tokens,
                         },
                     )
                     if runtime_state:

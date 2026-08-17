@@ -3,6 +3,8 @@
 **Phase:** v0.9 基础
 **Source:** SPEC §2、§13；OI-004 §1.3
 **Priority:** high
+**Completed:** 2026-08-18
+**Tests:** 751 passed（+57），ruff clean，mypy clean（42 source files）
 
 ## 目标
 系统从"同步紧循环"变为可实时运行、可调速、可外部控制的服务；
