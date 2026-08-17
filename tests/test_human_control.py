@@ -133,9 +133,9 @@ class TestHumanEmail:
         full_system["human"].send_email(
             to=["agent.root"],
             subject="Test",
-            deliver_at_tick=0,
+            deliver_at_tick=1,
         )
-        full_system["mail"].deliver(0)
+        full_system["mail"].deliver(1)
         mb = full_system["mail"].get_mailbox("agent.root")
         assert mb.unread_count == 1
 
@@ -143,9 +143,9 @@ class TestHumanEmail:
         full_system["human"].send_email(
             to=["agent.root"],
             subject="Test",
-            deliver_at_tick=0,
+            deliver_at_tick=1,
         )
-        full_system["mail"].deliver(0)
+        full_system["mail"].deliver(1)
         mb = full_system["mail"].get_mailbox("agent.root")
         emails = mb.get_by_type(EmailType.HUMAN_MESSAGE)
         assert len(emails) == 1

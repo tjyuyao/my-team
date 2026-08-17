@@ -29,9 +29,10 @@ def _sort_key(email: Email) -> tuple[int, int, int, int, str]:
     Order:
     1. system_notice (rank 0)
     2. human_message (rank 1)
-    3. priority (urgent=2, high=3, normal=4, low=5)
-    4. created_at_tick (earlier first — lower tick = higher priority)
-    5. email_id (deterministic tiebreak)
+    3. priority (urgent=0, high=1, normal=2, low=3)
+    4. deadline_tick (earlier deadline first; None = no deadline, sorted last)
+    5. created_at_tick (earlier first — lower tick = higher priority)
+    6. email_id (deterministic tiebreak)
     """
     # Type rank: system_notice=0, human_message=1, others=2
     type_rank = 0
@@ -40,9 +41,14 @@ def _sort_key(email: Email) -> tuple[int, int, int, int, str]:
     elif email.email_type != EmailType.SYSTEM_NOTICE:
         type_rank = 2
 
+    # Deadline rank: emails with earlier deadlines sort first.
+    # Emails without a deadline (None) sort after those with deadlines.
+    deadline_rank = email.deadline_tick if email.deadline_tick is not None else 999999
+
     return (
         type_rank,
         _PRIORITY_ORDER.get(email.priority, 2),
+        deadline_rank,
         email.created_at_tick,
         email.email_id,
     )
@@ -184,12 +190,22 @@ class MailSystem:
     def deliver(self, current_tick: int) -> list[Email]:
         """Deliver all emails whose deliver_at_tick <= current_tick.
 
+        Per SPEC §13.3 timing semantics:
+        - Emails created at tick t are earliest deliverable at tick t+1
+        - If deliver_at_tick < created_at_tick, it is auto-corrected
+        - Emails created in tick t's Act phase are NOT visible in tick t's Observe
+
         Returns list of delivered emails.
         """
         delivered: list[Email] = []
         remaining: list[Email] = []
 
         for email in self._pending:
+            # Auto-correct: deliver_at_tick must be > created_at_tick
+            earliest_deliver = email.created_at_tick + 1
+            if email.deliver_at_tick < earliest_deliver:
+                email.deliver_at_tick = earliest_deliver
+
             if email.deliver_at_tick <= current_tick:
                 # Route to all recipients
                 for recipient_id in email.to:

@@ -253,10 +253,10 @@ class TestMailSystem:
             subject="Broadcast",
             email_type=EmailType.SYSTEM_NOTICE,
             tick=0,
-            deliver_at_tick=0,
+            deliver_at_tick=1,
         )
 
-        ms.deliver(0)
+        ms.deliver(1)
         assert ms.get_mailbox("agent.b").unread_count == 1
         assert ms.get_mailbox("agent.c").unread_count == 1
 

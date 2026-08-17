@@ -38,6 +38,7 @@ from my_team.mailbox import MailSystem
 from my_team.models.agent import AgentConfig
 from my_team.models.email import Email, EmailType
 from my_team.private_store import PrivateStore, PrivateStoreConfig
+from my_team.reliability import TimeoutChecker
 from my_team.shared_kb import LockManager, PermissionEngine, PermissionRule, SharedKB
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import TickEngine, TickConfig, TickPhase, TickResult, TickSnapshot
@@ -125,6 +126,13 @@ class Simulation:
             task_tree=self._task_tree,
             mail_system=self._mail_system,
             max_delegation_depth=self._config.max_delegation_depth,
+        )
+
+        # Timeout checker (Phase 6.5: post-Commit, pre-Audit)
+        self._timeout_checker = TimeoutChecker(
+            task_tree=self._task_tree,
+            lock_manager=self._lock_manager,
+            audit_log=self._audit_log,
         )
 
         # Agent runtimes
@@ -263,6 +271,10 @@ class Simulation:
 
         # Phase 6: Commit — atomic state update
         committed_emails = self._phase_commit(tick, all_results)
+
+        # Phase 6.5: Timeout check — post-Commit, pre-Audit
+        expired_tasks = self._timeout_checker.check_task_timeouts(tick)
+        expired_locks = self._timeout_checker.check_lock_timeouts(tick)
 
         # Phase 7: Audit
         self._phase_audit(tick, delivered, all_results)
