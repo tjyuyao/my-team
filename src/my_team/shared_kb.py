@@ -10,6 +10,7 @@ Per SPEC §6:
 
 from __future__ import annotations
 
+import uuid
 from enum import Enum
 from typing import Any
 
@@ -207,6 +208,10 @@ class LockInfo(BaseModel):
     acquired_at_tick: int = 0
     lease_until_tick: int = 0
     status: LockStatus = LockStatus.ACTIVE
+    lock_token: str = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+        description="Opaque token required for release/renew to prevent stale-holder attacks",
+    )
 
 
 class LockConflictError(Exception):
@@ -217,6 +222,21 @@ class LockConflictError(Exception):
         self.owner = owner
         super().__init__(
             f"Cannot lock '{resource}': already held by '{owner}'"
+        )
+
+
+class LockTokenError(Exception):
+    """Raised when a lock release/renew fails due to token mismatch.
+
+    Prevents stale-holder attacks where a delayed release() could
+    accidentally remove a different agent's lock.
+    """
+
+    def __init__(self, resource: str, operation: str) -> None:
+        self.resource = resource
+        self.operation = operation
+        super().__init__(
+            f"Lock {operation} failed for '{resource}': invalid token"
         )
 
 
@@ -268,27 +288,40 @@ class LockManager:
         self._locks[resource] = lock
         return lock
 
-    def release(self, resource: str, agent_id: str) -> bool:
-        """Release a lock. Returns True if successfully released."""
+    def release(self, resource: str, agent_id: str, lock_token: str) -> None:
+        """Release a lock.
+
+        Requires the correct lock_token to prevent stale-holder attacks.
+        Raises LockTokenError if token is invalid or lock not found.
+        """
         lock = self._locks.get(resource)
         if lock is None or lock.status != LockStatus.ACTIVE:
-            return False
+            raise LockTokenError(resource, "release")
+        if lock.lock_token != lock_token:
+            raise LockTokenError(resource, "release")
         if lock.owner_agent_id != agent_id:
-            return False
+            raise LockTokenError(resource, "release")
         lock.status = LockStatus.RELEASED
-        return True
 
     def renew(
         self,
         resource: str,
         agent_id: str,
         current_tick: int,
+        lock_token: str,
         lease_ticks: int | None = None,
     ) -> bool:
-        """Renew a lock's lease. Returns True if successful."""
+        """Renew a lock's lease.
+
+        Requires the correct lock_token. Returns True if successful,
+        False if lock is expired or not found. Raises LockTokenError
+        if token is invalid.
+        """
         lock = self._locks.get(resource)
         if lock is None or lock.status != LockStatus.ACTIVE:
             return False
+        if lock.lock_token != lock_token:
+            raise LockTokenError(resource, "renew")
         if lock.owner_agent_id != agent_id:
             return False
         if lock.lease_until_tick <= current_tick:

@@ -138,22 +138,24 @@ class TestLockManager:
 
     def test_release_lock(self):
         lm = LockManager()
-        lm.acquire("resource/a", "agent.a", current_tick=0)
-        assert lm.release("resource/a", "agent.a")
+        lock = lm.acquire("resource/a", "agent.a", current_tick=0)
+        lm.release("resource/a", "agent.a", lock.lock_token)
         assert not lm.is_locked("resource/a")
 
     def test_release_wrong_owner(self):
+        from my_team.shared_kb import LockTokenError
+
         lm = LockManager()
-        lm.acquire("resource/a", "agent.a", current_tick=0)
-        assert not lm.release("resource/a", "agent.b")
+        lock = lm.acquire("resource/a", "agent.a", current_tick=0)
+        with pytest.raises(LockTokenError):
+            lm.release("resource/a", "agent.b", lock.lock_token)
         assert lm.is_locked("resource/a")
 
     def test_renew_lock(self):
         lm = LockManager()
-        lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=4)
-        lock = lm.get_lock("resource/a")
+        lock = lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=4)
         assert lock.lease_until_tick == 4
-        lm.renew("resource/a", "agent.a", current_tick=2, lease_ticks=4)
+        lm.renew("resource/a", "agent.a", current_tick=2, lock_token=lock.lock_token, lease_ticks=4)
         assert lock.lease_until_tick == 6
 
     def test_expired_lock_auto_release(self):
@@ -175,8 +177,40 @@ class TestLockManager:
 
     def test_renew_after_expiry_fails(self):
         lm = LockManager()
-        lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=2)
-        assert not lm.renew("resource/a", "agent.a", current_tick=5)
+        lock = lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=2)
+        assert not lm.renew("resource/a", "agent.a", current_tick=5, lock_token=lock.lock_token)
+
+    def test_release_stale_holder_prevented(self):
+        """Stale-holder attack: A's delayed release cannot remove B's lock."""
+        from my_team.shared_kb import LockTokenError
+
+        lm = LockManager()
+        lock_a = lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=2)
+        # A's lease expires at tick 2
+        lm.check_expired(current_tick=3)
+        lock_b = lm.acquire("resource/a", "agent.b", current_tick=3)
+        # A tries to release with stale token — should raise
+        with pytest.raises(LockTokenError):
+            lm.release("resource/a", "agent.a", lock_a.lock_token)
+        # B's lock is still active
+        assert lm.is_locked("resource/a")
+        assert lm.get_lock("resource/a").owner_agent_id == "agent.b"
+
+    def test_release_token_mismatch(self):
+        from my_team.shared_kb import LockTokenError
+
+        lm = LockManager()
+        lock = lm.acquire("resource/a", "agent.a", current_tick=0)
+        with pytest.raises(LockTokenError):
+            lm.release("resource/a", "agent.a", "forged_token_12345")
+
+    def test_renew_token_mismatch(self):
+        from my_team.shared_kb import LockTokenError
+
+        lm = LockManager()
+        lock = lm.acquire("resource/a", "agent.a", current_tick=0, lease_ticks=4)
+        with pytest.raises(LockTokenError):
+            lm.renew("resource/a", "agent.a", current_tick=1, lock_token="forged_token_12345")
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +270,7 @@ class TestSharedKB:
         kb.create("project/research/data.md", agent_id="agent.research", tick=0)
 
         # Lock
-        kb.locks.acquire("project/research/data.md", "agent.research", current_tick=1)
+        lock = kb.locks.acquire("project/research/data.md", "agent.research", current_tick=1)
 
         # Read
         resource = kb.read("project/research/data.md", "agent.research")
@@ -254,7 +288,7 @@ class TestSharedKB:
         assert updated.content == "updated data"
 
         # Unlock
-        kb.locks.release("project/research/data.md", "agent.research")
+        kb.locks.release("project/research/data.md", "agent.research", lock.lock_token)
 
     def test_version_conflict(self, kb):
         kb.create("project/research/data.md", agent_id="agent.research", tick=0)

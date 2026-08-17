@@ -337,6 +337,7 @@ class Simulation:
                 l.resource: {
                     "owner": l.owner_agent_id,
                     "lease_until": l.lease_until_tick,
+                    "lock_token": l.lock_token,
                 }
                 for l in self._lock_manager.active_locks()
             },
