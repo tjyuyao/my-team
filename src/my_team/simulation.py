@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from my_team.agent_runtime import (
     AgentObservation,
     AgentRuntime,
+    AgentSnapshot,
     ActionResult,
     ActionContext,
     ActionPlan,
@@ -362,19 +363,17 @@ class Simulation:
         """Phase 3: Each agent observes the frozen snapshot."""
         observations: dict[str, AgentObservation] = {}
         for agent_id, runtime in self._runtimes.items():
-            # Build agent-specific snapshot
-            agent_snapshot = {
-                "tick": tick,
-                "emails": {
-                    agent_id: snapshot["emails"]
-                },
-                "tasks": snapshot["tasks"],
-                "shared_kb": snapshot["shared_kb"],
-                "locks": snapshot["locks"],
-                "private_spaces": {
-                    agent_id: str(self._private_store.agent_home(agent_id))
-                },
-            }
+            # Build typed, immutable agent-specific snapshot
+            agent_snapshot = AgentSnapshot(
+                tick=tick,
+                emails=tuple(snapshot["emails"]),
+                task_states=snapshot["tasks"],
+                shared_kb_snapshot=snapshot["shared_kb"],
+                lock_states=snapshot["locks"],
+                private_workspace_path=str(
+                    self._private_store.agent_home(agent_id)
+                ),
+            )
             observations[agent_id] = runtime.observe(agent_snapshot)
         return observations
 

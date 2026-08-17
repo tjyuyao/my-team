@@ -10,6 +10,7 @@ import pytest
 from my_team.agent_runtime import (
     AgentObservation,
     AgentRuntime,
+    AgentSnapshot,
     ActionResult,
     ActionContext,
     ActionPlan,
@@ -168,20 +169,54 @@ class TestRootAgentRestrictions:
 
 
 # ---------------------------------------------------------------------------
+# AgentSnapshot
+# ---------------------------------------------------------------------------
+
+class TestAgentSnapshot:
+    def test_snapshot_immutable(self):
+        snap = AgentSnapshot(tick=1, emails=({"subject": "hi"},))
+        with pytest.raises(AttributeError):
+            snap.tick = 2  # type: ignore[misc]
+
+    def test_snapshot_defaults(self):
+        snap = AgentSnapshot()
+        assert snap.tick == 0
+        assert snap.emails == ()
+        assert snap.task_states == {}
+        assert snap.shared_kb_snapshot == {}
+        assert snap.lock_states == {}
+        assert snap.private_workspace_path == ""
+
+    def test_snapshot_equality(self):
+        s1 = AgentSnapshot(tick=5, emails=({"a": 1},))
+        s2 = AgentSnapshot(tick=5, emails=({"a": 1},))
+        assert s1 == s2
+
+    def test_snapshot_inequality(self):
+        s1 = AgentSnapshot(tick=1)
+        s2 = AgentSnapshot(tick=2)
+        assert s1 != s2
+
+    def test_snapshot_emails_are_tuple(self):
+        snap = AgentSnapshot(emails=({"subject": "hello"},))
+        assert isinstance(snap.emails, tuple)
+
+
+# ---------------------------------------------------------------------------
 # AgentRuntime protocol
 # ---------------------------------------------------------------------------
 
 class TestAgentRuntime:
     def test_base_agent_observe(self, tool_registry):
         agent = BaseAgent(agent_id="agent.a", tool_registry=tool_registry)
-        snapshot = {
-            "tick": 5,
-            "emails": {"agent.a": [{"subject": "hello"}]},
-            "tasks": {"t1": {"status": "assigned"}},
-            "shared_kb": {"paths": ["report.md"]},
-            "locks": {},
-            "private_spaces": {"agent.a": "/private/agent.a"},
-        }
+        snapshot = AgentSnapshot(
+            tick=5,
+            emails=({"subject": "hello"},),
+            task_states={"t1": {"status": "assigned"}},
+            shared_kb_snapshot={"paths": ["report.md"]},
+            lock_states={},
+            private_workspace_path="/private/agent.a",
+        )
         obs = agent.observe(snapshot)
         assert obs.agent_id == "agent.a"
         assert obs.tick == 5

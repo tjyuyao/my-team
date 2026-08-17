@@ -199,6 +199,26 @@ class AgentObservation(BaseModel):
     )
 
 
+@dataclass(frozen=True)
+class AgentSnapshot:
+    """Immutable per-agent view of the simulation state at tick boundary.
+
+    Constructed by the simulation during Phase 3 (Observe) and passed
+    to each agent's observe() method. Agents should read from this
+    snapshot and produce an AgentObservation.
+
+    The snapshot is frozen (immutable) to prevent agents from modifying
+    the simulation state during observation.
+    """
+
+    tick: int = 0
+    emails: tuple[dict[str, Any], ...] = ()
+    task_states: dict[str, dict[str, Any]] = field(default_factory=dict)
+    shared_kb_snapshot: dict[str, Any] = field(default_factory=dict)
+    lock_states: dict[str, Any] = field(default_factory=dict)
+    private_workspace_path: str = ""
+
+
 class AgentAction(BaseModel):
     """A single action produced by an agent during Decide (SPEC §8.2 Phase 4)."""
 
@@ -253,7 +273,7 @@ class AgentRuntime(Protocol):
         """Unique identifier for this agent."""
         ...
 
-    def observe(self, snapshot: dict[str, Any]) -> AgentObservation:
+    def observe(self, snapshot: AgentSnapshot) -> AgentObservation:
         """Phase 3 (Observe): Read the frozen snapshot.
 
         The agent reads:
@@ -324,18 +344,16 @@ class BaseAgent:
     def tool_context(self) -> ToolContext:
         return self._tool_context
 
-    def observe(self, snapshot: dict[str, Any]) -> AgentObservation:
+    def observe(self, snapshot: AgentSnapshot) -> AgentObservation:
         """Default observe: extract relevant data from snapshot."""
         return AgentObservation(
             agent_id=self._agent_id,
-            tick=snapshot.get("tick", 0),
-            emails=snapshot.get("emails", {}).get(self._agent_id, []),
-            task_states=snapshot.get("tasks", {}),
-            shared_kb_snapshot=snapshot.get("shared_kb", {}),
-            lock_states=snapshot.get("locks", {}),
-            private_workspace_path=snapshot.get(
-                "private_spaces", {}
-            ).get(self._agent_id, ""),
+            tick=snapshot.tick,
+            emails=list(snapshot.emails),
+            task_states=snapshot.task_states,
+            shared_kb_snapshot=snapshot.shared_kb_snapshot,
+            lock_states=snapshot.lock_states,
+            private_workspace_path=snapshot.private_workspace_path,
         )
 
     def decide(self, observation: AgentObservation) -> ActionPlan:
