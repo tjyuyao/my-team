@@ -2,6 +2,8 @@
 
 **Created:** 2026-08-17（v0.7.0 review 后）
 **Status:** TODO
+**2026-08-17 设计评审：** sandboxed_python 分层定稿（L0–L4 → P1-7 与
+SPEC §8.7「执行等级」）
 **Label:** v0.8.0 — Durable, fenced, and isolated tool operations
 
 ## 定位
@@ -62,7 +64,7 @@ diff→merge + 网络拒绝 + 执行器强制资源限制完成前禁止）。
 - TRUSTED_IN_PROCESS（内置：read/ls/write/kb_write/send_email/
   delegate/apply_patch）
 - UNTRUSTED_OUT_OF_PROCESS（第三方插件，独立进程）
-- SANDBOXED_OUT_OF_PROCESS（run_tests 真正隔离后；sandboxed_python）
+- SANDBOXED_OUT_OF_PROCESS（run_tests 真正隔离后；isolated_python L2）
 - 插件注册安全模型：register_manifest 与 register_executor 分离；
   注册不得改全局状态/拿他 agent 权限/同名覆盖/绕过策略；身份字段
   一律系统注入
@@ -71,6 +73,30 @@ diff→merge + 网络拒绝 + 执行器强制资源限制完成前禁止）。
 
 - request_id 全局去重（跨重启，persist 已见 key）
 - 同一 ToolRequest 重放不重复计费/不重复副作用
+
+### 7. sandboxed_python 执行等级（L0/L1）
+
+2026-08-17 设计评审定稿（SPEC §8.7「执行等级」）：`sandboxed_python`
+是受策略约束的 Python 执行服务，不是单一工具。
+
+- L0 `python_compute` — LOCAL_PROCESS；无文件/网络/子进程；受限
+  标准库白名单 + 受限 builtins；JSON 输入 → 结构化 result schema
+  验证；复用 sandbox_tools（超时/截断/进程组终止）
+- L1 `python_transform` — LOCAL_PROCESS + 临时工作区协议：只读输入
+  副本、独立 output 目录、artifact manifest；无网络/无 secrets；
+  artifact 提交 = 带 base_hash 的 STAGED_MUTATION（复用 FILE_PATCH
+  apply-time 复查；版本不符 → 局部 workspace_conflict）
+- L2 `isolated_python`（SANDBOXED_PROCESS）— 依赖 P2-7 真隔离的
+  沙箱基础设施，与 run_tests 同门禁；L3/L4 不实现
+
+**Acceptance:**
+- 代码在独立子进程执行（绝不在主进程 exec）；`-I` 隔离模式 +
+  剥离 PYTHONPATH/sitecustomize/环境变量；受限 builtins + import
+  gate 与 manifest 的 allowed_modules 一致
+- 取消 = 进程组物理终止（executor_cancel_requested/confirmed=True，
+  P2-10 的首个达成者）；无法确认 → CANCEL_UNCONFIRMED
+- L0/L1 定位如实声明：防意外，非防恶意逃逸（文档注明）
+- 模式 A（code + inputs）先行；模式 B（entrypoint + 文件）延后
 
 ## P2: Should Complete
 
@@ -110,9 +136,10 @@ diff→merge + 网络拒绝 + 执行器强制资源限制完成前禁止）。
  2. ToolRequest/ToolResult 契约 + manifest_hash 审计（P1-3）
  3. Executor Admission + 执行器注册（P1-4/5）
  4. 请求幂等（P1-6）
- 5. run_tests 真实隔离（P2-7）
- 6. Snapshot 矩阵 + 跨进程恢复测试（P2-8/9）
- 7. 取消物理化 + token/cost 预算（P2-10/11）
+ 5. sandboxed_python L0/L1（P1-7；与 1-4 无依赖，可并行）
+ 6. run_tests 真实隔离（P2-7，L2 isolated_python 的沙箱前置）
+ 7. Snapshot 矩阵 + 跨进程恢复测试（P2-8/9）
+ 8. 取消物理化 + token/cost 预算（P2-10/11）
 ```
 
 ## 明确的非目标

@@ -1199,6 +1199,39 @@ atomicity="per_effect"（默认）— 独立失败
   （CancellationResult.external_effects_possible=True）；LLM 请求可
   逻辑取消 + fencing，不保证撤销 provider 端处理
 
+## 执行等级（sandboxed_python 分层，v0.8 设计）
+
+`sandboxed_python` 不是单一工具，而是受策略约束的 Python 执行
+服务（2026-08-17 设计评审定稿）。按执行等级分列；等级差异体现在
+manifest 能力声明 + 执行环境参数，共用同一 worker 子进程引擎：
+
+| 等级 | 工具名 | 能力 | execution_class |
+|---|---|---|---|
+| L0 | `python_compute` | 无文件/网络/子进程；受限标准库白名单 + 受限 builtins；JSON 输入 → 结构化 result schema 验证 | LOCAL_PROCESS |
+| L1 | `python_transform` | 临时工作区：只读输入副本 + 独立 output 目录 + artifact manifest；无网络、无 secrets、无子进程 | LOCAL_PROCESS |
+| L2 | `isolated_python` | 容器/Worker + 固定依赖 profile + 资源上限 + 进程组终止 | SANDBOXED_PROCESS（达成真隔离前不得声明） |
+| L3 | 不实现 | 网络白名单 + 审批 + 外部副作用分类 | EXTERNAL_IRREVERSIBLE + requires_approval |
+| L4 | 不注册 | 高权限环境 | 策略层直接拒绝 |
+
+诚实分类：L0/L1 是**能力削减 + 进程隔离**——防意外（幻觉、错误
+参数、死循环），**不构成防恶意逃逸的安全边界**（object.__subclasses__()
+等原理上可绕过 import 白名单）；安全边界从 L2 开始。
+`allowed_modules` 是声明，执行层必须配合受限 builtins + import
+gate + `-I` 隔离模式 + 剥离 PYTHONPATH/sitecustomize/环境变量
+（多层合计压低事故面，单层均非边界）。
+
+协议要点：
+- 代码只写临时 output 目录，不直接写正式工作区；artifact 提交 =
+  携带 base_hash 的 STAGED_MUTATION（复用 FILE_PATCH apply-time
+  复查机制），版本不符 → 局部 workspace_conflict，无整 tick 回滚
+- 取消：L0/L1 worker 是首个 executor_cancel_confirmed 可达成 True
+  的工具（进程组物理终止）；无法确认时返回 CANCEL_UNCONFIRMED
+  （external_effects_possible 诚实声明）
+- 工具面收敛：先注册 python_compute（L0）与 python_transform（L1）；
+  python_generate_artifact 与 L1 能力重叠，后置
+- 代码输入先支持模式 A（code + inputs）；模式 B（entrypoint + 文件
+  项目）延后——B 更接近 L2 场景
+
 ---
 
 # 9. Agent 生命周期
