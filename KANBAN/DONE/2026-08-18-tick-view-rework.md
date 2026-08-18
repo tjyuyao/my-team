@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.10 能力
 source: SPEC §3.1（已同步，2026-08-18 订正）
 priority: high
@@ -23,11 +24,12 @@ priority: high
    不需要全量哈希；
 3. **外部工具输入**：按需物化输入路径即可。
 
-另：`ExecutionMode.BOUNDED_MICRO_LOOP`（activation.py）是**从未接线的幽灵
-模式**（SPEC 中无 §8.5 执行模式章节，其注释是错误引用）——同 tick 内多轮
-LLM→Tool 会破坏提交原子性与读取一致性，正式废除。SPEC §3.1 已同步上述
-决策（"每 tick 一轮（唯一执行模型）"、"原子提交的来源是串行化"、
-"冻结视图按需化"三条原则）。
+另：`ExecutionMode.BOUNDED_MICRO_LOOP`（activation.py）是**从未接线的
+遗留模式**——其注释引用的 SPEC §8.5 指向旧版 SPEC.v0.8.legacy（模式 A 离散
+异步/B 有界微循环；旧 SPEC 已自述 B 的缺点：暂停粒度粗、成本上限不透明、
+事务边界复杂），新 SPEC 升级时该章节并入 §3.1 且旧引用未同步清理。
+同 tick 内多轮 LLM→Tool 破坏提交原子性与读取一致性，正式废除（新模式
+SPEC §3.1 已钉死"每 tick 一轮"为唯一执行模型）。
 
 ## 目标
 读取模型从"全量内容快照"改为"目录索引 + 按需路径级读取（提交态 + 自己
@@ -52,8 +54,27 @@ staged 合并）"；废除 micro loop；行为语义不变（Agent 读到的内�
    "工具执行环境对齐"卡，v0.10 次优先级）。
 
 ## 验收标准
-- [ ] 无任何"全体文件内容"快照路径（grep 无 `rglob`+`read_text` 于快照构建）
-- [ ] read 见提交态 + 自己本 tick staged；他人同 tick 变更不可见（行为不变）
-- [ ] 冲突检测基准按需化且 apply_patch/CommitValidate 冲突拒绝仍然生效
-- [ ] bounded_micro_loop 不存在于任何源码；SPEC §3.1 三条原则已在
-- [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过；kanban_lint 0 violation
+- [x] 无任何"全体文件内容"快照路径（`_build_snapshot` 只建索引 + 摘要哈希）
+- [x] read 见提交态 + 自己本 tick staged；他人同 tick 变更不可见（行为不变）
+- [x] 冲突检测基准按需化且 apply_patch 冲突拒绝仍然生效（且前移到 Act）
+- [x] bounded_micro_loop 不存在于任何源码；SPEC §3.1 三条原则已在
+- [x] `uv run pytest -q` 全绿（787 passed）；`ruff`/`mypy` 通过；kanban_lint 0 violation
+
+## 完成注记（2026-08-18）
+
+实现要点：
+- 新增 `_staged_private_effects` / `_read_private_file`：读取 = 磁盘提交态 +
+  自己未提交 staged 覆盖（按需，零全文复制）。
+- read/ls/apply_patch/python_transform 统一走按需读取；ToolContext.read_view
+  不再注入快照内容（字段保留作插件兼容），`_submission_view` 存储删除。
+- `_build_snapshot`：`private_files` 改为元数据索引（size/mtime），
+  `workspace_versions` 改为索引哈希；journal 摘要哈希随之降为元数据级。
+- `ExecutionMode` 只留 `DISCRETE_ASYNC`；`BOUNDED_MICRO_LOOP` 与
+  `max_micro_loop_rounds` 删除（注释澄清其源为旧 SPEC.v0.8.legacy §8.5）。
+- 语义变化（更安全）：patch 基准现含自己 staged——同一 agent 同 tick 先
+  write 后 patch 同一文件，冲突在 **Act 即拒绝**（原为 Commit 时 base-hash
+  拒绝）；另一 agent 的并发写冲突仍由 Commit 时内容检查兜底。
+- 测试：4 个旧断言（快照内容结构 / submission view 绑定 / commit 级 stale
+  patch）更新到新语义；新增"read 见自己 staged"用例。
+- **未动**（by-product，归"工具执行环境对齐"卡）：run_tests/git 的 cwd
+  仍是宿主目录。
