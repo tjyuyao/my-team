@@ -316,6 +316,6 @@ IngressEvent → ProcessInstance → assignment → human approval
 ```
 这条链路闭合前，不实现五个场景包的资产。
 
-**下一步**：已拆为 `KANBAN/PLAN/2026-08-18-extension-surface-plan.md`
-（P0→P1→P2 路线图）与 7 个 P0 TODO（见 `KANBAN/TODO/2026-08-18-*.md`）。
+**下一步**：已并入 `KANBAN/PLAN/2026-08-18-v0.11.0-plan.md`
+（P0→P1→P2 路线图，v0.11 核心交付）与 7 个 P0 TODO（见 `KANBAN/TODO/2026-08-18-*.md`）。
 
