@@ -660,6 +660,54 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         idempotent=True,
         max_output_bytes=200_000,
     )
+    # v0.10 T10: typed record mutations — staged effects, invariant-checked
+    # at Commit. STAGED_MUTATION: an invariant violation is a DETERMINISTIC
+    # business failure (local FAILED over the whole group), not a rollback.
+    record_upsert = ToolManifest(
+        name="record_upsert",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Upsert a typed record (invariant-checked at commit)",
+        input_schema={
+            "record_type": {"type": "string",
+                            "description": "Registered record type (e.g. sku)"},
+            "key": {"type": "string", "description": "Record key"},
+            "record": {"type": "object", "description": "Record fields"},
+        },
+        required_inputs=("record_type", "key", "record"),
+        output_schema={"staged": {"type": "boolean"}},
+        capabilities=("record:upsert",),
+        effect_types=(EffectType.RECORD_UPSERT,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,  # upsert by key — a repeated call re-writes
+        reversible=True,   # undone via prior-record restore (T10/T18)
+        max_output_bytes=100_000,
+    )
+    record_delta = ToolManifest(
+        name="record_delta",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Apply a numeric delta to a record field "
+                    "(e.g. stock movement; invariants checked on the result)",
+        input_schema={
+            "record_type": {"type": "string",
+                            "description": "Registered record type"},
+            "key": {"type": "string", "description": "Record key"},
+            "field": {"type": "string",
+                      "description": "Numeric field to adjust"},
+            "delta": {"type": "number", "description": "Delta (signed)"},
+        },
+        required_inputs=("record_type", "key", "field", "delta"),
+        output_schema={"staged": {"type": "boolean"}},
+        capabilities=("record:delta",),
+        effect_types=(EffectType.RECORD_DELTA,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,
+        reversible=True,
+        max_output_bytes=100_000,
+    )
     return {
         m.name: m
         for m in (
@@ -667,6 +715,7 @@ def builtin_manifests() -> dict[str, ToolManifest]:
             apply_patch, run_tests, git_diff, git_status,
             python_compute, python_transform,
             kb_read, kb_list, kb_search,
+            record_upsert, record_delta,
         )
     }
 

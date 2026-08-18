@@ -421,4 +421,5 @@ class TestBuiltinRegistration:
             "apply_patch", "run_tests", "git_diff", "git_status",
             "python_compute", "python_transform",
             "kb_read", "kb_list", "kb_search",
+            "record_upsert", "record_delta",
         }

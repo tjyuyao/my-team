@@ -316,6 +316,7 @@ class TestBuiltinManifests:
             "apply_patch", "run_tests", "git_diff", "git_status",
             "python_compute", "python_transform",
             "kb_read", "kb_list", "kb_search",  # v0.10 T8a
+            "record_upsert", "record_delta",   # v0.10 T10
         }
 
     def test_execution_classes(self) -> None:

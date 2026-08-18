@@ -15,6 +15,7 @@ Architecture (v0.6.0):
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ from my_team.agent_runtime import (
 )
 from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
+from my_team.asset_store import AssetStore
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
 from my_team.context_compiler import ContextCompiler
 from my_team.executor_registry import (
@@ -103,6 +105,7 @@ from my_team.python_worker import (
     run_python_compute,
     run_python_transform,
 )
+from my_team.record_store import RecordInvariantError, RecordStore
 from my_team.reliability import CrashGuard, CrashReport, TimeoutChecker
 from my_team.sandbox_tools import run_sandboxed_process
 from my_team.scheduler import AgentScheduler, QueuedEvent
@@ -280,6 +283,12 @@ class Simulation:
             permissions=self._permission_engine,
             lock_manager=self._lock_manager,
         )
+
+        # T10: RecordStore (typed records + ledger) & AssetStore
+        # (content-addressed binaries) — in-memory; SQLite persistence
+        # and Journal integration are future work.
+        self._record_store = RecordStore()
+        self._asset_store = AssetStore()
 
         # Tool registry
         self._tool_registry = ToolRegistry()
@@ -490,6 +499,37 @@ class Simulation:
         if not target.exists() or not target.is_file():
             return False, ""
         return True, target.read_text(encoding="utf-8")
+
+    def _read_private_file_bytes(
+        self, agent_id: str, path: str,
+    ) -> tuple[bool, bytes]:
+        """Read a private file's raw BYTES (committed state on disk).
+
+        T10: the private-file snapshot/read path no longer skips binary
+        files — a READ-only caller can fetch the raw payload. The
+        agent's own staged BINARY writes are folded in base64.
+        """
+        staged = self._staged_private_effects(agent_id)
+        if path in staged:
+            return True, self._staged_binary_content(agent_id, path)
+        target = self._private_store.resolve_path(agent_id, path)
+        if not target.exists() or not target.is_file():
+            return False, b""
+        return True, target.read_bytes()
+
+    def _staged_binary_content(self, agent_id: str, path: str) -> bytes:
+        """Raw bytes of a staged (uncommitted) binary file write."""
+        effects = self._transaction_buffer.get_effects(agent_id)
+        for e in effects:
+            if e.effect_type != EffectType.FILE_WRITE:
+                continue
+            if e.resource != path:
+                continue
+            if e.effect_type is EffectType.FILE_WRITE and e.data.get(
+                "is_binary", False,
+            ):
+                return base64.b64decode(e.data.get("content_bytes_b64", ""))
+        return b""
 
     def _register_tool_handlers(self) -> None:
         """Register tool handlers that connect ToolRegistry to subsystems.
@@ -770,6 +810,88 @@ class Simulation:
                 tick=context.tick,
             )
 
+        # T10: typed record mutations — staged as RECORD_UPSERT /
+        # RECORD_DELTA effects; applied (invariant-checked) at Commit;
+        # an invariant violation is a DETERMINISTIC business failure.
+        def handle_record_upsert(
+            context: ToolContext,
+            record_type: str = "",
+            key: str = "",
+            record: dict[str, Any] | None = None,
+            **_kw: Any,
+        ) -> Any:
+            if not record_type or not key:
+                return ToolResult(
+                    success=False,
+                    error="record_upsert requires 'record_type' and 'key'",
+                    error_code="INVALID_ARGUMENT", retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="record_upsert", tick=context.tick,
+                )
+            if not self._record_store.has_schema(record_type):
+                return ToolResult(
+                    success=False,
+                    error=f"record type '{record_type}' not registered",
+                    error_code="SCHEMA_NOT_REGISTERED", retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="record_upsert", tick=context.tick,
+                )
+            self._transaction_buffer.stage(
+                effect_type=EffectType.RECORD_UPSERT,
+                agent_id=context.agent_id,
+                resource=f"{record_type}:{key}",
+                data={
+                    "record_type": record_type,
+                    "key": key,
+                    "record": record or {},
+                },
+            )
+            return ToolResult(
+                success=True, data={"staged": True},
+                agent_id=context.agent_id,
+                tool_name="record_upsert", tick=context.tick,
+            )
+
+        def handle_record_delta(
+            context: ToolContext,
+            record_type: str = "",
+            key: str = "",
+            field: str = "",
+            delta: float = 0.0,
+            **_kw: Any,
+        ) -> Any:
+            if not record_type or not key or not field:
+                return ToolResult(
+                    success=False,
+                    error="record_delta requires 'record_type', 'key' and 'field'",
+                    error_code="INVALID_ARGUMENT", retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="record_delta", tick=context.tick,
+                )
+            if not self._record_store.has_schema(record_type):
+                return ToolResult(
+                    success=False,
+                    error=f"record type '{record_type}' not registered",
+                    error_code="SCHEMA_NOT_REGISTERED", retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="record_delta", tick=context.tick,
+                )
+            self._transaction_buffer.stage(
+                effect_type=EffectType.RECORD_DELTA,
+                agent_id=context.agent_id,
+                resource=f"{record_type}:{key}",
+                data={
+                    "record_type": record_type,
+                    "key": key,
+                    "field": field,
+                    "delta": float(delta),
+                },
+            )
+            return ToolResult(
+                success=True, data={"staged": True},
+                agent_id=context.agent_id,
+                tool_name="record_delta", tick=context.tick,
+            )
         def handle_send_email(
             context: ToolContext,
             to: list[str] | None = None,
@@ -1183,6 +1305,8 @@ class Simulation:
             "kb_read": handle_kb_read,
             "kb_list": handle_kb_list,
             "kb_search": handle_kb_search,
+            "record_upsert": handle_record_upsert,
+            "record_delta": handle_record_delta,
             "send_email": handle_send_email,
             "delegate": handle_delegate,
             "apply_patch": handle_apply_patch,
@@ -1248,6 +1372,16 @@ class Simulation:
         return self._shared_kb
 
     @property
+    def record_store(self) -> RecordStore:
+        """T10: typed record store (schema-registered + ledger)."""
+        return self._record_store
+
+    @property
+    def asset_store(self) -> AssetStore:
+        """T10: content-addressed binary asset store."""
+        return self._asset_store
+
+    @property
     def tick_engine(self) -> TickEngine:
         return self._tick_engine
 
@@ -1307,6 +1441,8 @@ class Simulation:
         return MappingProxyType({
             "private_store": self._private_store,
             "shared_kb": self._shared_kb,
+            "record_store": self._record_store,  # T10
+            "asset_store": self._asset_store,     # T10
             "mail_system": self._mail_system,
             "task_tree": self._task_tree,
             "agent_tree": self._agent_tree,
@@ -1656,6 +1792,21 @@ class Simulation:
                     for r in self._permission_engine._rules
                 ],
             },
+            "record_store": {
+                "schemas": [
+                    s.model_dump(mode="json")
+                    for s in self._record_store._schemas.values()
+                ],
+                "records": {
+                    k: dict(r)
+                    for k, r in self._record_store._records.items()
+                },
+                "ledger": [
+                    e.model_dump(mode="json")
+                    for e in self._record_store._ledger
+                ],
+            },
+            "asset_store": self._asset_store.snapshot(),
             "locks": {
                 "locks": [
                     lock.model_dump(mode="json")
@@ -1797,6 +1948,36 @@ class Simulation:
         self._permission_engine._rules = [
             PermissionRule.model_validate(r) for r in kb["permissions"]
         ]
+
+        # T10: RecordStore + AssetStore restoration
+        rs = state.get("record_store")
+        if rs:
+            from my_team.record_store import LedgerEntry, RecordSchema
+            self._record_store._schemas = {
+                s["record_type"]: RecordSchema.model_validate(s)
+                for s in rs.get("schemas", [])
+            }
+            self._record_store._records = {
+                key: dict(rec)
+                for key, rec in rs.get("records", {}).items()
+            }
+            self._record_store._ledger = [
+                LedgerEntry.model_validate(e)
+                for e in rs.get("ledger", [])
+            ]
+            self._record_store._ledger_counter = (
+                max((e.ledger_id for e in self._record_store._ledger), default=0)
+            )
+            self._record_store._version_counter = {
+                key: len([
+                    e for e in self._record_store._ledger
+                    if f"{e.record_type}:{e.key}" == key
+                ])
+                for key in self._record_store._records
+            }
+        asset_state = state.get("asset_store")
+        if asset_state:
+            self._asset_store.restore(asset_state)
 
         # Locks
         locks = state["locks"]
@@ -3568,8 +3749,22 @@ class Simulation:
                         prev = data.get("file_previous")
                         if prev is None:
                             target.unlink(missing_ok=True)
+                        elif data.get("is_binary"):
+                            target.write_bytes(prev)  # T10 binary restore
                         else:
                             target.write_text(prev, encoding="utf-8")
+                    elif effect.effect_type in {
+                        EffectType.RECORD_UPSERT, EffectType.RECORD_DELTA,
+                    }:
+                        # T10: undo the mutation — remove its ledger
+                        # entries and restore the prior record (the
+                        # ledger stays an exact replay source).
+                        self._record_store.invert_mutation(
+                            record_type=data["record_type"],
+                            key=data["record_key"],
+                            prior_record=data.get("record_before"),
+                            ledger_ids=data.get("ledger_ids", []),
+                        )
                     elif effect.effect_type in {
                         EffectType.KB_WRITE, EffectType.KB_CREATE,
                         EffectType.KB_DELETE,
@@ -3726,13 +3921,44 @@ class Simulation:
                                 continue
 
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    if target.exists():
-                        previous = target.read_text(encoding="utf-8")
+                    is_binary = bool(effect.data.get(
+                        "is_binary", False,
+                    ))
+                    if is_binary:
+                        # T10: binary private-file write — content is
+                        # base64 in content_bytes_b64; prior content is
+                        # read back as bytes so the invert restores it
+                        # byte-exactly.
+                        if target.exists() and target.is_file():
+                            previous = target.read_bytes()
+                        else:
+                            previous = None
+                        effect.invert_data["target_path"] = str(target)
+                        effect.invert_data["file_previous"] = previous
+                        effect.invert_data["is_binary"] = True
+                        try:
+                            payload = base64.b64decode(
+                                effect.data.get("content_bytes_b64", ""),
+                            )
+                        except Exception:  # noqa: BLE001 — malformed b64
+                            _fail_locally(
+                                effect, "invalid base64 content_bytes_b64",
+                            )
+                            continue
+                        target.write_bytes(payload)
                     else:
-                        previous = None
-                    effect.invert_data["target_path"] = str(target)
-                    effect.invert_data["file_previous"] = previous
-                    target.write_text(content, encoding="utf-8")
+                        if target.exists():
+                            prev_text: str | None = target.read_text(
+                                encoding="utf-8",
+                            )
+                        else:
+                            prev_text = None
+                        effect.invert_data["target_path"] = str(target)
+                        effect.invert_data["file_previous"] = prev_text
+                        target.write_text(content, encoding="utf-8")
+                    # The on-disk invert RESTORES text via read_text; for
+                    # a binary prior this must restore bytes. Handled by
+                    # the is_binary flag in _invert_one below.
 
                 elif effect.effect_type == EffectType.EMAIL_SEND:
                     data = effect.data
@@ -3863,6 +4089,49 @@ class Simulation:
                             path=path,
                             agent_id=effect.agent_id,
                         )
+
+                elif effect.effect_type in {
+                    EffectType.RECORD_UPSERT, EffectType.RECORD_DELTA,
+                }:
+                    # T10: typed record mutation via the store (invariant
+                    # checks inside). An invariant violation is a
+                    # DETERMINISTIC business failure (T18) — the store
+                    # raises RecordInvariantError → _fail_locally, never
+                    # a tick rollback. invert_data captures the prior
+                    # record + appended ledger ids for per-effect undo.
+                    data = effect.data
+                    record_type = data.get("record_type", "")
+                    key = str(data.get("key", effect.resource))
+                    agent_id = effect.agent_id
+                    prior_record = self._record_store.get(record_type, key)
+                    effect.invert_data["record_type"] = record_type
+                    effect.invert_data["record_key"] = key
+                    effect.invert_data["record_before"] = (
+                        dict(prior_record)
+                        if prior_record is not None else None
+                    )
+                    try:
+                        if effect.effect_type == EffectType.RECORD_UPSERT:
+                            result = self._record_store.upsert(
+                                record_type=record_type,
+                                key=key,
+                                data=data.get("record", {}),
+                                agent_id=agent_id,
+                                tick=tick,
+                            )
+                        else:
+                            result = self._record_store.apply_delta(
+                                record_type=record_type,
+                                key=key,
+                                field=data.get("field", ""),
+                                delta=float(data.get("delta", 0)),
+                                agent_id=agent_id,
+                                tick=tick,
+                            )
+                    except RecordInvariantError as exc:
+                        _fail_locally(effect, exc.message)
+                        continue
+                    effect.invert_data["ledger_ids"] = result.ledger_ids
 
                 applied.append(effect)
         except Exception as e:  # noqa: BLE001 — kernel failure → full rollback

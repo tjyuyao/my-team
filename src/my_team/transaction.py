@@ -39,6 +39,8 @@ class EffectType(str, Enum):
     TASK_CREATE = "task_create"
     TASK_UPDATE = "task_update"
     STATE_TRANSITION = "state_transition"
+    RECORD_UPSERT = "record_upsert"
+    RECORD_DELTA = "record_delta"
 
 
 # Effect types that have external (non-in-memory) side effects.
@@ -138,6 +140,14 @@ INVERT_CONTRACT: dict[EffectType, InvertSpec] = {
     EffectType.STATE_TRANSITION: InvertSpec(
         kind=InvertKind.RESTORE_PREVIOUS,
         recorded="state_before",
+    ),
+    EffectType.RECORD_UPSERT: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="prior record (or None) + appended ledger entry ids → restore + remove entries",
+    ),
+    EffectType.RECORD_DELTA: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="prior record (or None) + appended ledger entry ids → restore + remove entries",
     ),
 }
 
