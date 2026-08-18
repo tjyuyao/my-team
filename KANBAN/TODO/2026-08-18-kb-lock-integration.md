@@ -41,6 +41,13 @@ lock_token 防 stale-holder）——但 **src/ 生产代码零调用**：`acquir
    但未用），靠"失败→下回合重试"；排队留给未来设计（慢通道语义）。
 5. **争锁裁决**：Act 阶段串行执行（_phase_act 循环），同 tick 多 agent 争锁
    先到先得；后者工具失败；版本检查（乐观并发第二道防线）照旧。
+6. **锁对 Agent 不可见（无显式锁工具）**：acquire/release 由写工具内核
+   绑定（写 KB = 自动持锁），Agent 无 lock/unlock 概念 → **没有"忘记释放"
+   的遗忘面**（用户 2026-08-18 权衡确认）。残留窗口仅单 tick
+   （acquire→commit），极端滞留由 lease 兜底（默认 4 tick 自动过期）。
+   若未来需要跨 tick 长持锁（如多轮协作编辑同一文档），再引入显式
+   lock/unlock 工具 + "邮件询问资源是否仍在使用"的辅助手段（记 backlog，
+   不属本卡）。
 
 ## 实施步骤
 1. `shared_kb.py`：确认 acquire 的 LockConflictError 语义与 lease 默认值；

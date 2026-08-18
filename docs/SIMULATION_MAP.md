@@ -78,6 +78,45 @@ continuation 记忆），Agent 醒来接着吃、接着干。
 - **结果带着"门禁票"（state epoch）**：回合回滚后世界前进了一个纪元（epoch），
   旧纪元才做出来的结果会被当作过期事件丢掉（fence），不会污染新世界。
 
+### 三.5 慢通道与 tick 的安全共存（五道闸门）
+
+慢通道跨 tick 在途，靠五道闸门与 tick 的原子提交语义安全并存：
+
+1. **派发闸门**：Publish 只在 Commit 成功后执行 → 已派发的 op 永远属于
+   已提交的 tick，永远不会被回滚（慢通道的在途世界与回滚世界从构造上
+   不相交）。
+2. **撤销闸门**：回滚只撤"本 tick 登记、尚未消费"的 op——`_rollback` 遍历
+   `_tick_pending_ops` 调 `remove_for_rollback`（清 op + seen_requests 防重放
+   记录，request_id 即刻可重用）。
+3. **验票闸门**：结果回来必须过双重 fence（`_phase_ingest`）——epoch 不符
+   （对旧世界算出的结果）丢弃；agent 已不再等它（superseded）丢弃。
+4. **终态闸门**：`complete`/`complete_tool`/`cancel` 对终态
+   （CANCELLED/TIMED_OUT/FAILED）一律拒绝改写——**op 生命周期裁决结果，
+   结果不裁决 op**；correlation 校验 `result.request_id == op.request_id`。
+5. **超时闸门**：`deadline_tick` 超时即清，投递结构化错误并唤醒 Agent，
+   **由 Agent 决定重试/放弃/升级**。
+
+**LLM 请求：必然慢通道，且绝不重复唤醒。**
+- 路由：`SubmitLLMRequest` 无条件登记 `OpType.LLM_REQUEST`（无同步分支，
+  SPEC §8.6 明文禁止同步 LLM）；`fake_llm` 也同路径返回（只是快）。
+- 等待中的 Agent 不会被下一个 tick 重复唤起：唤醒的唯一通道是结果事件
+  （`_enqueue_result_wake` 的 `TOOL_RESULT`）→ 事件不匹配就进不了 ready 集；
+  即便万一被激活，`llm_agent.decide_intents` 的二分（有结果才续作、无结果
+  才新请求）+ `begin_activation` 的 WAITING→resume 状态门 + registry
+  `pending_request_id` 唯一与 `seen_requests` 防重放，三重兜底。
+
+**读取一致性推论**：op 提交于 tick t、执行于 t+k——期间 agent 处于 WAITING、
+不会自己写，他人写不了他的私有空间 → dispatch 时按需读 ≡ 提交时读，一致；
+共享资源（KB）另有锁+版本兜底。
+
+**快慢通道的对称**：
+
+| | 快通道 | 慢通道 |
+|---|---|---|
+| 副作用发生时点 | 延后到 Commit | 提前于内核裁定（已发生） |
+| 失败怎么办 | 可回滚（前值恢复） | 不可回滚 → 补偿（T18 逆操作契约） |
+| 与 tick 事务 | 完全在事务内 | 登记在事务内，执行在事务外 |
+
 ## 四、世界存储（Object 群）
 
 | 物件 | 类 | 关键点 |
@@ -85,7 +124,7 @@ continuation 记忆），Agent 醒来接着吃、接着干。
 | 组织树 | `AgentTree` | 谁是谁的上司/下属；静态 |
 | 任务树 | `TaskTree` | 任务状态机、归属、依赖 |
 | 私有空间 | `PrivateStore` | per-agent 真实目录；`resolve_path` 严防越界；读写按需（提交态 + 自己 staged，T17） |
-| 共享知识库 | `SharedKB` | 文档条目 + `PermissionEngine` + `LockManager` + 乐观版本 |
+| 共享知识库 | `SharedKB` | 文档条目 + `PermissionEngine` + `LockManager` + 乐观版本；**注意：LockManager 生产路径零接入（kb 写必被拒），T20（kb-lock-integration）修复中** |
 | 邮箱 | `Mailbox` / `Outbox` | 收件箱 / 可靠投递（STAGED→COMMITTED→DISPATCHED，幂等） |
 | 人类控制 | `HumanControl` | 人类暂停/发信/查状态（T12a 将扩展为 human worker） |
 
@@ -114,3 +153,6 @@ continuation 记忆），Agent 醒来接着吃、接着干。
 3. **外部进程工具（run_tests / git）的 cwd 当前指向宿主目录**，未接到
    agent workspace——归"工具执行环境对齐"卡（v0.10 次优先级），读代码
    时勿误以为它们已作用于模拟世界。
+4. **pending_ops 无显式同步锁**：目前靠 GIL + 单后台写者（`llm_dispatcher`
+   线程）与主线程读维持安全；复合状态转换（检查+改状态）非原子，窗口
+   极小但存在——未来多 worker 并发回写（外部执行器）**必须先加锁**。
