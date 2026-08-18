@@ -124,7 +124,7 @@
 | # | 阶段 | 输入 | 输出 | 规则 |
 |---|---|---|---|---|
 | 1 | Ingest | 外部结果、Ingress 事件、到期定时器 | 完成/超时/失败结果投递；Ingress 事件入队；邮件投递 | fence 过期 epoch；去重 |
-| 2 | Freeze | 当前全局状态 | 冻结快照（含私有文件视图、KB 视图、Record 视图、KPI 投影） | 本 tick 内所有 Agent 见同一快照 |
+| 2 | Freeze | 当前全局状态 | 提交态引用 + 目录/元数据索引（Index，不含文件全文）+ 按需路径级基准（lazy per-path freeze） | 本 tick 内所有 Agent 见同一提交态；读取按需合并自己的 staged；不构建全量内容快照 |
 | 3 | Schedule | 快照 + 事件 + 日历规则 | 就绪 Agent 集合（按优先级/deadline 排序） | 每 Agent 每 tick 最多 1 次 activation |
 | 4 | Observe | 快照 + 就绪集 | 角色化 AgentObservation（由 ContextCompiler 编译） | 只读，不产生副作用 |
 | 5 | Decide | AgentObservation + Continuation | Intent 列表 | 非阻塞；不允许同步 LLM/工具/人类 |
@@ -139,11 +139,27 @@
   且恢复 Agent 状态与 Continuation（修复 OI-003 P0-2）。
 - Publish 只在 Commit 成功后执行；回滚 tick 不产生任何 dispatch。
 - Ingest 是唯一允许外部结果进入内核的入口。
+- **每 tick 一轮（唯一执行模型）**：每 Agent 每 tick 最多 1 次
+  activation、1 次 Decide（最多 1 次 LLM 调用）；多轮推理是跨 tick 的
+  ReAct 协议（continuation 续接），**不支持同 tick 内多轮 LLM→Tool
+  micro loop**——它破坏提交原子性与读取一致性（曾存在于
+  ExecutionMode 枚举，从未接线，正式废除）。Agent 在单轮内可执行
+  多个内核工具（read/write/apply_patch），其余经 pending op 跨 tick
+  投递结果。
+- **原子提交的来源不是快照隔离，是串行化**：每 tick 一轮 + 互斥锁
+  （SharedKB 层已有 LockManager；私有空间 per-agent 独占本无竞争）
+  使并发访问串行化，Act 只登记/暂存、Commit 统一应用 → 天然原子。
+  回滚粒度为 tick 起点（P0-2 continuation 快照 + 文件原状恢复）。
+- **冻结视图按需化**：不构建"全体资源"内容快照（O(全部文件内容)
+  每 tick 逐字复制是不可接受的成本）。Freeze 只建目录/元数据索引与
+  状态摘要哈希（O(资源数) 的元数据，不含全文）；文件内容在 Agent
+  实际读取的路径上按需读取（提交态 + 自己本 tick staged 的合并）。
+  读取一致性由"每 tick 一轮 + 串行化"保证，无需快照隔离。
 
 ### 3.2 统一 TickJournal
 
 - 每个 tick 产生一个 `TickRecord`（append-only），包含：
-  - 快照哈希、epoch、tick；
+  - 状态摘要哈希（epoch/提交集摘要，非全量内容快照）、epoch、tick；
   - 所有 Intents 与验证结果；
   - 所有 staged effects 与最终状态（committed/failed/rolled_back）；
   - 本 tick 的 pending op 注册与取消；
@@ -377,7 +393,8 @@ MCP server（stdio / HTTP / SSE）
 
 - 路径解析统一走 `PrivateStore.resolve_path`；任何写路径必须先
   通过 resolve 与访问控制（修复 OI-003 P0-1）。
-- 文件读经冻结视图；文件写经 effect。
+- 文件读经提交态视图（tick 提交态 + 自己本 tick staged 的按需合并，
+  走 lazy per-path 读取，见 §3.1 冻结视图按需化）；文件写经 effect。
 
 ### 7.2 SharedKB（文档型知识库）
 
