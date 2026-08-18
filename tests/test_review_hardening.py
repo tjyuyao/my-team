@@ -81,10 +81,12 @@ class TestPatchBaseHash:
             "+goodbye\n"
         )
 
-    def test_stale_patch_fails_at_commit(self) -> None:
+    def test_stale_patch_rejected_at_act(self) -> None:
         """A write to the same path staged BEFORE the patch changes the
-        file; at the patch's apply time the content no longer matches
-        its base_hash → patch_conflict at commit, no overwrite."""
+        base: with on-demand reads (committed state + own staged), the
+        patch is validated against the staged content at Act and
+        rejected as a conflict — never a silent overwrite, no tick
+        rollback."""
         path = f"f-{uuid4().hex[:8]}.md"
         sim = Simulation(agent_tree=_make_tree(
             ["read", "write", "apply_patch"],
@@ -92,25 +94,20 @@ class TestPatchBaseHash:
         target = sim._private_store.agent_home("agent.root") / path
         target.write_text("hello", encoding="utf-8")
 
-        # Same tick: write FIRST (applies first at commit, changing the
-        # file), then the patch (validated against "hello" at Act)
+        # Same tick: write first (staged), then the patch — which now
+        # validates against the staged "interloper" content.
         sim._tool_registry.execute(
             ToolCtx(sim), "write", path=path, content="interloper",
         )
-        sim._tool_registry.execute(
+        patch_res = sim._tool_registry.execute(
             ToolCtx(sim), "apply_patch", path=path, patch=self._patch(path),
         )
+        assert not patch_res.success
+        assert patch_res.error_code == "patch_conflict"
         sim._phase_commit(0, {"agent.root": []})
 
-        # The write applied; the stale patch FAILED locally
+        # The write applied; the stale patch never touched the file
         assert target.read_text(encoding="utf-8") == "interloper"
-        patch_eff = [
-            e for e in sim._transaction_buffer.get_effects("agent.root")
-            if e.effect_type == EffectType.FILE_PATCH
-        ][0]
-        assert patch_eff.status == EffectStatus.FAILED
-        assert "base conflict" in (patch_eff.error or "")
-        # No tick rollback — the write survived, epoch untouched
         assert sim.state_epoch == 0
 
     def test_clean_patch_commits(self) -> None:

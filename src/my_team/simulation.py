@@ -429,33 +429,53 @@ class Simulation:
             return f"path traversal rejected: {path}"
         return None
 
+    def _staged_private_effects(self, agent_id: str) -> dict[str, str]:
+        """Merge this agent's uncommitted staged file writes/patches.
+
+        Keyed by resource path → final content. The disk is always the
+        last committed state (staged effects are applied only at Commit),
+        so "committed state + own staged" reads are computed on demand —
+        no full-content snapshot is ever built (SPEC §3.1 冻结视图按需化).
+        """
+        merged: dict[str, str] = {}
+        for e in self._transaction_buffer.get_effects(agent_id):
+            if e.status not in (EffectStatus.STAGED, EffectStatus.VALIDATED):
+                continue
+            if e.effect_type in (EffectType.FILE_WRITE, EffectType.FILE_PATCH):
+                merged[e.resource] = e.data.get("content", "")
+            elif e.effect_type == EffectType.FILE_DELETE:
+                merged.pop(e.resource, None)
+        return merged
+
+    def _read_private_file(
+        self, agent_id: str, path: str,
+    ) -> tuple[bool, str]:
+        """Read a private file as the agent sees it: committed state
+        (disk) overlaid with this agent's own staged writes.
+
+        Returns (found, content). Forbidden paths raise AccessDeniedError
+        via PrivateStore.resolve_path.
+        """
+        staged = self._staged_private_effects(agent_id)
+        if path in staged:
+            return True, staged[path]
+        target = self._private_store.resolve_path(agent_id, path)
+        if not target.exists() or not target.is_file():
+            return False, ""
+        return True, target.read_text(encoding="utf-8")
+
     def _register_tool_handlers(self) -> None:
         """Register tool handlers that connect ToolRegistry to subsystems.
 
         Write tools (write, send_email, delegate) stage effects in the
         TransactionBuffer. Read tools (read, ls) execute directly.
         """
-        # Read-only tools — execute against the FROZEN per-agent file
-        # view captured at Freeze (SPEC §2.3 / v0.6.0 review §四.3).
-        # context.read_view is None only for direct calls made outside
-        # a tick; those fall back to the live filesystem.
+        # Read-only tools — read on demand: committed state (disk)
+        # overlaid with the agent's own staged writes (SPEC §3.1 冻结
+        # 视图按需化 — no full-content snapshot is built).
         def handle_read(context: ToolContext, path: str = "", **_kw: Any) -> Any:
-            view = context.read_view
-            if view is not None:
-                content = view["files"].get(path)
-                if content is None:
-                    return ToolResult(
-                        success=False, error=f"File not found: {path}",
-                        agent_id=context.agent_id, tool_name="read",
-                        tick=context.tick,
-                    )
-                return ToolResult(
-                    success=True, data={"content": content},
-                    agent_id=context.agent_id, tool_name="read",
-                    tick=context.tick,
-                )
             try:
-                target = self._private_store.resolve_path(
+                found, content = self._read_private_file(
                     context.agent_id, path,
                 )
             except AccessDeniedError as exc:
@@ -464,13 +484,12 @@ class Simulation:
                     agent_id=context.agent_id, tool_name="read",
                     tick=context.tick,
                 )
-            if not target.exists() or not target.is_file():
+            if not found:
                 return ToolResult(
                     success=False, error=f"File not found: {path}",
                     agent_id=context.agent_id, tool_name="read",
                     tick=context.tick,
                 )
-            content = target.read_text(encoding="utf-8")
             return ToolResult(
                 success=True, data={"content": content},
                 agent_id=context.agent_id, tool_name="read",
@@ -478,31 +497,16 @@ class Simulation:
             )
 
         def handle_ls(context: ToolContext, path: str = "", **_kw: Any) -> Any:
-            view = context.read_view
-            if view is not None:
-                prefix = f"{path.rstrip('/')}/" if path else ""
-                entries: set[str] = set()
-                for f in view["files"]:
-                    if f.startswith(prefix):
-                        rest = f[len(prefix):]
-                        if rest and "/" not in rest:
-                            entries.add(rest)
-                for d in view["dirs"]:
-                    if d.startswith(prefix):
-                        rest = d[len(prefix):]
-                        if rest and "/" not in rest:
-                            entries.add(rest)
-                return ToolResult(
-                    success=True, data={"entries": sorted(entries)},
-                    agent_id=context.agent_id, tool_name="ls",
-                    tick=context.tick,
-                )
+            # Committed listing (disk, metadata only) merged with the
+            # agent's own staged paths — same semantics as the old
+            # frozen view, without copying any file content.
             try:
                 target = self._private_store.resolve_path(
                     context.agent_id, path,
                 ) if path else self._private_store.agent_home(
                     context.agent_id,
                 )
+                home = self._private_store.agent_home(context.agent_id)
             except AccessDeniedError as exc:
                 return ToolResult(
                     success=False, error=str(exc),
@@ -515,9 +519,21 @@ class Simulation:
                     agent_id=context.agent_id, tool_name="ls",
                     tick=context.tick,
                 )
-            live_entries = sorted(p.name for p in target.iterdir())
+            prefix = f"{path.rstrip('/')}/" if path else ""
+            entries: set[str] = set()
+            for p in home.rglob("*"):
+                rel = p.relative_to(home).as_posix()
+                if rel.startswith(prefix):
+                    rest = rel[len(prefix):]
+                    if rest and "/" not in rest:
+                        entries.add(rest)
+            for rel in self._staged_private_effects(context.agent_id):
+                if rel.startswith(prefix):
+                    rest = rel[len(prefix):]
+                    if rest and "/" not in rest:
+                        entries.add(rest)
             return ToolResult(
-                success=True, data={"entries": live_entries},
+                success=True, data={"entries": sorted(entries)},
                 agent_id=context.agent_id, tool_name="ls",
                 tick=context.tick,
             )
@@ -683,19 +699,13 @@ class Simulation:
                     agent_id=context.agent_id, tool_name="apply_patch",
                     tick=context.tick,
                 )
-            # Target content: the frozen view if available (same-tick
-            # consistency), else the live file. Missing file = "" (the
-            # patch may create a new file).
-            view = context.read_view
-            if view is not None:
-                content = view["files"].get(path) or ""
-            else:
-                home = self._private_store.agent_home(context.agent_id)
-                target = home / path
-                if target.exists() and target.is_file():
-                    content = target.read_text(encoding="utf-8")
-                else:
-                    content = ""
+            # Target content: committed state (disk) overlaid with the
+            # agent's own staged writes (SPEC §3.1 按需化). Missing file
+            # = "" (the patch may create a new file).
+            found, base_content = self._read_private_file(
+                context.agent_id, path,
+            )
+            content = base_content if found else ""
             try:
                 new_content = apply_patch(content, patch)
             except PatchError as e:
@@ -859,12 +869,18 @@ class Simulation:
             """
             manifest = self._tool_registry.get_manifest("python_transform")
             assert manifest is not None  # builtin, registered at startup
-            view = (context.read_view or {}).get("files", {})
             resolved: dict[str, str] = {}
             missing: list[str] = []
             for rel in (input_files or {}):
-                if rel in view:
-                    resolved[rel] = view[rel]
+                try:
+                    found, content = self._read_private_file(
+                        context.agent_id, rel,
+                    )
+                except AccessDeniedError:
+                    missing.append(rel)
+                    continue
+                if found:
+                    resolved[rel] = content
                 else:
                     missing.append(rel)
             if missing:
@@ -2072,36 +2088,38 @@ class Simulation:
                 },
             }
 
-        # Frozen per-agent private file view (v0.6.0 review §四.3):
-        # read/ls in Phase 7 execute against THIS view, never the live
-        # filesystem. Files staged by WritePrivateFileIntent in this tick
-        # are applied only in Phase 8 (Commit) and thus invisible here.
+        # Per-agent private file INDEX (SPEC §3.1 冻结视图按需化): metadata
+        # only — paths and sizes/mtimes, NEVER file contents. Tools read
+        # contents on demand (committed disk state + own staged), so no
+        # full-content snapshot is built.
         private_files: dict[str, dict[str, Any]] = {}
         for agent_config in self._agent_tree:
             agent_id = agent_config.agent_id
             home = self._private_store.agent_home(agent_id)
-            files: dict[str, str] = {}
+            files: dict[str, Any] = {}
             dirs: list[str] = []
             if home.exists():
                 for p in sorted(home.rglob("*")):
                     rel = p.relative_to(home).as_posix()
                     if p.is_file():
                         try:
-                            files[rel] = p.read_text(encoding="utf-8")
-                        except UnicodeDecodeError:
-                            continue  # binary files are not readable via the view
+                            st = p.stat()
+                        except OSError:
+                            continue
+                        files[rel] = {"size": st.st_size, "mtime": st.st_mtime}
                     else:
                         dirs.append(rel)
             private_files[agent_id] = {"files": files, "dirs": dirs}
 
-        # Per-agent workspace version (v0.8.0 P1-3): hash of the frozen
-        # file view. A ToolRequest records the version it was based on;
-        # apply-time FILE_PATCH base-hash checks remain the enforcement.
+        # Per-agent workspace version (v0.8.0 P1-3): hash of the file
+        # INDEX (metadata only, not contents). A ToolRequest records the
+        # version it was based on; apply-time FILE_PATCH base-hash
+        # checks remain the content-level enforcement.
         workspace_versions: dict[str, str] = {}
         for agent_config in self._agent_tree:
             agent_id = agent_config.agent_id
             workspace_versions[agent_id] = hash_payload(
-                private_files[agent_id]["files"],
+                private_files[agent_id],
             )
 
         # Get pending emails
@@ -2404,19 +2422,15 @@ class Simulation:
                         and not requires_executor(manifest.execution_class)
                     )
                     if kernel_executed:
-                        # Local tools execute synchronously against the
-                        # frozen per-agent file view (Freeze snapshot).
+                        # Local tools execute synchronously; file tools
+                        # read on demand (committed state + own staged)
+                        # — no frozen view (SPEC §3.1 按需化).
                         runtime = self._runtimes.get(agent_id)
                         if runtime:
                             tool_context = ToolContext(
                                 agent_id=agent_id,
                                 tick=tick,
                                 allowed_tools=self._tool_context_allowed(agent_id),
-                                read_view=(
-                                    snapshot["private_files"].get(agent_id)
-                                    if snapshot is not None
-                                    else None
-                                ),
                             )
                             tr = self._tool_registry.execute(
                                 context=tool_context,
@@ -2476,16 +2490,9 @@ class Simulation:
                                 deadline_tick=tick + intent.timeout_ticks,
                                 arguments=dict(intent.arguments),
                             )
-                            # T8: bind submission-tick workspace view so
-                            # dispatch reads from the frozen view at submit
-                            # time, not the current tick's snapshot.
-                            agent_view = (
-                                (snapshot or {})
-                                .get("private_files", {})
-                                .get(agent_id)
-                            )
-                            if agent_view is not None:
-                                op.metadata["_submission_view"] = agent_view
+                            # Reads happen on demand at dispatch
+                            # (committed state + own staged) — no view
+                            # is bound at submission (SPEC §3.1 按需化).
                         if runtime_state:
                             # P0-2: snapshot continuation before mutation
                             c = runtime_state.continuation
@@ -3113,24 +3120,14 @@ class Simulation:
             if tier == ExecutorTier.TRUSTED_IN_PROCESS:
                 # In-process executor: run now (manifest-bounded).
                 # request_id lets the handler register its live
-                # subprocess for physical cancel (P2-10); read_view
-                # gives file tools the frozen snapshot.
-                # T8: prefer the submission-tick frozen view (bound at
-                # Act) over the current tick's snapshot, preserving read
-                # consistency for queued ops.
-                read_view = op.metadata.get("_submission_view")
-                if read_view is None:
-                    read_view = (
-                        (self._last_snapshot or {})
-                        .get("private_files", {})
-                        .get(op.agent_id)
-                    )
+                # subprocess for physical cancel (P2-10). File tools
+                # read on demand at dispatch (committed state + own
+                # staged) — no frozen view is bound (SPEC §3.1 按需化).
                 context = ToolContext(
                     agent_id=op.agent_id,
                     tick=tick,
                     allowed_tools=self._tool_context_allowed(op.agent_id),
                     request_id=op.request_id,
-                    read_view=read_view,
                 )
                 tr = self._tool_registry.execute(
                     context=context,

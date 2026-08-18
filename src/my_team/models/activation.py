@@ -163,14 +163,21 @@ class AgentActivation(BaseModel):
 
 
 class ExecutionMode(str, Enum):
-    """Agent execution mode per SPEC §8.5."""
+    """Agent execution mode.
+
+    Sole mode (SPEC §3.1「每 tick 一轮」): each agent activates at most
+    once per tick with at most one Decide (one LLM call); multi-step
+    reasoning is a cross-tick ReAct continuation. The former
+    BOUNDED_MICRO_LOOP mode (legacy SPEC §8.5) was never wired and is
+    formally abolished: same-tick LLM→Tool loops break atomic-commit
+    and read-consistency semantics.
+    """
 
     DISCRETE_ASYNC = "discrete_async"
-    BOUNDED_MICRO_LOOP = "bounded_micro_loop"
 
 
 class ExecutionConfig(BaseModel):
-    """Configuration for agent execution limits, per SPEC §8.5."""
+    """Configuration for agent execution limits, per SPEC §3.1."""
 
     execution_mode: ExecutionMode = Field(
         default=ExecutionMode.DISCRETE_ASYNC,
@@ -193,12 +200,6 @@ class ExecutionConfig(BaseModel):
         ge=1,
         le=1024,
         description="Maximum total actions per activation",
-    )
-    max_micro_loop_rounds: int = Field(
-        default=3,
-        ge=1,
-        le=10,
-        description="Max LLM→Tool rounds in bounded_micro_loop mode",
     )
 
 

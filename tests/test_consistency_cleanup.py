@@ -110,10 +110,12 @@ class TestEventVisibility:
 
 
 class TestWorkspaceVersionBinding:
-    """Queued ops use submission-tick workspace view, not current tick."""
+    """Queued ops read on demand at dispatch — no snapshot view bound."""
 
-    def test_queued_op_binds_submission_view(self) -> None:
-        """Op submitted at tick 0 gets tick-0 snapshot in metadata."""
+    def test_queued_op_binds_no_submission_view(self) -> None:
+        """Op submitted at tick 0 binds no snapshot view: reads happen
+        on demand at dispatch (committed state + own staged), per
+        SPEC §3.1 冻结视图按需化."""
         sim = Simulation(agent_tree=_make_tree())
         from tests.tool_helpers import register_remote_tool
         register_remote_tool(sim, "remote_calc")
@@ -144,5 +146,5 @@ class TestWorkspaceVersionBinding:
         )
         ops = sim._pending_ops.get_by_agent("agent.root")
         assert len(ops) == 1
-        # Submission view should be bound
-        assert "_submission_view" in ops[0].metadata
+        # No view is bound at submission — reads are on-demand at dispatch
+        assert "_submission_view" not in ops[0].metadata
