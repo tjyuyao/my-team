@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.10 能力
 source: SPEC §14（可靠性）；用户 2026-08-18 需求
 priority: medium
@@ -53,3 +54,32 @@ priority: medium
       CrashReport
 - [ ] 窗口/阈值可配置；实现走配置默认值
 - [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过；kanban_lint 0 violation
+## 完成注记（2026-08-18）
+
+实现要点：
+- `reliability.py`：`CrashReport`（窗口统计/末次异常/epoch/tick）+ `CrashGuard`
+  （滑动窗口计数、`register_emergency_callback(provider|owner)`、`record_crash`
+  先通知后暂停、`rearm()` 供 resume 再武装、窗口阈值走构造参数）。
+- `SimulationConfig`：`crash_guard_window_ticks`（默认 10）/
+  `crash_guard_threshold`（默认 3）。
+- 挂点：① `_phase_commit` 内核回滚分支 `record_crash`；② `run_tick` 拆出
+  `_run_tick_impl` + 外层 try（未捕获异常计崩溃并 re-raise；已暂停时不计，
+  排除 paused 守卫异常）。
+- 暂停通道：`Simulation.pause(reason)` 记 `_pause_reason`；`resume()` 清
+  reason + guard rearm；tick 中途触发暂停时本轮不再 advance（10 阶段已完成，
+  暂停时钟不前进）——顺带修正 pause 与运行中 tick 的边界语义。
+- 持久化：`pause_reason` 入 `_collect_state`/load 恢复（crash 窗口本身不
+  持久化——重启后重新检测即可）。
+- 审计：新增 `SYSTEM_CRASH` / `CRASH_GUARD_TRIGGERED` 两类事件。
+- 测试（tests/test_crash_guard.py, 9 个）：连续 3 崩溃触发暂停+双回调+审计；
+  单次/零星业务失败（重复 task_id，局部 FAILED）不触发；未捕获异常计崩溃；
+  resume 后窗口滑动可再触发；窗口滑动淘汰旧崩溃；配置接线；未知 recipient
+  拒绝。
+- 文档：SPEC §14 增加崩溃防护不变量。
+
+## 验收核对
+- [x] 连续崩溃（窗口内达阈值）自动暂停，reason=crash_guard，需人工 resume
+- [x] 单次/零星业务失败（局部 FAILED）不触发防护
+- [x] Provider/Owner 回调接口可注册、可注入探针、触发时被调用并收到 CrashReport
+- [x] 窗口/阈值可配置；实现走配置默认值
+- [x] `uv run pytest -q` 801 passed；`ruff`/`mypy` 通过；kanban_lint 0 violation

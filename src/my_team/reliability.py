@@ -11,8 +11,9 @@ Per SPEC §14:
 from __future__ import annotations
 
 import copy
+from collections import deque
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
@@ -268,6 +269,186 @@ class TimeoutChecker:
             "expired_tasks": expired_tasks,
             "expired_locks": expired_locks,
         }
+
+
+class CrashReport(BaseModel):
+    """Emergency ops report delivered to Provider/Owner callbacks when
+    the crash guard triggers (T19)."""
+
+    tick: int = Field(description="Tick at which the guard triggered")
+    window_ticks: int = Field(description="Sliding window size (ticks)")
+    threshold: int = Field(description="Crash count threshold within the window")
+    crash_count: int = Field(description="Crash count inside the window at trigger")
+    crash_ticks: list[int] = Field(description="Ticks with crashes inside the window")
+    last_error: str = Field(default="", description="Most recent crash error")
+    state_epoch: int = Field(default=0, description="State epoch at trigger")
+
+
+class CrashGuard:
+    """Detects repeated kernel-level crashes and auto-pauses the system.
+
+    T19, user decision 2026-08-18: if the system itself keeps hitting
+    kernel-level rollbacks / uncaught tick exceptions, that is a
+    systemic defect — continuing to run would only spin, roll back, and
+    pollute the Journal. A sliding window counts crash events; crossing
+    the threshold: (1) fires Provider/Owner emergency callbacks FIRST,
+    (2) pauses the system (reason='crash_guard') AFTER. Pausing never
+    auto-resumes — a human must resume explicitly; resume() re-arms the
+    guard (the window keeps sliding).
+
+    Crash := a tick that rolled back at kernel level (unexpected apply
+    exception) or a run_tick that raised uncaught. Deterministic
+    business failures (local FAILED, T18 失败分级) are NOT crashes and
+    must never be recorded here.
+    """
+
+    def __init__(
+        self,
+        window_ticks: int = 10,
+        threshold: int = 3,
+        audit_log: AuditLog | None = None,
+        pause_action: Callable[[CrashReport], Any] | None = None,
+    ) -> None:
+        self._window_ticks = max(1, window_ticks)
+        self._threshold = max(1, threshold)
+        self._audit = audit_log if audit_log is not None else AuditLog()
+        self._pause_action = pause_action
+        self._crashes: deque[tuple[int, str]] = deque()  # (tick, error), ordered
+        self._callbacks: dict[str, list[Callable[[CrashReport], Any]]] = {
+            "provider": [],
+            "owner": [],
+        }
+        self._triggered = False
+        self._last_report: CrashReport | None = None
+
+    # -- configuration ------------------------------------------------------
+
+    @property
+    def window_ticks(self) -> int:
+        return self._window_ticks
+
+    @property
+    def threshold(self) -> int:
+        return self._threshold
+
+    @property
+    def triggered(self) -> bool:
+        """True once the guard has fired (until rearmed by resume)."""
+        return self._triggered
+
+    @property
+    def last_report(self) -> CrashReport | None:
+        return self._last_report
+
+    @property
+    def crash_ticks(self) -> list[int]:
+        """Ticks with crashes inside the current window."""
+        return [t for t, _ in self._crashes]
+
+    # -- callback registration ----------------------------------------------
+
+    def register_emergency_callback(
+        self,
+        recipient: str,
+        handler: Callable[[CrashReport], Any],
+    ) -> None:
+        """Register an emergency ops handler for 'provider' or 'owner'.
+
+        Default is empty (log-only); tests inject probes to assert calls.
+        """
+        if recipient not in self._callbacks:
+            raise ValueError(
+                f"unknown emergency recipient '{recipient}' "
+                "(expected 'provider' or 'owner')"
+            )
+        self._callbacks[recipient].append(handler)
+
+    # -- crash recording ----------------------------------------------------
+
+    def record_crash(
+        self,
+        tick: int,
+        error: str,
+        state_epoch: int = 0,
+    ) -> CrashReport | None:
+        """Record one kernel-level crash event.
+
+        Returns the CrashReport when this event crossed the threshold
+        and triggered the guard (else None). NEVER raise — the guard is
+        a safety net on the failure path.
+        """
+        try:
+            self._crashes.append((tick, error))
+            # Evict crashes outside the sliding window.
+            while (
+                self._crashes
+                and tick - self._crashes[0][0] >= self._window_ticks
+            ):
+                self._crashes.popleft()
+
+            self._audit.record(
+                AuditEventType.SYSTEM_CRASH,
+                tick=tick,
+                details={
+                    "window_ticks": self._window_ticks,
+                    "crash_ticks": self.crash_ticks,
+                    "state_epoch": state_epoch,
+                },
+                success=False,
+                error=error,
+            )
+
+            # Already triggered (awaiting human resume) — no re-fire.
+            if self._triggered:
+                return None
+            if len(self._crashes) < self._threshold:
+                return None
+
+            self._triggered = True
+            report = CrashReport(
+                tick=tick,
+                window_ticks=self._window_ticks,
+                threshold=self._threshold,
+                crash_count=len(self._crashes),
+                crash_ticks=self.crash_ticks,
+                last_error=error,
+                state_epoch=state_epoch,
+            )
+            self._last_report = report
+
+            # 决策 5: 先通知（Provider/Owner 回调），后暂停。
+            for recipient in ("provider", "owner"):
+                for handler in self._callbacks[recipient]:
+                    try:
+                        handler(report)
+                    except Exception:  # noqa: BLE001 — a broken callback
+                        pass   # must never break the guard
+
+            self._audit.record(
+                AuditEventType.CRASH_GUARD_TRIGGERED,
+                tick=tick,
+                details=report.model_dump(),
+                success=False,
+                error=(
+                    f"crash guard triggered: {len(self._crashes)} kernel "
+                    f"crashes within window of {self._window_ticks} ticks "
+                    f"(threshold {self._threshold})"
+                ),
+            )
+
+            if self._pause_action is not None:
+                try:
+                    self._pause_action(report)
+                except Exception:  # noqa: BLE001 — pause failure is logged,
+                    pass           # not escalated
+            return report
+        except Exception:  # noqa: BLE001 — the guard itself must not crash
+            return None
+
+    def rearm(self) -> None:
+        """Re-arm after an explicit human resume. The sliding window is
+        kept — old crashes age out naturally (窗口继续滑动)."""
+        self._triggered = False
 
 
 class DeterministicReplay:

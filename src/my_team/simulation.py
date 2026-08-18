@@ -103,7 +103,7 @@ from my_team.python_worker import (
     run_python_compute,
     run_python_transform,
 )
-from my_team.reliability import TimeoutChecker
+from my_team.reliability import CrashGuard, CrashReport, TimeoutChecker
 from my_team.sandbox_tools import run_sandboxed_process
 from my_team.scheduler import AgentScheduler, QueuedEvent
 from my_team.shared_kb import (
@@ -155,6 +155,11 @@ class SimulationConfig(BaseModel):
                     "(defense-in-depth; agents naturally wait while one is pending)",
     )
     private_storage_limit_mb: int = Field(default=512)
+    # Crash guard (T19): sliding window of kernel-level crashes; crossing
+    # the threshold auto-pauses the system (reason=crash_guard) after
+    # notifying Provider/Owner callbacks.
+    crash_guard_window_ticks: int = Field(default=10, ge=1)
+    crash_guard_threshold: int = Field(default=3, ge=1)
     execution: ExecutionConfig = Field(
         default_factory=ExecutionConfig,
         description="Agent execution configuration",
@@ -319,6 +324,17 @@ class Simulation:
 
         # Email outbox (reliable dispatch with idempotency)
         self._outbox = Outbox(max_retries=self._config.max_retries)
+
+        # T19 crash guard: repeated kernel-level crashes → emergency
+        # callbacks + auto-pause (reason=crash_guard, no auto-resume).
+        self._crash_guard = CrashGuard(
+            window_ticks=self._config.crash_guard_window_ticks,
+            threshold=self._config.crash_guard_threshold,
+            audit_log=self._audit_log,
+            pause_action=self._pause_for_crash_guard,
+        )
+        # Why the simulation is paused ("" = not paused / manual).
+        self._pause_reason: str = ""
 
         # Tick engine
         self._tick_engine = TickEngine(TickConfig(
@@ -1233,7 +1249,22 @@ class Simulation:
         """Check if the simulation is paused."""
         return self._tick_engine.state.value == "paused"
 
-    def pause(self) -> None:
+    @property
+    def pause_reason(self) -> str:
+        """Why the simulation is paused ('' = not paused / no reason)."""
+        return self._pause_reason
+
+    @property
+    def crash_guard(self) -> CrashGuard:
+        """T19 crash guard (crash detection + auto-pause + callbacks)."""
+        return self._crash_guard
+
+    def _pause_for_crash_guard(self, report: CrashReport) -> None:
+        """Pause action wired into CrashGuard (T19): auto-pause with
+        reason=crash_guard; never auto-resumes — a human must resume."""
+        self.pause(reason="crash_guard")
+
+    def pause(self, reason: str = "") -> None:
         """Pause the simulation — takes effect at the next commit boundary.
 
         Per SPEC §8.6: no new agent activations are scheduled, no state
@@ -1241,10 +1272,17 @@ class Simulation:
         continue; their results enter quarantine (they are collected by
         the Ingest phase only after resume).
         """
+        self._pause_reason = reason
         self._tick_engine.pause()
 
     def resume(self) -> None:
-        """Resume the simulation from a paused state."""
+        """Resume the simulation from a paused state.
+
+        Re-arms the crash guard (T19): after a human resume the sliding
+        window keeps aging; a renewed crash loop re-triggers it.
+        """
+        self._pause_reason = ""
+        self._crash_guard.rearm()
         self._tick_engine.resume()
 
     def cancel_operation(
@@ -1444,6 +1482,7 @@ class Simulation:
                 "state": self._tick_engine.state.value,
             },
             "state_epoch": self._state_epoch,
+            "pause_reason": self._pause_reason,
             "private_store_base_path": str(
                 self._private_store._config.base_path
             ),
@@ -1557,6 +1596,7 @@ class Simulation:
         te = state["tick_engine"]
         self._tick_engine._current_tick = te["current_tick"]
         self._tick_engine._state = SimulationState(te["state"])
+        self._pause_reason = state.get("pause_reason", "")
         self._state_epoch = state["state_epoch"]
 
         # Private store (files live on disk under the saved base path)
@@ -1707,6 +1747,24 @@ class Simulation:
     def run_tick(self) -> TickResult:
         """Execute one complete tick through the 10-phase kernel cycle.
 
+        Guarded by the T19 crash guard: an UNCAUGHT exception here is a
+        systemic defect — recorded as a crash event (repeated crashes →
+        emergency callbacks + auto-pause). The exception is re-raised so
+        callers see it; deterministic business failures (local FAILED)
+        never surface through this path.
+        """
+        try:
+            return self._run_tick_impl()
+        except Exception as e:  # noqa: BLE001 — crash guard hooks every crash
+            if not self.is_paused:
+                self._crash_guard.record_crash(
+                    self._tick_engine.current_tick, str(e), self._state_epoch,
+                )
+            raise
+
+    def _run_tick_impl(self) -> TickResult:
+        """Execute one complete tick through the 10-phase kernel cycle.
+
         Per SPEC §8.6: Tick is the kernel's state commit unit, NOT the
         agent's ReAct cycle. Each phase is finite and non-blocking.
 
@@ -1829,8 +1887,12 @@ class Simulation:
                     )
         self._scheduler.end_tick()
 
-        # Advance clock only (no phase execution in TickEngine)
-        self._tick_engine.advance(1)
+        # Advance the clock — unless this tick paused the system
+        # mid-flight (T19 crash guard, or a boundary pause): the 10
+        # phases already completed; a paused clock must not advance
+        # (the next tick will refuse to run until resume).
+        if not self.is_paused:
+            self._tick_engine.advance(1)
 
         # P0-3: construct real TickResult from the actual 10-phase cycle
         return TickResult(
@@ -3718,6 +3780,12 @@ class Simulation:
             # against: bump the state epoch so in-flight external
             # results from the old epoch are fenced as stale.
             self._bump_state_epoch()
+            # T19: a kernel-level rollback is a CRASH event for the
+            # crash guard (repeated crashes → emergency callbacks +
+            # auto-pause). Deterministic failures never reach here.
+            self._crash_guard.record_crash(
+                tick, str(e), self._state_epoch,
+            )
             self._audit_log.record(
                 AuditEventType.TRANSACTION_ROLLBACK,
                 tick=tick,

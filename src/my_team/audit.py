@@ -94,6 +94,10 @@ class AuditEventType(str, Enum):
     OP_CANCELLED = "op.cancelled"
     TOOL_TIMEOUT = "tool.timeout"
 
+    # Crash guard (T19)
+    SYSTEM_CRASH = "system.crash"
+    CRASH_GUARD_TRIGGERED = "crash_guard.triggered"
+
 
 class AuditEntry(BaseModel):
     """A single audit log entry."""
