@@ -100,6 +100,7 @@ class LLMAgent(BaseAgent):
         )
         tools = self._templates.render_tool_definitions(
             allowed_tools=self._tool_context.allowed_tools,
+            manifests={m.name: m for m in self._tool_registry.manifests()},
         )
 
         request = SubmitLLMRequest(

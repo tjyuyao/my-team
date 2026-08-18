@@ -19,7 +19,9 @@ import hashlib
 import json
 import os
 import signal
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -118,7 +120,11 @@ from my_team.shared_kb import (
 )
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import SimulationState, TickConfig, TickEngine, TickResult
-from my_team.tool_manifest import builtin_manifests
+from my_team.tool_manifest import (
+    OperationPolicy,
+    ToolManifest,
+    builtin_manifests,
+)
 from my_team.tool_protocol import ToolRequest, ToolResultContract, hash_payload
 from my_team.transaction import EffectStatus, EffectType, StagedEffect, TransactionBuffer
 
@@ -971,47 +977,26 @@ class Simulation:
 
         # Register handlers with their manifests (v0.7.0 — registration
         # validates each manifest against the declarative contract).
+        # v0.10 T7: builtins go through the SAME public register_tool
+        # path as plugins (validated + unique), so the kernel's own
+        # tools exercise the plugin API.
         manifests = builtin_manifests()
-        self._tool_registry.register_handler(
-            "read", handle_read, manifest=manifests["read"],
-        )
-        self._tool_registry.register_handler(
-            "ls", handle_ls, manifest=manifests["ls"],
-        )
-        self._tool_registry.register_handler(
-            "write", handle_write, manifest=manifests["write"],
-        )
-        self._tool_registry.register_handler(
-            "kb_write", handle_kb_write, manifest=manifests["kb_write"],
-        )
-        self._tool_registry.register_handler(
-            "send_email", handle_send_email, manifest=manifests["send_email"],
-        )
-        self._tool_registry.register_handler(
-            "delegate", handle_delegate, manifest=manifests["delegate"],
-        )
-        self._tool_registry.register_handler(
-            "apply_patch", handle_apply_patch,
-            manifest=manifests["apply_patch"],
-        )
-        self._tool_registry.register_handler(
-            "run_tests", handle_run_tests, manifest=manifests["run_tests"],
-        )
-        self._tool_registry.register_handler(
-            "git_diff", handle_git_diff, manifest=manifests["git_diff"],
-        )
-        self._tool_registry.register_handler(
-            "git_status", handle_git_status,
-            manifest=manifests["git_status"],
-        )
-        self._tool_registry.register_handler(
-            "python_compute", handle_python_compute,
-            manifest=manifests["python_compute"],
-        )
-        self._tool_registry.register_handler(
-            "python_transform", handle_python_transform,
-            manifest=manifests["python_transform"],
-        )
+        handlers = {
+            "read": handle_read,
+            "ls": handle_ls,
+            "write": handle_write,
+            "kb_write": handle_kb_write,
+            "send_email": handle_send_email,
+            "delegate": handle_delegate,
+            "apply_patch": handle_apply_patch,
+            "run_tests": handle_run_tests,
+            "git_diff": handle_git_diff,
+            "git_status": handle_git_status,
+            "python_compute": handle_python_compute,
+            "python_transform": handle_python_transform,
+        }
+        for name, handler in handlers.items():
+            self.register_tool(manifests[name], handler)
 
         # Executor registration (v0.8.0 P1-4/5): LOCAL_PROCESS tools are
         # dispatched to a TRUSTED_IN_PROCESS executor (host subprocess
@@ -1080,6 +1065,69 @@ class Simulation:
     @property
     def audit_log(self) -> AuditLog:
         return self._audit_log
+
+    # -- Tool plugin API (v0.10 T7) -----------------------------------------
+
+    def register_tool(
+        self,
+        manifest: ToolManifest,
+        handler: Any,
+        executor: ExecutorTier | None = None,
+        policy: OperationPolicy | None = None,
+    ) -> None:
+        """Public plugin API: register a tool WITHOUT touching kernel code.
+
+        - ``manifest``: ToolManifest — validated at registration
+          (raises ToolManifestError on invalid contract or duplicate name).
+        - ``handler``: callable ``(context: ToolContext, **args)``.
+          Plugin handlers access subsystems ONLY through the injected
+          ``context.handles`` mapping (file / KB / mail / task tree /
+          ...); they must never reach Simulation internals.
+        - ``executor``: ExecutorTier — register an executor binding when
+          the tool needs dispatch (LOCAL_PROCESS / SANDBOXED_PROCESS /
+          EXTERNAL_IRREVERSIBLE). PURE / READ_ONLY / STAGED_MUTATION
+          tools are kernel-executed and need none.
+        - ``policy``: OperationPolicy — if given, attached as the
+          deployment policy (deny-by-default: only allowlisted tools
+          are usable). If None, this tool is NOT implicitly allowlisted;
+          while a policy is active it stays denied until listed.
+        """
+        wrapped = self._wrap_plugin_handler(handler)
+        self._tool_registry.register_tool(manifest, wrapped)
+        if executor is not None:
+            self._executors.register(manifest.name, tier=executor)
+        if policy is not None:
+            self._tool_registry.set_policy(policy)
+
+    def _plugin_handles(self) -> MappingProxyType[str, Any]:
+        """Read-only subsystem handles injected into plugin contexts.
+
+        The injected set is the plugin's entire reachable surface: no
+        Simulation internals, no unlisted subsystem. Handles are a
+        MappingProxyType so plugins cannot smuggle in mutable aliases
+        from the kernel side.
+        """
+        return MappingProxyType({
+            "private_store": self._private_store,
+            "shared_kb": self._shared_kb,
+            "mail_system": self._mail_system,
+            "task_tree": self._task_tree,
+            "agent_tree": self._agent_tree,
+            "scheduler": self._scheduler,
+            "outbox": self._outbox,
+            "human_control": self._human_control,
+            "audit_log": self._audit_log,
+        })
+
+    def _wrap_plugin_handler(self, handler: Any) -> Any:
+        """Inject subsystem handles into the ToolContext of a handler."""
+        handles = self._plugin_handles()
+
+        def wrapped(context: ToolContext, **kwargs: Any) -> Any:
+            ctx = replace(context, handles=handles)
+            return handler(context=ctx, **kwargs)
+
+        return wrapped
 
     @property
     def current_tick(self) -> int:

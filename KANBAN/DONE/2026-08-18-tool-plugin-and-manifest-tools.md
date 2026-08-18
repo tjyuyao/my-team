@@ -1,12 +1,27 @@
 ---
 kind: task
+status: completed
 phase: v0.10 能力
 source: SPEC §6.2；OI-004 §3.1
 priority: medium
 ---
 
-# v0.10-7: 公共工具插件 API 与 manifest 自动生成工具定义
+# v0.10-7: 公共工具插件 API 与 manifest 自动生成工具定义（已完成）
 
+## 完成注记（2026-08-18）
+- `Simulation.register_tool(manifest, handler, executor=None, policy=None)`
+  公共 API（`src/my_team/simulation.py`）；handler 经 `context.handles`
+  注入 subsystem handles（private_store/shared_kb/mail_system/task_tree/
+  agent_tree/scheduler/outbox/human_control/audit_log），不触 Simulation
+  私有成员。
+- `ToolRegistry.register_tool`：注册即校验（manifest 合法性 + name 唯一）；
+  policy 默认拒绝（不隐式 allowlist）。
+- `manifest_to_tool_definition` 生成器（`src/my_team/tool_manifest.py`）：
+  ToolManifest 新增 `description` / `required_inputs` 字段；12 个内置工具
+  补全描述与 required；`PromptTemplates.render_tool_definitions` 改为纯生成
+  （手写表删除，`src/my_team/prompt_templates.py`、`llm_agent.py`）。
+- 内置工具迁移到统一 `register_tool` 路径。
+- 新增 `tests/test_tool_plugin.py`（17 tests）；全量 786 passed。
 
 ## 目标
 场景包可以在不修改内核代码的前提下注册新工具；LLM 工具定义

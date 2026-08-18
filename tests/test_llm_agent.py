@@ -17,6 +17,7 @@ from my_team.llm_agent import LLMAgent
 from my_team.llm_gateway import LLMGateway
 from my_team.models.llm import LLMProviderConfig
 from my_team.prompt_templates import PromptTemplates
+from my_team.tool_manifest import builtin_manifests
 
 
 @pytest.fixture
@@ -60,11 +61,20 @@ class TestPromptTemplates:
 
     def test_render_tool_definitions(self):
         templates = PromptTemplates()
-        tools = templates.render_tool_definitions(frozenset({"read", "write"}))
+        manifests = builtin_manifests()
+        tools = templates.render_tool_definitions(
+            frozenset({"read", "write"}), manifests=manifests,
+        )
         names = {t.name for t in tools}
         assert "read" in names
         assert "write" in names
         assert "delegate" not in names
+        # Generated from manifests, not a hand-written table: all
+        # builtin tools are renderable once allowlisted (v0.10 T7).
+        all_tools = templates.render_tool_definitions(
+            frozenset(manifests), manifests=manifests,
+        )
+        assert {t.name for t in all_tools} == set(manifests)
 
     def test_parse_llm_response_tool_calls(self):
         templates = PromptTemplates()

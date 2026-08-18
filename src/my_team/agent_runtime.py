@@ -33,6 +33,7 @@ from my_team.tool_manifest import (
     OperationPolicy,
     PolicyDecision,
     ToolManifest,
+    ToolManifestError,
 )
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,12 @@ class ToolContext:
     # op runs an in-process executor — the handler registers its live
     # subprocess under this id so cancel_operation can kill it.
     request_id: str = field(default="")
+    # Subsystem handles injected by the kernel for PLUGIN handlers
+    # (v0.10 T7): the ONLY way a plugin reaches subsystems (file / KB /
+    # mail / task tree / ...). Plugin handlers must never touch
+    # Simulation internals; handles is a read-only mapping provided at
+    # registration time.
+    handles: Mapping[str, Any] = field(default_factory=dict)
 
 
 class ToolPermissionError(Exception):
@@ -143,6 +150,29 @@ class ToolRegistry:
         Raises ToolManifestError if the manifest is invalid.
         """
         self._manifests[manifest.name] = manifest
+
+    def register_tool(
+        self,
+        manifest: ToolManifest,
+        handler: Any,
+    ) -> None:
+        """Public plugin API: register a manifest + handler as one unit.
+
+        Registration enforces (v0.10 T7):
+        - manifest validity (ToolManifestError on invalid contract)
+        - name uniqueness (ToolManifestError on duplicate registration)
+
+        Policy is NOT touched: deny-by-default applies — a tool is only
+        usable while the deployment policy (if any) allowlists it.
+        """
+        if (
+            manifest.name in self._tool_handlers
+            or manifest.name in self._manifests
+        ):
+            raise ToolManifestError(
+                f"Tool '{manifest.name}' is already registered"
+            )
+        self.register_handler(manifest.name, handler, manifest=manifest)
 
     def register_handler(
         self,

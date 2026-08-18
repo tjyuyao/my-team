@@ -7,10 +7,11 @@ into strict ActionPlan objects.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from my_team.agent_runtime import ActionPlan, AgentAction, AgentObservation
 from my_team.models.llm import ChatMessage, ToolDefinition
+from my_team.tool_manifest import ToolManifest, manifest_to_tool_definition
 
 
 class PromptTemplates:
@@ -63,83 +64,22 @@ class PromptTemplates:
     def render_tool_definitions(
         self,
         allowed_tools: frozenset[str],
+        manifests: Mapping[str, ToolManifest] | None = None,
     ) -> list[ToolDefinition]:
         """Render tool definitions for LLM function calling.
 
-        Only includes tools the agent is authorized to use.
+        Definitions are GENERATED from ToolManifests via
+        manifest_to_tool_definition (v0.10 T7) — no hand-written tool
+        table. Only tools the agent is authorized to use AND that have
+        a registered manifest are included. Unknown / manifest-less
+        tools yield no definition (they cannot be invoked safely).
         """
-        tool_schemas = {
-            "read": ToolDefinition(
-                name="read",
-                description="Read a file from your private workspace",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path relative to workspace",
-                        },
-                    },
-                    "required": ["path"],
-                },
-            ),
-            "write": ToolDefinition(
-                name="write",
-                description="Write a file to your private workspace",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path relative to workspace",
-                        },
-                        "content": {"type": "string", "description": "Content"},
-                    },
-                    "required": ["path", "content"],
-                },
-            ),
-            "ls": ToolDefinition(
-                name="ls",
-                description="List files in your private workspace",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Directory path"},
-                    },
-                },
-            ),
-            "delegate": ToolDefinition(
-                name="delegate",
-                description="Delegate a task to a direct child agent",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "recipient_agent_id": {"type": "string"},
-                        "task_title": {"type": "string"},
-                        "task_description": {"type": "string"},
-                    },
-                    "required": ["recipient_agent_id", "task_title"],
-                },
-            ),
-            "send_email": ToolDefinition(
-                name="send_email",
-                description="Send an email to another agent",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "to": {"type": "array", "items": {"type": "string"}},
-                        "subject": {"type": "string"},
-                        "body": {"type": "string"},
-                    },
-                    "required": ["to", "subject", "body"],
-                },
-            ),
-        }
-
+        if manifests is None:
+            manifests = {}
         return [
-            tool_schemas[name]
+            manifest_to_tool_definition(manifests[name])
             for name in sorted(allowed_tools)
-            if name in tool_schemas
+            if name in manifests
         ]
 
     def parse_llm_response(
