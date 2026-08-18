@@ -51,6 +51,16 @@ from my_team.executor_registry import (
 )
 from my_team.file_ops import FileOpsAuditEntry, FileOpsAuditLog
 from my_team.human_control import HumanControl
+from my_team.ingress import (
+    IngressBuffer,
+    IngressEvent,
+    restore_ingress_buffer,
+    snapshot_ingress_buffer,
+)
+from my_team.integration import (
+    Integration,
+    IntegrationRegistry,
+)
 from my_team.journal import (
     EffectSummary,
     IntentSummary,
@@ -240,6 +250,10 @@ class AgentRuntimeState:
         """Receive tool result and transition to PROCESSING for next activation."""
         self.continuation.receive_tool_result(result, tick)
 
+    def receive_external_result(self, result: dict[str, Any], tick: int) -> None:
+        """Receive an outbound op result (T9) → PROCESSING for next activation."""
+        self.continuation.receive_external_result(result, tick)
+
     def __repr__(self) -> str:
         return (
             f"AgentRuntimeState({self.agent_id}, state={self.state.value}, "
@@ -299,6 +313,10 @@ class Simulation:
         # Pending operation registry (v0.6.0 — async LLM/tool tracking)
         self._pending_ops = PendingOperationRegistry()
         self._executors = ExecutorRegistry()
+        # T9: Integration registry (external platform adapters) + provider
+        # rate-limiting, kept separate from executor admission (决策1b).
+        self._integrations = IntegrationRegistry()
+        self._ingress = IngressBuffer()
         # Live subprocesses of in-process-executed ops (v0.8.0 P2-10):
         # request_id → Popen. cancel_operation kills the process group
         # for a physical cancel; dispatch registers/unregisters via
@@ -1457,6 +1475,8 @@ class Simulation:
             "outbox": self._outbox,
             "human_control": self._human_control,
             "audit_log": self._audit_log,
+            "integrations": self._integrations,   # T9
+            "ingress": self._ingress,             # T9
         })
 
     def _wrap_plugin_handler(self, handler: Any) -> Any:
@@ -1482,6 +1502,48 @@ class Simulation:
         and discarded by Ingest (fencing).
         """
         return self._state_epoch
+
+    # -- T9: integrations & ingress -----------------------------------------
+
+    @property
+    def integrations(self) -> IntegrationRegistry:
+        """The kernel's integration (external platform adapter) registry."""
+        return self._integrations
+
+    @property
+    def ingress(self) -> IngressBuffer:
+        """The kernel's inbound platform-event buffer (SPEC §8.1)."""
+        return self._ingress
+
+    def register_integration(self, integration: Integration) -> None:
+        """Register an Integration (T9 一等公民).
+
+        Dynamic outbound-tool registration (决策2): each manifest in
+        ``integration.manifests`` is dispatched to the ExecutorRegistry as
+        an UNTRUSTED_OUT_OF_PROCESS executor (the external platform is the
+        out-of-process executor), so outbound tools go through the normal
+        executor admission + dispatch path.
+        """
+        self._integrations.register(integration)
+        for manifest in integration.manifests:
+            # EXTERNAL_IRREVERSIBLE maps to UNTRUSTED_OUT_OF_PROCESS tier;
+            # the platform (via its fake/scenario adapter) is the executor
+            # and completes the op out-of-band.
+            self._executors.register(
+                manifest.name,
+                tier=ExecutorTier.UNTRUSTED_OUT_OF_PROCESS,
+                executor_id=f"provider.{integration.name}.{manifest.name}",
+                max_concurrent=integration.rate_limits.max_calls,
+            )
+            self._tool_registry.register_manifest(manifest)
+
+    def inject_ingress(self, event: IngressEvent) -> bool:
+        """Accept an inbound platform event (deduplicates).
+
+        Test/harness entry point for receiving platform events between
+        ticks. Returns True if newly accepted (not a duplicate).
+        """
+        return self._ingress.receive(event)
 
     @property
     def last_tick_phases(self) -> list[str]:
@@ -1785,6 +1847,7 @@ class Simulation:
                 ],
                 "seen_requests": self._pending_ops.seen_requests_snapshot(),
             },
+            "ingress": snapshot_ingress_buffer(self._ingress),
             "kb": {
                 "resources": [
                     r.model_dump(mode="json")
@@ -1941,6 +2004,9 @@ class Simulation:
         self._pending_ops.restore_seen_requests(
             state["pending_ops"].get("seen_requests", {}),
         )
+
+        # T9: IngressBuffer — cross-restart dedup of (source, external_id)
+        self._ingress = restore_ingress_buffer(state.get("ingress"))
 
         # Shared KB (resources + versions + permissions)
         kb = state["kb"]
@@ -2253,7 +2319,10 @@ class Simulation:
                 if op.op_type == OpType.LLM_REQUEST:
                     runtime_state.receive_llm_result(error_result, tick)
                 elif op.op_type == OpType.TOOL_REQUEST:
-                    runtime_state.receive_tool_result(error_result, tick)
+                    if op.metadata.get("external_tool"):
+                        runtime_state.receive_external_result(error_result, tick)
+                    else:
+                        runtime_state.receive_tool_result(error_result, tick)
                 self._enqueue_result_wake(op, tick, result=error_result)
 
             self._pending_ops.remove(op.request_id)
@@ -2294,7 +2363,10 @@ class Simulation:
                 if op.op_type == OpType.LLM_REQUEST:
                     runtime_state.receive_llm_result(failed_result, tick)
                 elif op.op_type == OpType.TOOL_REQUEST:
-                    runtime_state.receive_tool_result(failed_result, tick)
+                    if op.metadata.get("external_tool"):
+                        runtime_state.receive_external_result(failed_result, tick)
+                    else:
+                        runtime_state.receive_tool_result(failed_result, tick)
                 self._enqueue_result_wake(op, tick, result=failed_result)
             self._pending_ops.remove(op.request_id)
 
@@ -2354,7 +2426,10 @@ class Simulation:
             if op.op_type == OpType.LLM_REQUEST:
                 runtime_state.receive_llm_result(op.result, tick)
             elif op.op_type == OpType.TOOL_REQUEST:
-                runtime_state.receive_tool_result(op.result, tick)
+                if op.metadata.get("external_tool"):
+                    runtime_state.receive_external_result(op.result, tick)
+                else:
+                    runtime_state.receive_tool_result(op.result, tick)
 
             self._enqueue_result_wake(op, tick, result=op.result)
 
@@ -2392,6 +2467,116 @@ class Simulation:
             # Remove the consumed operation so it is not re-delivered
             self._pending_ops.remove(op.request_id)
 
+        # Ingress: consume buffered inbound platform events (SPEC §8.1).
+        # Each event is either a fresh external event (wakes related
+        # agents via an EXTERNAL_RESULT advisory) or a receipt resolving
+        # to an outbound op (external_id -> op_id via the Integration's
+        # ReceiptAssertion, 决策4) which completes that op and wakes the
+        # owning agent through the normal wait/wake path (决策3).
+        self._consume_ingress(tick)
+
+    def _consume_ingress(self, tick: int) -> None:
+        """Drain the IngressBuffer and route events in the Ingest phase.
+
+        - An event whose source matches an Integration with a ReceiptAssertion
+          is attempted as a receipt: if op_id resolves and the op is still in
+          flight, it is completed with the payload as result → wake the agent.
+        - Otherwise it is a standalone external event: audit it and emit an
+          EXTERNAL_RESULT advisory wake targeted at any agent subscribed to
+          that event type (unknown → dropped; the mapping to a specific
+          ProcessInstance is v0.11 E1).
+        """
+        for ev in self._ingress.drain():
+            integration = self._integrations.get(ev.source)
+            if integration is not None and integration.receipt is not None:
+                ext_id = ev.payload.get(integration.receipt.external_id_field, "")
+                if isinstance(ext_id, str) and ext_id:
+                    op_id = self._integrations.resolve_op_id(
+                        integration.name, ext_id, ev.payload,
+                    )
+                    if op_id is not None:
+                        op = self._pending_ops.get_by_id(op_id)
+                        if op is not None and op.status in {
+                            OpStatus.SUBMITTED, OpStatus.PENDING,
+                        }:
+                            op.result = {
+                                "external_id": ext_id,
+                                **(ev.payload.get("result") or ev.payload),
+                            }
+                            self._pending_ops.complete(op_id, result=op.result)
+                            self._audit_log.record(
+                                AuditEventType.TOOL_RESULT,
+                                agent_id=op.agent_id,
+                                tick=tick,
+                                details={
+                                    "request_id": op.request_id,
+                                    "tool_name": ev.source,
+                                    "status": "external_completed",
+                                    "external_id": ext_id,
+                                },
+                            )
+                            # Completion is delivered next loop iteration;
+                            # also wake immediately via collect_completed
+                            # path below.
+                        continue
+            # Standalone external event — advisory wake to subscribed agents
+            self._audit_log.record(
+                AuditEventType.TOOL_RESULT,
+                agent_id="",
+                tick=tick,
+                details={
+                    "source": ev.source,
+                    "event_type": ev.event_type,
+                    "external_id": ev.external_id,
+                    "status": "ingressed",
+                },
+            )
+            # Route to agents subscribed to this integration's
+            # ingress_event_types via their WakeCondition.event_types.
+            for agent_id, runtime_state in self._agent_runtime_states.items():
+                cond = self._scheduler.get_wake_condition(agent_id)
+                if cond is None:
+                    continue
+                matching = [
+                    t for t in cond.event_types
+                    if t == WakeEventType.EXTERNAL_RESULT
+                ]
+                if not matching:
+                    continue
+                self._scheduler.enqueue_event(WakeupEvent(
+                    event_type=WakeEventType.EXTERNAL_RESULT,
+                    target_agent_id=agent_id,
+                    tick=tick,
+                    visible_at_tick=tick,  # Ingest→Schedule same tick
+                    source_agent_id=ev.source,
+                    task_id="",
+                    details={
+                        "external_id": ev.external_id,
+                        "event_type": ev.event_type,
+                        "source": ev.source,
+                        "result": ev.payload,
+                    },
+                ))
+
+        # Deliver any external ops that were just completed by receipts.
+        for op in self._pending_ops.collect_completed(tick):
+            rs2 = self._agent_runtime_states.get(op.agent_id)
+            if (
+                rs2 is not None
+                and rs2.continuation.pending_request_id == op.request_id
+            ):
+                if op.op_type == OpType.TOOL_REQUEST:
+                    if op.metadata.get("external_tool"):
+                        rs2.receive_external_result(op.result, tick)
+                        self._enqueue_result_wake(op, tick, result=op.result)
+                    else:
+                        rs2.receive_tool_result(op.result, tick)
+                        self._enqueue_result_wake(op, tick, result=op.result)
+                elif op.op_type == OpType.LLM_REQUEST:
+                    rs2.receive_llm_result(op.result, tick)
+                    self._enqueue_result_wake(op, tick, result=op.result)
+                self._pending_ops.remove(op.request_id)
+
     def _enqueue_result_wake(
         self,
         op: PendingOperation,
@@ -2414,6 +2599,24 @@ class Simulation:
                 },
             ))
         elif op.op_type == OpType.TOOL_REQUEST:
+            # T9: an external-owned outbound op wakes the agent with an
+            # EXTERNAL_RESULT event (决策3 — 纯事件). Non-external tools
+            # keep the existing TOOL_RESULT path.
+            if op.metadata.get("external_tool"):
+                self._scheduler.enqueue_event(WakeupEvent(
+                    event_type=WakeEventType.EXTERNAL_RESULT,
+                    target_agent_id=op.agent_id,
+                    tick=tick,
+                    visible_at_tick=tick,  # Ingest→Schedule same tick
+                    source_agent_id=op.metadata.get("provider", "external"),
+                    task_id=op.task_id,
+                    details={
+                        "request_id": op.request_id,
+                        "result_type": "external_result",
+                        "result": result,
+                    },
+                ))
+                return
             self._scheduler.enqueue_event(WakeupEvent(
                 event_type=WakeEventType.TOOL_RESULT,
                 target_agent_id=op.agent_id,
@@ -2929,10 +3132,30 @@ class Simulation:
                                 c.phase, c.pending_request_id,
                                 c.pending_request_type,
                             )
-                            c.advance_to_waiting_tool(op.request_id, tick)
-                            runtime_state.transition_to_waiting(
-                                AgentState.WAITING_FOR_TOOL, tick,
-                            )
+                            # T9: an outbound tool owned by an Integration
+                            # parks the agent in WAITING_FOR_EXTERNAL (决策3 —
+                            # 纯事件等待，不乐观回查) until the external op
+                            # completes or times out. Kernel-internal remote
+                            # tools keep the existing WAITING_FOR_TOOL path.
+                            if self._integrations.get_by_tool(
+                                intent.tool_name,
+                            ) is not None:
+                                op.metadata["external_tool"] = True
+                                op.metadata["provider"] = (
+                                    self._integrations
+                                    .provider_for_tool(intent.tool_name)
+                                )
+                                c.advance_to_waiting_external(
+                                    op.request_id, tick,
+                                )
+                                runtime_state.transition_to_waiting(
+                                    AgentState.WAITING_FOR_EXTERNAL, tick,
+                                )
+                            else:
+                                c.advance_to_waiting_tool(op.request_id, tick)
+                                runtime_state.transition_to_waiting(
+                                    AgentState.WAITING_FOR_TOOL, tick,
+                                )
                         # P0-2: track op for rollback
                         self._tick_pending_ops.append((agent_id, op))
                         results.append(ActionResult(
@@ -3519,6 +3742,39 @@ class Simulation:
                 ) == tool_name
             )
             manifest = self._tool_registry.get_manifest(tool_name)
+            # T9: provider-level admission for outbound (Integration-owned)
+            # tools — an independent gate from executor admission (决策1b).
+            # The executor gate governs kernel-side capacity; the provider
+            # gate governs the EXTERNAL platform's rate limit. An op is
+            # dispatched only when BOTH admit. Provider quota pressure →
+            # stay SUBMITTED (backpressure), same as capacity pressure.
+            external_tool = op.metadata.get("external_tool", False)
+            if external_tool:
+                padm, preason, pretry = self._integrations.admit(tool_name)
+                if not padm:
+                    if pretry:
+                        # rate-limit backpressure: stay SUBMITTED
+                        continue
+                    # unknown provider → permanent denial
+                    self._audit_log.record(
+                        AuditEventType.TOOL_DISPATCHED,
+                        agent_id=op.agent_id,
+                        tick=tick,
+                        details={
+                            "request_id": op.request_id,
+                            "tool_name": tool_name,
+                            "status": "provider_denied",
+                            "reason": preason,
+                        },
+                        success=False,
+                        error=preason,
+                    )
+                    registry.complete(
+                        op.request_id,
+                        result={"success": False, "error": preason,
+                                "error_code": "provider_denied"},
+                    )
+                    continue
             admitted, reason, retryable = self._executors.admit(
                 tool_name, manifest, in_flight,
             )
@@ -3605,6 +3861,11 @@ class Simulation:
                 # Out-of-process executor: claim the op; the executor
                 # completes it out-of-band (e.g. the test harness).
                 op.status = OpStatus.PENDING
+                # T9: charge the provider's rate-limit window on dispatch
+                # (guard so the same op is charged at most once).
+                if external_tool and not op.metadata.get("provider_charged"):
+                    self._integrations.record_dispatched(tool_name)
+                    op.metadata["provider_charged"] = True
                 self._audit_log.record(
                     AuditEventType.TOOL_DISPATCHED,
                     agent_id=op.agent_id,

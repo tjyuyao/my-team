@@ -25,6 +25,7 @@ class WakeEventType(str, Enum):
     DEADLINE_APPROACHING = "deadline_approaching"
     TIMER_EXPIRY = "timer_expiry"
     BOOTSTRAP = "bootstrap"
+    EXTERNAL_RESULT = "external_result"  # T9: outbound external op completed
 
 
 class WaitingState(str, Enum):
@@ -36,6 +37,7 @@ class WaitingState(str, Enum):
     WAITING_FOR_MAIL = "waiting_for_mail"
     WAITING_FOR_LOCK = "waiting_for_lock"
     WAITING_FOR_HUMAN = "waiting_for_human"
+    WAITING_FOR_EXTERNAL = "waiting_for_external"  # T9: awaiting outbound op
 
 
 class WakeCondition(BaseModel):

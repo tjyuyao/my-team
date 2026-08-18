@@ -35,6 +35,7 @@ class AgentState(str, Enum):
     WAITING_FOR_MAIL = "waiting_for_mail"
     WAITING_FOR_LOCK = "waiting_for_lock"
     WAITING_FOR_HUMAN = "waiting_for_human"
+    WAITING_FOR_EXTERNAL = "waiting_for_external"  # T9: awaiting outbound op
     BLOCKED = "blocked"
     PAUSED = "paused"
     FAILED = "failed"
@@ -50,6 +51,7 @@ WAITING_STATES = {
     AgentState.WAITING_FOR_MAIL,
     AgentState.WAITING_FOR_LOCK,
     AgentState.WAITING_FOR_HUMAN,
+    AgentState.WAITING_FOR_EXTERNAL,
 }
 
 # Top-level categories for grouping
@@ -110,6 +112,7 @@ TRANSITION_TABLE: dict[AgentState, set[AgentState]] = {
         AgentState.WAITING_FOR_MAIL,     # waiting for specific email
         AgentState.WAITING_FOR_LOCK,     # waiting for shared KB lock
         AgentState.WAITING_FOR_HUMAN,    # waiting for human decision
+        AgentState.WAITING_FOR_EXTERNAL, # waiting for outbound op
         AgentState.BLOCKED,              # cannot self-resolve
         AgentState.IDLE,                 # done, back to idle
         AgentState.FAILED,               # execution error
@@ -159,6 +162,12 @@ TRANSITION_TABLE: dict[AgentState, set[AgentState]] = {
         AgentState.FAILED,       # execution error
         AgentState.PAUSED,       # system pause
     },
+    AgentState.WAITING_FOR_EXTERNAL: {
+        AgentState.PROCESSING,   # outbound op result arrived
+        AgentState.BLOCKED,      # external timeout / unresolvable
+        AgentState.FAILED,       # execution error
+        AgentState.PAUSED,       # system pause
+    },
     AgentState.BLOCKED: {
         AgentState.IDLE,         # resolved by上级
         AgentState.PROCESSING,   # blockage resolved
@@ -176,6 +185,7 @@ TRANSITION_TABLE: dict[AgentState, set[AgentState]] = {
         AgentState.WAITING_FOR_MAIL,
         AgentState.WAITING_FOR_LOCK,
         AgentState.WAITING_FOR_HUMAN,
+        AgentState.WAITING_FOR_EXTERNAL,
         AgentState.BLOCKED,      # resume to blocked
         AgentState.FAILED,       # resume then discover failure
         AgentState.TERMINATED,   # resume then terminate
@@ -386,6 +396,10 @@ class AgentStateMachine:
     def wait_for_human(self, **kwargs: Any) -> AuditEntry:
         """processing → waiting_for_human"""
         return self.transition(AgentState.WAITING_FOR_HUMAN, **kwargs)
+
+    def wait_for_external(self, **kwargs: Any) -> AuditEntry:
+        """processing → waiting_for_external"""
+        return self.transition(AgentState.WAITING_FOR_EXTERNAL, **kwargs)
 
     def wake_up(self, **kwargs: Any) -> AuditEntry:
         """idle → ready (wake event matched)"""

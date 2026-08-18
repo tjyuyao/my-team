@@ -34,6 +34,7 @@ class ContinuationPhase(str, Enum):
     WAITING_FOR_CHILD = "waiting_for_child"  # Waiting for child task
     WAITING_FOR_MAIL = "waiting_for_mail"  # Waiting for email
     WAITING_FOR_HUMAN = "waiting_for_human"  # Waiting for human
+    WAITING_FOR_EXTERNAL = "waiting_for_external"  # T9: awaiting outbound op
     PROCESSING_RESULT = "processing_result"  # Processing a received result
     READY_TO_DECIDE = "ready_to_decide"  # Ready for next decision
     COMPLETED = "completed"            # Task completed
@@ -126,6 +127,14 @@ class AgentContinuation(BaseModel):
         self.total_tool_calls += 1
         self._log("waiting_for_tool", request_id=request_id, tick=tick)
 
+    def advance_to_waiting_external(self, request_id: str, tick: int) -> None:
+        """Transition to WAITING_FOR_EXTERNAL phase (T9 outbound op)."""
+        self.phase = ContinuationPhase.WAITING_FOR_EXTERNAL
+        self.pending_request_id = request_id
+        self.pending_request_type = "external"
+        self.total_tool_calls += 1
+        self._log("waiting_for_external", request_id=request_id, tick=tick)
+
     def receive_llm_result(self, result: dict[str, Any], tick: int) -> None:
         """Receive LLM result and transition to PROCESSING_RESULT."""
         self.phase = ContinuationPhase.PROCESSING_RESULT
@@ -157,6 +166,15 @@ class AgentContinuation(BaseModel):
         self.react_turn += 1
         self._log("tool_result_received", tick=tick)
 
+    def receive_external_result(self, result: dict[str, Any], tick: int) -> None:
+        """Receive an outbound op result (T9) → PROCESSING_RESULT."""
+        self.phase = ContinuationPhase.PROCESSING_RESULT
+        self.last_tool_result = result
+        self.pending_request_id = ""
+        self.pending_request_type = ""
+        self.react_turn += 1
+        self._log("external_result_received", tick=tick)
+
     def mark_completed(self, tick: int) -> None:
         """Mark continuation as completed."""
         self.phase = ContinuationPhase.COMPLETED
@@ -180,6 +198,7 @@ class AgentContinuation(BaseModel):
             ContinuationPhase.WAITING_FOR_CHILD,
             ContinuationPhase.WAITING_FOR_MAIL,
             ContinuationPhase.WAITING_FOR_HUMAN,
+            ContinuationPhase.WAITING_FOR_EXTERNAL,
         }
 
     @property

@@ -49,6 +49,7 @@ class OpType(str, Enum):
     EMAIL_DELIVERY = "email_delivery"
     HUMAN_DECISION = "human_decision"
     LOCK_ACQUISITION = "lock_acquisition"
+    EXTERNAL_REQUEST = "external_request"  # T9: outbound platform op
 
 
 class CancellationResult(BaseModel):
