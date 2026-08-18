@@ -88,7 +88,7 @@ tick 是世界节拍，ReAct 回合**跨 tick**：等待时 Agent 不占世界�
 | 组织树 | `AgentTree` | 谁是谁的上司/下属；静态 |
 | 任务树 | `TaskTree` | 任务状态机、归属、依赖 |
 | 私有空间 | `PrivateStore` | per-agent 真实目录；`resolve_path` 严防越界；读写按需（提交态 + 自己 staged，T17） |
-| 共享知识库 | `SharedKB` | 文档条目 + `PermissionEngine` + `LockManager` + 乐观版本；**注意：LockManager 生产路径零接入（kb 写必被拒），T20（kb-lock-integration）修复中** |
+| 共享知识库 | `SharedKB` | 文档条目 + `PermissionEngine` + `LockManager` + 乐观版本；锁已接入（T20）：kb 写工具自动持锁（Agent 无感）、commit 末释放、锁冲突可判定失败 |
 | 邮箱 | `Mailbox` / `Outbox` | 收件箱 / 可靠投递（STAGED→COMMITTED→DISPATCHED，幂等） |
 | 人类控制 | `HumanControl` | 人类暂停/发信/查状态（T12a 将扩展为 human worker） |
 
@@ -108,7 +108,7 @@ tick 是世界节拍，ReAct 回合**跨 tick**：等待时 Agent 不占世界�
 ## 六、诚实边界（读代码时注意）
 
 1. **`Simulation` 是上帝对象**：调度、观察、结算、回滚都住在它里面。
-   T17（快照按需化）已完成、T18（回滚逆操作契约）进行中，正在拆薄；
+   T17（快照按需化）与 T18（回滚逆操作契约）已完成，正在拆薄；
    但主体拆分（抽独立服务）短中期不做。
 2. **Journal 尚未完全兑现"单一事实源"**：`_phase_commit` 先改内存再记
    Journal；持久化走 `_collect_state` 全量序列化（`save_to`）。当前是

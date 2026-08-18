@@ -53,24 +53,19 @@ def _ok_validated(intent) -> ActionResult:
     )
 
 
-def _stage_failing_effect(sim: Simulation) -> None:
-    """Stage a TASK_CREATE with a duplicate id to force rollback."""
-    sim.task_tree.create(
-        task_id="task.rollback_trigger",
-        title="Existing",
-        creator_agent_id="agent.root",
-        owner_agent_id="agent.root",
-    )
+def _stage_kernel_boom(sim: Simulation) -> None:
+    """Stage a FILE_WRITE whose apply raises IsADirectoryError — a
+    genuine kernel failure (only trigger of full-tick rollback since
+    T18 失败分级)."""
+    from uuid import uuid4
+    boom = f"boom-{uuid4().hex[:8]}"
+    home = sim._private_store.agent_home("agent.root")
+    (home / boom).mkdir(parents=True, exist_ok=True)
     sim._transaction_buffer.stage(
-        EffectType.TASK_CREATE,
+        EffectType.FILE_WRITE,
         "agent.root",
-        "task.rollback_trigger",  # already exists → fails at commit
-        data={
-            "task_id": "task.rollback_trigger",
-            "title": "Duplicate",
-            "creator_agent_id": "agent.root",
-            "owner_agent_id": "agent.root",
-        },
+        boom,
+        data={"content": "boom"},
     )
 
 
@@ -98,7 +93,7 @@ class TestRollbackRemovesPendingOps:
         assert sim._pending_ops.count_in_flight("agent.root") == 1
 
         # Stage a failing effect to trigger rollback
-        _stage_failing_effect(sim)
+        _stage_kernel_boom(sim)
         sim._phase_commit(0, {})
 
         # After rollback: no in-flight ops from this tick
@@ -130,7 +125,7 @@ class TestRollbackRemovesPendingOps:
 
         assert sim._pending_ops.count_in_flight("agent.root") == 1
 
-        _stage_failing_effect(sim)
+        _stage_kernel_boom(sim)
         sim._phase_commit(0, {})
 
         assert sim._pending_ops.count_in_flight("agent.root") == 0
@@ -156,7 +151,7 @@ class TestRollbackRemovesPendingOps:
             validated=validated,
         )
 
-        _stage_failing_effect(sim)
+        _stage_kernel_boom(sim)
         sim._phase_commit(0, {})
 
         # After rollback, same request_id should NOT be seen
@@ -171,13 +166,10 @@ class TestConsecutiveRollbacks:
         sim = _make_sim()
         sim._config.max_concurrent_llm_requests = 4
 
-        # Pre-create the task once (used by _stage_failing_effect)
-        sim.task_tree.create(
-            task_id="task.rollback_trigger",
-            title="Existing",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.root",
-        )
+        # One persistent directory serves as the kernel-boom target for
+        # every tick (its write always raises IsADirectoryError).
+        home = sim._private_store.agent_home("agent.root")
+        (home / "boom").mkdir(parents=True, exist_ok=True)
 
         for tick in range(3):
             llm_intent = SubmitLLMRequest(
@@ -194,19 +186,19 @@ class TestConsecutiveRollbacks:
                 validated=validated,
             )
 
-            # Stage a failing TASK_CREATE (duplicate) to trigger rollback
+            # Stage a kernel-boom FILE_WRITE to trigger rollback
             sim._transaction_buffer.stage(
-                EffectType.TASK_CREATE,
+                EffectType.FILE_WRITE,
                 "agent.root",
-                "task.rollback_trigger",
-                data={
-                    "task_id": "task.rollback_trigger",
-                    "title": "Duplicate",
-                    "creator_agent_id": "agent.root",
-                    "owner_agent_id": "agent.root",
-                },
+                "boom",
+                data={"content": "boom"},
             )
             sim._phase_commit(tick, {})
+
+        # After 3 rollbacks: no accumulated ops
+        assert sim._pending_ops.count_in_flight("agent.root") == 0
+        rs = sim._agent_runtime_states["agent.root"]
+        assert rs.continuation.phase == ContinuationPhase.FRESH
 
         # After 3 rollbacks: no accumulated ops
         assert sim._pending_ops.count_in_flight("agent.root") == 0

@@ -31,15 +31,12 @@ from my_team.agent_runtime import (
     AgentAction,
     AgentObservation,
     AgentRuntime,
-    AgentSnapshot,
     ManagerAgent,
     RootAgent,
     SubAgent,
     ToolContext,
     ToolRegistry,
     ToolResult,
-    _proxy,
-    _proxy_nested,
 )
 from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
@@ -110,6 +107,7 @@ from my_team.reliability import TimeoutChecker
 from my_team.sandbox_tools import run_sandboxed_process
 from my_team.scheduler import AgentScheduler, QueuedEvent
 from my_team.shared_kb import (
+    LockConflictError,
     LockInfo,
     LockManager,
     PermissionEngine,
@@ -118,7 +116,7 @@ from my_team.shared_kb import (
     SharedKBResource,
     VersionInfo,
 )
-from my_team.task_tree import TaskTree
+from my_team.task_tree import InvalidTransitionError, TaskTree
 from my_team.tick_engine import SimulationState, TickConfig, TickEngine, TickResult
 from my_team.tool_manifest import (
     OperationPolicy,
@@ -126,7 +124,14 @@ from my_team.tool_manifest import (
     builtin_manifests,
 )
 from my_team.tool_protocol import ToolRequest, ToolResultContract, hash_payload
-from my_team.transaction import EffectStatus, EffectType, StagedEffect, TransactionBuffer
+from my_team.transaction import (
+    INVERT_CONTRACT,
+    EffectStatus,
+    EffectType,
+    InvertKind,
+    StagedEffect,
+    TransactionBuffer,
+)
 
 
 class SimulationConfig(BaseModel):
@@ -293,6 +298,11 @@ class Simulation:
         # Continuation snapshots BEFORE this-tick mutations, keyed by
         # agent_id → (phase, pending_request_id, pending_request_type).
         self._tick_continuations: dict[str, tuple[Any, str, str]] = {}
+        # Locks acquired by write handlers during THIS tick's Act phase
+        # (T20 写即自动锁): (resource, agent_id, lock_token). Released at
+        # commit end — the lock never survives the tick; the lease is a
+        # pure backstop.
+        self._tick_acquired_locks: list[tuple[str, str, str]] = []
 
         # State epoch — incremented on rollback/restore. External results
         # carry the epoch they were submitted under; results from an older
@@ -570,21 +580,71 @@ class Simulation:
             expected_version: int = 0,
             **_kw: Any,
         ) -> Any:
-            """Stage a shared KB write as a KB_WRITE effect.
+            """Stage a shared KB write as a KB_WRITE effect with a
+            kernel-bound write lock (T20 写即自动锁).
 
-            The actual write is applied in _phase_commit via
-            SharedKB._apply_committed() — after permission, lock, and
-            version validation.
+            The lock is INVISIBLE to the agent: the kernel acquires it
+            here (Act), carries the token on the effect, applies the
+            write at Commit (SharedKB._apply_committed — permission,
+            lock, version checks), and releases the lock at commit end.
+            LockConflictError (held by another agent, lease unexpired)
+            is a DETERMINISTIC failure — the agent retries next tick
+            (每 tick 一轮 semantics; lease backstop otherwise).
             """
+            resource = path
+            if not self._permission_engine.check(
+                context.agent_id, resource, "kb_write",
+            ):
+                return ToolResult(
+                    success=False,
+                    error=f"Permission denied: {resource}",
+                    error_code="permission_denied", retryable=False,
+                    agent_id=context.agent_id, tool_name="kb_write",
+                    tick=context.tick,
+                )
+            try:
+                lock = self._lock_manager.acquire(
+                    resource, context.agent_id,
+                    current_tick=context.tick,
+                )
+            except LockConflictError as exc:
+                self._audit_log.record(
+                    AuditEventType.LOCK_CONFLICT,
+                    agent_id=context.agent_id,
+                    tick=context.tick,
+                    details={"resource": resource, "owner": exc.owner},
+                    success=False, error=str(exc),
+                )
+                return ToolResult(
+                    success=False, error=str(exc),
+                    error_code="LOCK_CONFLICT", retryable=True,
+                    agent_id=context.agent_id, tool_name="kb_write",
+                    tick=context.tick,
+                )
+            # Lock held until this tick's commit ends (released in
+            # _phase_commit) — the lease is only a backstop.
+            self._tick_acquired_locks.append(
+                (resource, context.agent_id, lock.lock_token)
+            )
+            self._audit_log.record(
+                AuditEventType.LOCK_ACQUIRED,
+                agent_id=context.agent_id,
+                tick=context.tick,
+                details={
+                    "resource": resource,
+                    "lease_until_tick": lock.lease_until_tick,
+                },
+            )
             self._transaction_buffer.stage(
                 effect_type=EffectType.KB_WRITE,
                 agent_id=context.agent_id,
-                resource=path,
+                resource=resource,
                 data={
                     "content": content,
                     "expected_version": expected_version,
                 },
                 expected_version=expected_version,
+                lock_token=lock.lock_token,
             )
             return ToolResult(
                 success=True, data={"staged": True},
@@ -2310,6 +2370,7 @@ class Simulation:
         # P0-2: reset this-tick tracking for rollback
         self._tick_pending_ops.clear()
         self._tick_continuations.clear()
+        self._tick_acquired_locks.clear()
 
         for agent_id, intent_list in plans.items():
             # Determine which intents passed validation
@@ -3274,65 +3335,144 @@ class Simulation:
         committed = buffer.commit()
 
         # Step 4: Apply committed effects to subsystems.
-        # If any effect fails during application, previously applied
-        # effects in this tick are rolled back (in-memory reversal).
-        # Outbox entries staged+committed by THIS tick's EMAIL_SEND
-        # effects — discarded on rollback (the email never happened).
-        staged_outbox_ids: list[str] = []
+        # Failure semantics (T18 失败分级, user-approved 2026-08-18):
+        #   Deterministic (business) failures — permission/lock/version
+        #   in validate; patch-base conflict, duplicate task_id, missing
+        #   parent, malformed status at apply — FAIL the effect locally
+        #   (EffectStatus.FAILED); the rest of the tick still commits,
+        #   NO tick rollback. Group members fail with their group
+        #   (already-applied members are individually inverted).
+        #   Only an UNEXPECTED exception during apply (kernel failure)
+        #   triggers the full-tick rollback, which inverts every applied
+        #   effect via its declared invert operation (SPEC §3.3 回滚=逆
+        #   操作). No file_previous / kb_state_before dicts — each
+        #   effect carries its own prior value in invert_data.
         applied: list[StagedEffect] = []
-        created_task_ids: list[str] = []
-        # Absolute path → previous content (None = file did not exist)
-        file_previous: dict[str, str | None] = {}
-        # KB path → (resource or None, version info or None) before apply
-        kb_state_before: dict[str, tuple[Any, Any]] = {}
+        failing_effect: StagedEffect | None = None
 
-        def _rollback() -> None:
-            """Reverse applied effects in reverse order."""
-            # Remove created tasks (in reverse creation order)
-            for task_id in reversed(created_task_ids):
+        def _release_tick_locks() -> None:
+            """T20: release every lock acquired this tick (commit end /
+            rollback). Idempotent — already-released locks are skipped;
+            errors swallowed (the lease is only a backstop)."""
+            for resource, agent_id, token in list(self._tick_acquired_locks):
+                if not self._lock_manager.is_locked(resource):
+                    continue
                 try:
+                    self._lock_manager.release(resource, agent_id, token)
+                    self._audit_log.record(
+                        AuditEventType.LOCK_RELEASED,
+                        agent_id=agent_id,
+                        tick=tick,
+                        details={"resource": resource},
+                    )
+                except Exception:  # noqa: BLE001 — release must not fail
+                    pass
+
+        def _invert_one(effect: StagedEffect) -> None:
+            """Execute ONE committed effect's declared invert operation
+            (SPEC §3.3 / T18). Every EffectType's invert is declared in
+            INVERT_CONTRACT and implemented here. Never raises —
+            rollback must not fail."""
+            kind = INVERT_CONTRACT[effect.effect_type].kind
+            data = effect.invert_data
+            try:
+                if kind == InvertKind.UNREGISTER:  # EMAIL_SEND
+                    # Discard the staged (as-yet-undispatched) outbox
+                    # entry — the email never happened.
+                    entry_id = data.get("outbox_entry_id")
+                    if entry_id:
+                        self._outbox.rollback_committed(entry_id)
+                elif kind == InvertKind.REMOVE_CREATED:  # TASK_CREATE
+                    task_id = data.get("task_id", effect.resource)
                     self._task_tree._tasks.pop(task_id, None)
                     self._task_tree._parent_map.pop(task_id, None)
-                    for owner, ids in list(self._task_tree._owner_map.items()):
+                    self._task_tree._children_map.pop(task_id, None)
+                    for owner, ids in list(
+                        self._task_tree._owner_map.items()
+                    ):
                         if task_id in ids:
                             ids.remove(task_id)
-                except Exception:  # noqa: BLE001 — rollback must not fail
-                    pass
+                elif kind == InvertKind.RESTORE_PREVIOUS:
+                    if effect.effect_type in {
+                        EffectType.FILE_WRITE, EffectType.FILE_PATCH,
+                        EffectType.FILE_DELETE,
+                    }:
+                        target = Path(data["target_path"])
+                        prev = data.get("file_previous")
+                        if prev is None:
+                            target.unlink(missing_ok=True)
+                        else:
+                            target.write_text(prev, encoding="utf-8")
+                    elif effect.effect_type in {
+                        EffectType.KB_WRITE, EffectType.KB_CREATE,
+                        EffectType.KB_DELETE,
+                    }:
+                        res = data.get("kb_resource")
+                        ver = data.get("kb_version")
+                        if res is None:
+                            self._shared_kb._resources.pop(
+                                effect.resource, None,
+                            )
+                        else:
+                            self._shared_kb._resources[effect.resource] = res
+                        if ver is None:
+                            self._shared_kb.versions._versions.pop(
+                                effect.resource, None,
+                            )
+                        else:
+                            self._shared_kb.versions._versions[
+                                effect.resource
+                            ] = ver
+                    elif effect.effect_type == EffectType.TASK_UPDATE:
+                        prior = data.get("task_state_before")
+                        if prior is not None:
+                            self._task_tree._tasks[effect.resource] = prior
+                    # LOCK_RELEASE / STATE_TRANSITION: declared
+                    # RESTORE_PREVIOUS but never staged by the kernel —
+                    # nothing to apply.
+                elif kind == InvertKind.IRREVERSIBLE:
+                    # An in-flight external side effect cannot be undone.
+                    # Mark it frankly; the caller records it — never
+                    # swallowed silently.
+                    effect.error = (
+                        f"irreversible effect "
+                        f"{effect.effect_type.value} on '{effect.resource}' "
+                        "rolled back (compensation required)"
+                    )
+            except Exception:  # noqa: BLE001 — invert must not fail
+                pass
 
-            # Discard this tick's committed-but-undispatched outbox
-            # entries (rollback = the email never happened). Emails are
-            # only created by the post-commit dispatch, which never runs
-            # on a rolled-back tick.
-            for eid in staged_outbox_ids:
-                try:
-                    self._outbox.rollback_committed(eid)
-                except Exception:  # noqa: BLE001 — rollback must not fail
-                    pass
+        def _fail_locally(effect: StagedEffect, error: str) -> None:
+            """Deterministic (business) failure (T18): FAILED locally,
+            NO tick rollback. Group members (atomicity='group') fail
+            with their group — already-applied members are individually
+            inverted so the group's world-change is fully undone."""
+            effect.status = EffectStatus.FAILED
+            effect.error = error
+            if not (effect.group_id and effect.atomicity == "group"):
+                return
+            for member in committed:
+                if member is effect or member.group_id != effect.group_id:
+                    continue
+                if member.status == EffectStatus.COMMITTED:
+                    _invert_one(member)
+                member.status = EffectStatus.FAILED
+                member.error = (
+                    f"group member failed (group {effect.group_id})"
+                )
 
-            # Restore file contents (reverse write order)
-            for target_str, prev in file_previous.items():
-                try:
-                    target = Path(target_str)
-                    if prev is None:
-                        target.unlink(missing_ok=True)
-                    else:
-                        target.write_text(prev, encoding="utf-8")
-                except Exception:  # noqa: BLE001 — rollback must not fail
-                    pass
+        def _rollback() -> None:
+            """Single rollback entry (SPEC §3.3 / T18): release this
+            tick's locks, invert every applied effect in REVERSE
+            application order, undo this-tick non-effect registrations
+            (pending ops, continuations)."""
+            # Release this tick's locks first (T20) — a rolled-back
+            # tick must not leave a lock held.
+            _release_tick_locks()
 
-            # Restore shared KB resource + version metadata
-            for path, (res, ver) in kb_state_before.items():
-                try:
-                    if res is None:
-                        self._shared_kb._resources.pop(path, None)
-                    else:
-                        self._shared_kb._resources[path] = res
-                    if ver is None:
-                        self._shared_kb.versions._versions.pop(path, None)
-                    else:
-                        self._shared_kb.versions._versions[path] = ver
-                except Exception:  # noqa: BLE001 — rollback must not fail
-                    pass
+            # Invert applied effects in reverse application order.
+            for effect in reversed(applied):
+                _invert_one(effect)
 
             # P0-2: undo this-tick pending op registrations (and their
             # seen_requests entries — the request_id becomes reusable).
@@ -3361,13 +3501,20 @@ class Simulation:
 
         try:
             for effect in committed:
+                failing_effect = effect
+                if effect.status != EffectStatus.COMMITTED:
+                    # Already FAILED — e.g. a group member failed by a
+                    # deterministic failure of a sibling. Skip apply.
+                    continue
+
                 if effect.effect_type in {
                     EffectType.FILE_WRITE, EffectType.FILE_PATCH,
                 }:
-                    # Write to private workspace (previous content
-                    # captured so rollback can restore it). FILE_PATCH
-                    # carries the full NEW content computed at Act —
-                    # commit is a plain write.
+                    # Write to private workspace. invert_data captures
+                    # file_previous (old content / None) so the single
+                    # rollback entry can restore it. FILE_PATCH carries
+                    # the full NEW content computed at Act — commit is a
+                    # plain write.
                     agent_id = effect.agent_id
                     path = effect.resource
                     content = effect.data.get("content", "")
@@ -3382,8 +3529,7 @@ class Simulation:
                             agent_id, path,
                         )
                     except AccessDeniedError as exc:
-                        effect.status = EffectStatus.FAILED
-                        effect.error = f"path denied: {exc}"
+                        _fail_locally(effect, f"path denied: {exc}")
                         continue
 
                     # FILE_PATCH base re-check AT APPLY TIME: earlier
@@ -3404,21 +3550,21 @@ class Simulation:
                                 current.encode("utf-8"),
                             ).hexdigest()
                             if current_hash != base_hash:
-                                effect.status = EffectStatus.FAILED
-                                effect.error = (
+                                _fail_locally(
+                                    effect,
                                     f"patch base conflict: file '{path}' "
                                     "changed since Act (content hash "
-                                    "mismatch) — re-read and re-apply"
+                                    "mismatch) — re-read and re-apply",
                                 )
                                 continue
 
                     target.parent.mkdir(parents=True, exist_ok=True)
                     if target.exists():
-                        file_previous[str(target)] = target.read_text(
-                            encoding="utf-8",
-                        )
+                        previous = target.read_text(encoding="utf-8")
                     else:
-                        file_previous[str(target)] = None
+                        previous = None
+                    effect.invert_data["target_path"] = str(target)
+                    effect.invert_data["file_previous"] = previous
                     target.write_text(content, encoding="utf-8")
 
                 elif effect.effect_type == EffectType.EMAIL_SEND:
@@ -3438,52 +3584,98 @@ class Simulation:
                         effect_id=effect.effect_id,
                     )
                     self._outbox.commit(entry.entry_id)
-                    staged_outbox_ids.append(entry.entry_id)
+                    # invert_data: the entry to discard if this effect
+                    # ever needs inverting (rollback / group failure).
+                    effect.invert_data["outbox_entry_id"] = entry.entry_id
 
                 elif effect.effect_type == EffectType.TASK_CREATE:
                     data = effect.data
+                    task_id = data.get("task_id", effect.resource)
+                    # Deterministic pre-checks (T18 失败分级): duplicate
+                    # task_id and missing parent are BUSINESS failures —
+                    # FAILED locally, NO tick rollback.
+                    if self._task_tree.exists(task_id):
+                        _fail_locally(
+                            effect, f"Task '{task_id}' already exists",
+                        )
+                        continue
+                    parent_task_id = data.get("parent_task_id")
+                    if (
+                        parent_task_id is not None
+                        and not self._task_tree.exists(parent_task_id)
+                    ):
+                        _fail_locally(
+                            effect,
+                            f"Parent task '{parent_task_id}' not found",
+                        )
+                        continue
+                    effect.invert_data["task_id"] = task_id
                     self._task_tree.create(
-                        task_id=data.get("task_id", effect.resource),
+                        task_id=task_id,
                         title=data.get("title", ""),
                         description=data.get("description", ""),
-                        creator_agent_id=data.get("creator_agent_id", effect.agent_id),
+                        creator_agent_id=data.get(
+                            "creator_agent_id", effect.agent_id,
+                        ),
                         owner_agent_id=data.get("owner_agent_id", ""),
-                        parent_task_id=data.get("parent_task_id"),
+                        parent_task_id=parent_task_id,
                         priority=TaskPriority.NORMAL,
                         status=TaskStatus.ASSIGNED,
                         tick=tick,
                     )
-                    created_task_ids.append(data.get("task_id", effect.resource))
 
                 elif effect.effect_type == EffectType.TASK_UPDATE:
                     data = effect.data
                     task_id = effect.resource
-                    if self._task_tree.exists(task_id):
-                        new_status = TaskStatus(data.get("status", "in_progress"))
+                    # Deterministic guards (T18 失败分级): malformed
+                    # status strings and unreachable transitions are
+                    # BUSINESS failures, not kernel rollbacks.
+                    try:
+                        new_status = TaskStatus(
+                            data.get("status", "in_progress"),
+                        )
+                    except ValueError:
+                        _fail_locally(
+                            effect,
+                            f"Invalid task status: {data.get('status')!r}",
+                        )
+                        continue
+                    prior = self._task_tree.get(task_id)
+                    effect.invert_data["task_state_before"] = (
+                        prior.model_copy(deep=True)
+                    )
+                    try:
                         self._task_tree.update_status(
                             task_id, new_status, tick=tick, allow_walk=True,
                         )
-                        task = self._task_tree.get(task_id)
-                        if data.get("summary"):
-                            task.metadata["summary"] = data["summary"]
-                        if data.get("artifacts"):
-                            task.metadata["artifacts"] = data["artifacts"]
+                    except InvalidTransitionError as exc:
+                        _fail_locally(effect, str(exc))
+                        continue
+                    task = self._task_tree.get(task_id)
+                    if data.get("summary"):
+                        task.metadata["summary"] = data["summary"]
+                    if data.get("artifacts"):
+                        task.metadata["artifacts"] = data["artifacts"]
 
                 elif effect.effect_type in {
                     EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
                 }:
                     # Apply shared KB write via the internal commit path
-                    # (permission/lock/version already validated in Phase 6-8)
+                    # (permission/lock/version already validated in
+                    # Phase 6-8). invert_data captures prior resource +
+                    # version so the rollback entry can restore them.
                     data = effect.data
                     path = effect.resource
-                    # Snapshot prior KB state for rollback (content + version)
-                    if path not in kb_state_before:
-                        res = self._shared_kb._resources.get(path)
-                        ver = self._shared_kb.versions.get_info(path)
-                        kb_state_before[path] = (
-                            res.model_copy(deep=True) if res is not None else None,
-                            ver.model_copy(deep=True) if ver is not None else None,
-                        )
+                    # Snapshot prior KB state for this effect (content +
+                    # version) BEFORE mutating.
+                    res = self._shared_kb._resources.get(path)
+                    ver = self._shared_kb.versions.get_info(path)
+                    effect.invert_data["kb_resource"] = (
+                        res.model_copy(deep=True) if res is not None else None
+                    )
+                    effect.invert_data["kb_version"] = (
+                        ver.model_copy(deep=True) if ver is not None else None
+                    )
                     if effect.effect_type == EffectType.KB_WRITE:
                         self._shared_kb._apply_committed(
                             path=path,
@@ -3506,19 +3698,22 @@ class Simulation:
                         )
 
                 applied.append(effect)
-        except Exception as e:  # noqa: BLE001 — rollback on any apply failure
+        except Exception as e:  # noqa: BLE001 — kernel failure → full rollback
+            # Only an UNEXPECTED apply exception reaches here (T18):
+            # deterministic failures were handled above via
+            # _fail_locally (no raise). Full-tick rollback inverts every
+            # applied effect via its declared invert operation.
             self._last_tick_rolled_back = True
             self._last_tick_rollback_error = str(e)
             _rollback()
-            # Mark the failing effect as FAILED; any committed effects
-            # that were not applied (skipped by the exception) also FAIL
+            # Any committed effect not applied is marked ROLLED_BACK;
+            # the failing effect carries the error.
             for eff in committed:
                 if eff.status == EffectStatus.COMMITTED:
                     eff.status = EffectStatus.ROLLED_BACK
-            failing = committed[-1] if committed else None
-            if failing is not None and failing.status == EffectStatus.ROLLED_BACK:
-                failing.status = EffectStatus.FAILED
-                failing.error = str(e)
+            if failing_effect is not None:
+                failing_effect.status = EffectStatus.FAILED
+                failing_effect.error = str(e)
             # Rollback invalidates the state the tick was computed
             # against: bump the state epoch so in-flight external
             # results from the old epoch are fenced as stale.
@@ -3547,6 +3742,12 @@ class Simulation:
                         error=effect.error,
                     ))
             return []
+
+        # T20: every lock acquired this tick is released at commit end
+        # (写事务提交即释). Covers success, deterministic failures in
+        # validate/apply, and group failures — the lock never survives
+        # the tick; the lease is only a backstop.
+        _release_tick_locks()
 
         # Outbox dispatch runs unconditionally after a successful
         # commit: entries committed THIS tick plus leftover COMMITTED

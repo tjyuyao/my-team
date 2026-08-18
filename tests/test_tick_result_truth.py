@@ -57,25 +57,18 @@ class TestTickResultTruth:
         assert len(result.phases_completed) == 10
 
     def test_rolled_back_tick_returns_not_committed(self) -> None:
-        sim = Simulation(agent_tree=_make_tree())
-        # Stage a failing effect to trigger rollback
         from my_team.transaction import EffectType
-        sim.task_tree.create(
-            task_id="task.trigger",
-            title="T",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.root",
-        )
+        sim = Simulation(agent_tree=_make_tree())
+        # Stage a KERNEL failure (duplicate task ids are deterministic
+        # failures since T18 — only unexpected apply exceptions roll
+        # back): a FILE_WRITE whose target path is a directory.
+        from uuid import uuid4
+        boom = f"boom-{uuid4().hex[:8]}"
+        home = sim._private_store.agent_home("agent.root")
+        (home / boom).mkdir(parents=True, exist_ok=True)
         sim._transaction_buffer.stage(
-            EffectType.TASK_CREATE,
-            "agent.root",
-            "task.trigger",  # duplicate → fails
-            data={
-                "task_id": "task.trigger",
-                "title": "Dup",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.root",
-            },
+            EffectType.FILE_WRITE, "agent.root", boom,
+            data={"content": "boom"},
         )
         result = sim.run_tick()
         assert result.committed is False

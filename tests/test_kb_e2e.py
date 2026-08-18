@@ -102,11 +102,12 @@ class TestKBSingleWriteEntry:
         assert resource.version == 1
 
     def test_kb_write_via_tool_handler(self) -> None:
-        """kb_write tool handler stages the effect through the registry."""
+        """kb_write tool handler stages the effect through the registry.
+
+        T20 (写即自动锁): the handler itself acquires the write lock —
+        no manual acquisition needed; the write commits and the lock is
+        released at commit end."""
         sim = _make_kb_sim()
-        sim._lock_manager.acquire(
-            "project/research/report.md", "agent.root", current_tick=0,
-        )
 
         # Agent produces a kb_write action through the intent pipeline
         class KBAgent(BaseAgent):
@@ -136,6 +137,8 @@ class TestKBSingleWriteEntry:
         )
         assert resource.content == "via tool handler"
         assert resource.version == 1
+        # The write lock was auto-released at commit end — no stall
+        assert not sim._lock_manager.is_locked("project/research/report.md")
 
     def test_kb_write_rejected_without_lock(self) -> None:
         """KB write without a lock is rejected at commit validation."""
@@ -200,39 +203,42 @@ class TestKBSingleWriteEntry:
         assert effects[0].status == EffectStatus.FAILED
 
     def test_kb_write_version_increments(self) -> None:
-        """Sequential writes increment the version."""
+        """Sequential writes increment the version. Each commit releases
+        its write lock (T20 写事务提交即释), so the next write must
+        re-acquire."""
         sim = _make_kb_sim()
-        lock = sim._lock_manager.acquire(
-            "project/research/report.md", "agent.root", current_tick=0,
-        )
+        path = "project/research/report.md"
 
         # Write 1
+        lock = sim._lock_manager.acquire(path, "agent.root", current_tick=0)
         sim._transaction_buffer.stage(
             EffectType.KB_WRITE,
             "agent.root",
-            "project/research/report.md",
+            path,
             data={"content": "first", "expected_version": 0},
             expected_version=0,
             lock_token=lock.lock_token,
         )
         sim._phase_commit(0, {})
         sim._transaction_buffer.clear()
+        # Release before the next write (each commit releases only the
+        # locks the kernel auto-acquired via write handlers)
+        sim._lock_manager.release(path, "agent.root", lock.lock_token)
 
         # Write 2 — must use updated version
+        lock = sim._lock_manager.acquire(path, "agent.root", current_tick=1)
         sim._transaction_buffer.stage(
             EffectType.KB_WRITE,
             "agent.root",
-            "project/research/report.md",
+            path,
             data={"content": "second", "expected_version": 1},
             expected_version=1,
             lock_token=lock.lock_token,
         )
-        sim._phase_commit(0, {})
+        sim._phase_commit(1, {})
         sim._transaction_buffer.clear()
 
-        resource = sim._shared_kb.read(
-            "project/research/report.md", "agent.root",
-        )
+        resource = sim._shared_kb.read(path, "agent.root")
         assert resource.content == "second"
         assert resource.version == 2
 

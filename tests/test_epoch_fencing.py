@@ -116,23 +116,18 @@ class TestStaleResponseFencing:
         sim = Simulation(agent_tree=_make_tree())
         assert sim.state_epoch == 0
 
-        # Force a commit failure: duplicate task id
-        sim.task_tree.create(
-            task_id="task.dup",
-            title="Existing",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.root",
-        )
+        # Force a KERNEL failure (duplicate task ids are DETERMINISTIC
+        # failures since T18 — they no longer roll back): a FILE_WRITE
+        # whose target path is a directory raises IsADirectoryError.
+        from uuid import uuid4
+        boom = f"boom-{uuid4().hex[:8]}"
+        home = sim._private_store.agent_home("agent.root")
+        (home / boom).mkdir(parents=True, exist_ok=True)
         sim._transaction_buffer.stage(
-            EffectType.TASK_CREATE,
+            EffectType.FILE_WRITE,
             "agent.root",
-            "task.dup",  # already exists → create() raises
-            data={
-                "task_id": "task.dup",
-                "title": "Dup",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.root",
-            },
+            boom,
+            data={"content": "boom"},
         )
 
         sim._phase_commit(0, {})

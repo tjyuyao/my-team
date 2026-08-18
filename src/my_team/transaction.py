@@ -53,6 +53,95 @@ _EXTERNAL_EFFECT_TYPES: frozenset[EffectType] = frozenset({
 })
 
 
+class InvertKind(str, Enum):
+    """Kinds of invert (undo) operations per effect type (SPEC §3.3, T18).
+
+    Rollback never uses state snapshots: each effect records the minimal
+    prior value (invert_data) needed to reverse ITSELF (撤回语义):
+    - RESTORE_PREVIOUS: record the old value; rollback writes it back
+    - REMOVE_CREATED: record nothing needed; rollback deletes what was
+      created (the prior state is provably absent — e.g. create() raises
+      on an existing task)
+    - UNREGISTER: record the registration id; rollback discards it
+    - IRREVERSIBLE: cannot be undone (side effect already left the
+      system); rollback marks FAILED and audits, never silently swallows
+    """
+
+    RESTORE_PREVIOUS = "restore_previous"
+    REMOVE_CREATED = "remove_created"
+    UNREGISTER = "unregister"
+    IRREVERSIBLE = "irreversible"
+
+
+class InvertSpec(BaseModel):
+    """Declarative invert contract for one effect type (single source of
+    truth for WHAT an effect records and HOW it is restored)."""
+
+    kind: InvertKind
+    recorded: str = Field(
+        description="What invert_data records (prior-value semantics)",
+    )
+
+
+# Invert contract: EVERY effect type must declare how it is undone.
+# The execution of these inverts lives in Simulation._phase_commit's
+# single rollback entry; this table declares the contract (SPEC §3.3).
+INVERT_CONTRACT: dict[EffectType, InvertSpec] = {
+    EffectType.EMAIL_SEND: InvertSpec(
+        kind=InvertKind.UNREGISTER,
+        recorded="outbox entry_id → discard the staged entry (email never dispatched)",
+    ),
+    EffectType.EMAIL_DELIVER: InvertSpec(
+        kind=InvertKind.IRREVERSIBLE,
+        recorded="email already delivered → cannot undo; rollback marks FAILED + audits",
+    ),
+    EffectType.FILE_WRITE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="file_previous: old content, or None when the file did not exist",
+    ),
+    EffectType.FILE_PATCH: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="file_previous: old content, or None when the file did not exist",
+    ),
+    EffectType.FILE_DELETE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="file_previous: deleted content (None when not on disk)",
+    ),
+    EffectType.KB_CREATE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="kb_state_before: prior resource-or-None + version-info-or-None",
+    ),
+    EffectType.KB_WRITE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="kb_state_before: (resource, version-info) prior to this write",
+    ),
+    EffectType.KB_DELETE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="kb_state_before: resource prior to delete (delete marks exists=False)",
+    ),
+    EffectType.LOCK_ACQUIRE: InvertSpec(
+        kind=InvertKind.REMOVE_CREATED,
+        recorded="lock_token → release on rollback",
+    ),
+    EffectType.LOCK_RELEASE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="prior (owner, token, lease) → re-acquire on rollback",
+    ),
+    EffectType.TASK_CREATE: InvertSpec(
+        kind=InvertKind.REMOVE_CREATED,
+        recorded="no prior state (create raises on existing) → remove task + tree registrations",
+    ),
+    EffectType.TASK_UPDATE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="task_state_before: deep copy of the Task prior to mutation",
+    ),
+    EffectType.STATE_TRANSITION: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="state_before",
+    ),
+}
+
+
 class EffectStatus(str, Enum):
     """Status of a staged effect."""
 
@@ -96,6 +185,13 @@ class StagedEffect(BaseModel):
         description="'per_effect' = independent failure; 'group' = any "
                     "member failure fails the whole group (no tick "
                     "rollback — local effect-level failure)",
+    )
+    invert_data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Prior-value data captured at apply time (SPEC §3.3 "
+                    "回滚=逆操作): the minimal state this effect needs to "
+                    "undo itself. Written during apply, read by the "
+                    "single rollback entry.",
     )
 
 

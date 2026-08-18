@@ -176,8 +176,19 @@
 
 - 回滚对象：文件写入/补丁、KB 写入、Record 变更、任务变更、邮件
   outbox 条目、pending op 注册、审批请求、Agent 状态/Continuation。
-- 回滚后 state_epoch 递增；所有基于旧 epoch 的外部结果 fence 为
-  stale。
+- **回滚 = 逆操作，不用状态快照**（T18 定稿）：每个 EffectType 在
+  `INVERT_CONTRACT` 声明其逆操作（记录什么前值 + 如何恢复）；提交时
+  把前值写入 `StagedEffect.invert_data`（文件旧内容、KB 旧
+  resource+version、任务旧状态、outbox entry_id 等）。回滚是单一
+  入口，按应用顺序**逆序**逐 effect 执行逆操作：外部队列条目丢弃、
+  文件/KB/任务写回前值、created 删除。已生效的不可逆副作用（邮件
+  已交付、LLM 成本等）回滚时如实标 FAILED 并记审计，不静默吞掉。
+- **失败分级**（用户 2026-08-18 定稿）：只有系统级不变量破坏（apply
+  抛未预期异常）触发整回合回滚 + state_epoch 递增；可判定业务失败
+  （权限/锁/版本/patch 冲突、重复 task_id、无效状态、缺失父任务）
+  一律局部 FAILED，其余 effect 照常提交，不回滚世界。group 原子性
+  在局部失败时同样成立：成员整体 FAILED，已应用的成员逐个逆操作
+  撤销。
 - 外部副作用不可回滚：LLM 成本、平台 API 已生效写入。此类操作
   必须声明 `reversible=false` 并走补偿/对账路径。
 

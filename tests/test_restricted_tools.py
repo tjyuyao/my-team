@@ -221,7 +221,8 @@ class TestApplyPatchTool:
 
     def test_rollback_restores_original(self) -> None:
         """A FILE_PATCH applied at Commit is undone if a later effect
-        fails (same file_previous mechanism as FILE_WRITE)."""
+        kernel-fails (per-effect invert_data restores the prior
+        content)."""
         path = f"rb-{uuid4().hex[:8]}.md"
         sim = self._sim()
         target = sim._private_store.agent_home("agent.root") / path
@@ -231,19 +232,15 @@ class TestApplyPatchTool:
             _ctx(sim, "apply_patch"), "apply_patch",
             path=path, patch=self._patch(path),
         )
-        # Duplicate task id → apply failure → full rollback
-        sim.task_tree.create(
-            task_id="task.conflict", title="Existing",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
-        )
+        # Kernel failure after the patch: a FILE_WRITE whose target is a
+        # directory raises IsADirectoryError → full rollback (duplicate
+        # task ids are deterministic failures since T18).
+        boom = f"boom-{uuid4().hex[:8]}"
+        home = sim._private_store.agent_home("agent.root")
+        (home / boom).mkdir(parents=True, exist_ok=True)
         sim._transaction_buffer.stage(
-            EffectType.TASK_CREATE, "agent.root", "task.conflict",
-            data={
-                "task_id": "task.conflict",
-                "title": "Dup",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.root",
-            },
+            EffectType.FILE_WRITE, "agent.root", boom,
+            data={"content": "boom"},
         )
         sim._phase_commit(0, {"agent.root": []})
         # File restored to pre-tick content

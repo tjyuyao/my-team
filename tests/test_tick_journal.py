@@ -153,16 +153,16 @@ class TestTickJournalIntegration:
 
     def test_rollback_creates_aborted_record(self):
         sim = Simulation(agent_tree=_make_tree())
-        # Stage a failing effect to trigger rollback
-        sim.task_tree.create(
-            task_id="task.dup", title="T",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
-        )
+        # Stage a KERNEL failure (duplicate task ids are deterministic
+        # failures since T18 — only unexpected apply exceptions roll back):
+        # a FILE_WRITE whose target path is a directory.
+        from uuid import uuid4
+        boom = f"boom-{uuid4().hex[:8]}"
+        home = sim._private_store.agent_home("agent.root")
+        (home / boom).mkdir(parents=True, exist_ok=True)
         sim._transaction_buffer.stage(
-            EffectType.TASK_CREATE, "agent.root", "task.dup",
-            data={"task_id": "task.dup", "title": "Dup",
-                  "creator_agent_id": "agent.root",
-                  "owner_agent_id": "agent.root"},
+            EffectType.FILE_WRITE, "agent.root", boom,
+            data={"content": "boom"},
         )
         sim.run_tick()
         record = sim._journal.records[0]

@@ -131,14 +131,17 @@ class TestOnDemandReadView:
 
 
 class TestFileWriteRollback:
-    def _write_and_fail(self, sim: Simulation, path: str) -> None:
-        """Stage FILE_WRITE(path) then a failing TASK_CREATE (duplicate id)."""
-        sim.task_tree.create(
-            task_id="task.conflict",
-            title="Existing",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.root",
-        )
+    @staticmethod
+    def _write_then_boom(sim: Simulation, path: str) -> None:
+        """Stage FILE_WRITE(path) then a KERNEL-boom FILE_WRITE.
+
+        The boom write targets a path occupied by a DIRECTORY — apply
+        raises IsADirectoryError (unexpected exception), which is the
+        only trigger for a full-tick rollback (T18 失败分级)."""
+        from uuid import uuid4
+        boom = f"boom-{uuid4().hex[:8]}"
+        home = sim._private_store.agent_home("agent.root")
+        (home / boom).mkdir(parents=True, exist_ok=True)
         sim._transaction_buffer.stage(
             EffectType.FILE_WRITE,
             "agent.root",
@@ -146,20 +149,15 @@ class TestFileWriteRollback:
             data={"content": "new content"},
         )
         sim._transaction_buffer.stage(
-            EffectType.TASK_CREATE,
+            EffectType.FILE_WRITE,
             "agent.root",
-            "task.conflict",  # duplicate → raises
-            data={
-                "task_id": "task.conflict",
-                "title": "Dup",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.root",
-            },
+            boom,
+            data={"content": "boom"},
         )
 
     def test_file_write_rollback_restores_previous_content(self) -> None:
-        """If a later effect fails, an applied FILE_WRITE is undone and
-        the previous content is restored."""
+        """If a later effect kernel-fails, an applied FILE_WRITE is
+        undone and the previous content is restored."""
         from uuid import uuid4
         path = f"notes-{uuid4().hex[:8]}.md"
         sim = Simulation(agent_tree=_make_tree())
@@ -167,7 +165,7 @@ class TestFileWriteRollback:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("original", encoding="utf-8")
 
-        self._write_and_fail(sim, path)
+        self._write_then_boom(sim, path)
         sim._phase_commit(0, {})
 
         assert target.read_text(encoding="utf-8") == "original"
@@ -175,14 +173,15 @@ class TestFileWriteRollback:
         assert len(rollbacks) >= 1
 
     def test_file_write_rollback_removes_new_file(self) -> None:
-        """A file created (not overwritten) in the tick is deleted on rollback."""
+        """A file created (not overwritten) in the tick is deleted on
+        rollback."""
         from uuid import uuid4
         path = f"notes-{uuid4().hex[:8]}.md"
         sim = Simulation(agent_tree=_make_tree())
         target = sim._private_store.agent_home("agent.root") / path
         assert not target.exists()
 
-        self._write_and_fail(sim, path)
+        self._write_then_boom(sim, path)
         sim._phase_commit(0, {})
 
         assert not target.exists()

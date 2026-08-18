@@ -1,7 +1,8 @@
 ---
 kind: task
+status: completed
 phase: v0.10 能力
-source: SPEC §3.3（事务与回滚）、§8.2（补偿）
+source: SPEC §3.3（事务与回滚，已同步）、§8.2（补偿）
 priority: medium
 ---
 
@@ -64,3 +65,34 @@ KB 用 `kb_state_before`（记旧 resource+version）、邮件用 outbox 丢弃�
       现状一致（现有回滚测试全绿，或已按分级决策显式更新）
 - [ ] 外部 effect 的 invert 语义明确（丢弃/补偿/不可逆标记）
 - [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过；kanban_lint 0 violation
+## 完成注记（2026-08-18，与 T20 同批）
+
+实现要点：
+- `transaction.py`：`InvertKind`（RESTORE_PREVIOUS / REMOVE_CREATED /
+  UNREGISTER / IRREVERSIBLE）+ `InvertSpec` + `INVERT_CONTRACT`（覆盖全部
+  14 个 EffectType）+ `StagedEffect.invert_data`。
+- `_phase_commit`：apply 循环逐 effect 写 invert_data（文件前值 = 旧内容或
+  None、KB 前值 = resource+version 深拷贝、outbox entry_id、task 前值），
+  删除 `file_previous` / `kb_state_before` / `created_task_ids` 独立字典；
+  `_rollback` 收敛为单一入口：释放本 tick 锁 → `reversed(applied)` 逐 effect
+  `_invert_one` → pending op 反注册 → continuation 恢复。TASK_UPDATE 回滚
+  补齐（此前未实现，现记录 task_state_before 深拷贝）。
+- 失败分级显式化：TASK_CREATE 重复/父缺失、TASK_UPDATE 无效状态/不可达
+  转移改为 apply 预检 + `_fail_locally`（FAILED 局部，不回滚）；group 原子性
+  在 apply 期局部失败同样成立（成员整体 FAILED，已应用成员逐个逆操作撤销）；
+  FILE_PATCH stale / 路径拒绝也走 `_fail_locally`。仅 apply 抛未预期异常走
+  整回合回滚，`failing_effect` 精确标记失败 effect（替代 committed[-1]）。
+- 测试：回滚触发方式由"重复 task_id raise"改"目标路径为目录的 FILE_WRITE
+  （IsADirectoryError）= 真内核失败"；新增契约一致性 + group 局部失败 + 争锁/
+  重试/回滚释放锁用例（tests/test_invert_contract.py, 5 个）；全量 792 passed；
+  mypy clean；ruff 通过；kanban_lint 0 violation。
+- 文档：SPEC §3.3 写入 invert 契约 + 失败分级；SIMULATION_MAP 上帝对象注记
+  更新（T18 已完成）。
+
+## 验收核对
+- [x] 回滚为单一入口，逐 effect 执行逆操作；无 file_previous/kb_state_before 独立字典
+- [x] 每个已实现 EffectType 有 invert 定义（契约一致性测试 test_every_effect_type_has_invert_definition）
+- [x] 失败分级显式：可判定失败局部 FAILED（其余照常提交）；仅内核异常触发整回合回滚（两类路径均有测试）
+- [x] 行为不变：文件恢复、新文件删除、KB 恢复、任务删除、op 反注册、邮件丢弃语义一致（回滚用例全绿）
+- [x] 外部 effect 的 invert 语义明确（EMAIL 未派发丢弃；IRREVERSIBLE 标记 + 审计）
+- [x] `uv run pytest -q` 792 passed；`ruff`/`mypy` 通过；kanban_lint 0 violation

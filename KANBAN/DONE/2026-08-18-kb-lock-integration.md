@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.10 能力
 source: SPEC §6（SharedKB 锁）；用户 2026-08-18 审查发现
 priority: high
@@ -67,3 +68,33 @@ lock_token 防 stale-holder）——但 **src/ 生产代码零调用**：`acquir
 - [ ] 回滚释放本 tick 获取的锁
 - [ ] 锁获取/释放/冲突进入审计
 - [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过；kanban_lint 0 violation
+## 完成注记（2026-08-18，与 T18 同批）
+
+实现要点：
+- `handle_kb_write`（simulation.py）：permission 预检 → `acquire`（
+  `LockConflictError` → 可判定 `LOCK_CONFLICT` 失败，retryable=True + 审计）
+  → `lock_token` 随 StagedEffect 传递（补上 validate check_lock 的 token 来源）
+  → commit 末统一释放。
+- `_tick_acquired_locks` 簿记（`_phase_act` 清空，handler 追加）；新
+  `_release_tick_locks()` 幂等释放（已释放跳过，错误吞，lease 仅兜底），
+  成功路径 commit 末调用、回滚路径 `_rollback` 先行调用。
+- **释放时机 = commit 末（非逐 effect）**：同 tick 同 agent 多次写同一资源
+  不因中途释放而二次失败（`_apply_committed` 强锁检查贯穿）；锁绝不跨 tick
+  存活，租约只是兜底——决策 3"写事务提交即释"以防滞留为目标的精化。
+- 锁对 Agent 不可见（无显式锁工具）：acquire 只在写工具内核绑定；同一资源
+  同 tick 争锁由 Act 串行先到先得，后者可判定失败、下 tick 重试成功（lease
+  过期天然可抢）。
+- 审计：LOCK_ACQUIRED / LOCK_CONFLICT / LOCK_RELEASED 入 audit。
+- 测试：kb_write 真实 tick 流程成功（去掉测试手工预持锁）；同资源两 agent
+  争锁（先到先得 + LOCK_CONFLICT + 下 tick 重试成功 + 锁生命周期审计）；回滚
+  释放 handler 获取的锁；锁不跨 tick 滞留。全量 792 passed；mypy clean；
+  ruff 通过；kanban_lint 0 violation。
+- 文档：SIMULATION_MAP 共享知识库行锁缺陷标注更新为"已接入（T20）"。
+
+## 验收核对
+- [x] 真实 tick 流程中 kb_write 能成功提交（此前必被拒）
+- [x] 同一资源并发：先到先得；后者拿到可判定失败并在后续 tick 重试成功
+- [x] lease 过期后其他 Agent 可获取锁（无死锁、无滞留；锁 commit 末即释，lease 仅兜底）
+- [x] 回滚释放本 tick 获取的锁
+- [x] 锁获取/释放/冲突进入审计
+- [x] `uv run pytest -q` 792 passed；`ruff`/`mypy` 通过；kanban_lint 0 violation
