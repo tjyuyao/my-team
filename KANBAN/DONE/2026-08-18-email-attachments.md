@@ -65,8 +65,9 @@ priority: high
 
 - **ContextCompiler 附件清单端到端渲染断言未做**：本卡只验证 snapshot 含
   清单（`_build_snapshot` pending_emails + `_add_emails` 渲染），未验证
-  ContextCompiler 实际产出的上下文文本中含清单。补一个 e2e 断言（收件人
-  上下文渲染出清单）即可，小活，并入下一批。
+  ContextCompiler 实际产出的上下文文本中含清单。已立独立卡
+  `KANBAN/TODO/t8b-attachment-render-assertion`（v0.10-f1），本卡保持
+  DONE 不回退。
 
 ## 验收核对
 - [x] 邮件可携带 SharedKB 附件引用，收件人上下文可见附件清单
