@@ -429,8 +429,13 @@ IngressEvent:
 ```
 
 - Ingest 阶段消费；`(source, external_id)` 去重（持久化，跨重启）。
-- 可转换为 WakeEvent / TaskCreate / Record / Email。
 - 事件持久化成功后才向平台 ack（防丢）。
+- **映射前门**：事件进入内核后统一走 `IngressEvent → ProcessInstance`
+  （实例化流程），不再直接转 WakeEvent / TaskCreate / Record / Email；
+  该映射与流程实例化属 v0.11 编排层（E1 process-model，最小测试向量
+  首段）。v0.10 只交付方向中立的传输层：IngressBuffer / 去重 / ack /
+  Integration 注册 / 出站 pending op；Ingest 阶段可唤醒相关 Agent
+  （"有事件到达"），但不隐式决定下游对象（任务/记录/邮件由流程显式生成）。
 
 ### 8.2 EgressRequest
 
@@ -459,7 +464,9 @@ IngressEvent:
 - Task 携带 `deadline_tick` 与 `priority`；
 - Schedule 阶段按 `(priority, deadline_tick)` 排序就绪集；
 - 到期前 `N` tick 生成 `DEADLINE_APPROACHING` 事件；
-- 超时走结构化升级：通知 Manager → 转人工 → 关闭。
+- 超时走结构化 escalation（`on` = unresolved | condition_breached |
+  exception，`mode` = arbitrate | transfer | advise），不硬编码
+  「通知 Manager → 转人工 → 关闭」阶梯。
 
 ### 9.3 WorkerPool
 
@@ -480,13 +487,25 @@ IngressEvent:
   事务路径；
 - 人类任务有 deadline 与升级策略（超时提醒 Manager）。
 
-### 10.2 ApprovalGate
+### 10.2 ApprovalGate（统一为 HumanTask）
 
-- `ToolManifest.approval_policy` 或 OperationPolicy 标记需要审批；
-- Act/Validate 生成 `HUMAN_APPROVAL` pending op（而非直接拒绝）；
-- 审批 UI：批准 / 拒绝 / 附言；
-- 批准后由 Publish dispatch 继续执行；拒绝则 op 取消并唤醒 Agent；
-- 审批有 deadline、升级与审计（谁在什么上下文批的）。
+- 审批不再用独立的 `HUMAN_APPROVAL` pending op 建模，而是统一为
+  **HumanTask**（`kind = work | approval | decision | consultation`，
+  见 E1 process-model），吸收 ApprovalGate / Human Worker / HumanMessage
+  的重叠语义。
+- 审批触发 = 编排层 gate（引用 `authority_ref`）+ **三查分离**：
+  1. Capability：调用者能否调用（OperationPolicy，属闭包
+     deny-by-default）；
+  2. Authority：调用者是否有权作出该决策（Authority 裁决）；
+  3. Gate：流程是否完成必要审批。
+  三者互不替代——`content.final` 不豁免 OperationPolicy 的 approval。
+- 人类参与身份须经认证（Identity 闭包，见 §12.1：`from/to` 身份字段
+  由内核注入，Agent 不可自指、不可伪造）。
+- 审批有 deadline；未决/超时走结构化 escalation（`on`/`mode`/`target`）。
+- 审计记录谁在什么上下文批的。
+- **版本切分**：v0.10 交付 Human Worker（kind=human Agent，§10.1）与
+  CredentialStore（§7.5）；ApprovalGate 的 HumanTask 模型与三查分离
+  属 v0.11（E1/E2）。
 
 ---
 
