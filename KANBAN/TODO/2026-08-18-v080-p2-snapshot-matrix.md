@@ -19,6 +19,12 @@ priority: medium
 ## 产出
 - Snapshot 矩阵测试文件。
 
+## 难点 / 风险注记（2026-08-19，分析成果固化）
+- **量大不硬**：9 类状态面 × 3 性质（Freeze 可见性 / Commit 可回滚性 /
+  持久化）的逐行覆盖，工作量在测试基础设施完备性，不在设计。
+- **时序要点**：放 v0.10 最后——T11/T12a 会动状态面（scheduler claims、
+  human queue），矩阵应覆盖最终状态，提前做必返工。
+
 ## 验收标准
 - [ ] Snapshot 矩阵全部行通过（测试可见）
 - [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过

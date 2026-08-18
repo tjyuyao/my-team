@@ -30,6 +30,22 @@ priority: high
 - Calendar Scheduler 与 WorkerPool 路由。
 - SLA 排序与升级事件。
 
+## 难点 / 风险注记（2026-08-19，分析成果固化）
+- **回滚交互（最深）**：`ScheduleRule.next_run_tick` 推进必须在 commit 时
+  生效，否则 tick 回滚后 TIMER_EXPIRY 丢失或重触发；规则推进是新增持久
+  状态，须纳入 T18 逆操作契约（invert）语义（scheduler 已有
+  `requeue_events` 回滚恢复，但"规则推进"是新增面）。
+- **就绪集排序**：现状 `AgentScheduler.compute_ready_set` 按 `agent_id`
+  确定性排序，无 priority/deadline 概念（Task 模型已有两字段，数据层
+  现成）；需与「每 tick 一轮唯一执行」并发约束交互设计。
+- **WorkerPool 接单竞态**：`DelegateIntent.recipient` 从 `agent_id` 扩为
+  `agent_id | pool_id`；池内谁接单、同一任务防双接，需原子语义；路由
+  结果写 Journal。
+- **cron vs tick**：cron 表达式与模拟时间的映射是决策点（interval_ticks
+  简单，cron 需定对齐规则）。
+- **先决设计问题（开工时定）**：① cron 与模拟时间映射；② 就绪集排序与
+  每 tick 一轮的交互。
+
 ## 验收标准
 - [ ] interval 规则每 N tick 生成一次事件/任务
 - [ ] 就绪集按 priority/deadline 排序（测试可断言顺序）

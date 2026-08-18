@@ -20,6 +20,14 @@ priority: medium
 ## 产出
 - CredentialStore 引用接口（resolve）+ 至少一种后端（env/加密文件）。
 
+## 难点 / 风险注记（2026-08-19，分析成果固化）
+- **范围封闭，中等偏易**：本质是补 T9 的 `credential_ref` 落地——
+  Integration 字段已定义（integration.py），store 未实现。
+- **断言可枚举**：密钥不出 Journal/审计/DB/prompt 的可观测面有限
+  （_collect_state / journal / audit / ContextCompiler 均可枚举），测试断言
+  好写；凭证解析在工具执行层（out-of-process executor / plugin 侧），内核
+  本来看不到明文。
+
 ## 验收标准
 - [ ] `credential_ref` 可解析为可用凭证；无引用时明确报错
 - [ ] 密钥明文不出现在 Journal/审计/DB/prompt 中（测试断言）

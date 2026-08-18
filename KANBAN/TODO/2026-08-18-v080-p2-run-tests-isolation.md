@@ -20,6 +20,18 @@ priority: medium
 ## 产出
 - SANDBOXED_PROCESS 执行等级与 run_tests 升级。
 
+## 难点 / 风险注记（2026-08-19，分析成果固化）
+- **现状事实**：`ExecutionClass.SANDBOXED_PROCESS` 枚举已存在
+  （tool_manifest.py），但 run_tests 实际声明 `LOCAL_PROCESS`；
+  `sandbox_tools.run_sandboxed_process` 只有 timeout + 输出截断 + 进程组
+  杀，只读挂载 / 网络 deny / 资源限制 / 环境净化均未提供（OI-001 可落地
+  部分）。
+- **平台相关（按决策 4 处理）**：内核定义 ExecutionClass 规范与约束声明，
+  隔离后端可插拔；真实隔离后端仍需实现（mount/rlimit/cgroups 等）。
+- **验证难**：测试需证明网络真被拒、环境真净化（非自证）。
+- **并入「工具执行环境对齐」**：T17 by-product 的 run_tests/git cwd 宿主
+  目录问题并入本卡（同一段代码，分开做必冲突）。
+
 ## 验收标准
 - [ ] run_tests 在只读挂载 + 网络拒绝 + 资源限制下执行
 - [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过

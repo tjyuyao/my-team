@@ -61,6 +61,13 @@ priority: high
   outbox 模型往返、真实 tick intent 带附件。全量 850 passed（842+8）；
   mypy clean；ruff 通过；kanban_lint 0。
 
+## 遗留注记（2026-08-19，分析成果固化）
+
+- **ContextCompiler 附件清单端到端渲染断言未做**：本卡只验证 snapshot 含
+  清单（`_build_snapshot` pending_emails + `_add_emails` 渲染），未验证
+  ContextCompiler 实际产出的上下文文本中含清单。补一个 e2e 断言（收件人
+  上下文渲染出清单）即可，小活，并入下一批。
+
 ## 验收核对
 - [x] 邮件可携带 SharedKB 附件引用，收件人上下文可见附件清单
 - [x] 收件人可读取被授权附件（kb_read 经 PermissionEngine）；越权附件不可读
