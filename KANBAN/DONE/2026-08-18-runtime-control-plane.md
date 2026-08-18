@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 基础
+source: SPEC §2、§13；OI-004 §1.3
+priority: high
+---
+
 # v0.9-5: SimulationRuntime、Control Plane 与 LLM dispatcher
 
-**Phase:** v0.9 基础
-**Source:** SPEC §2、§13；OI-004 §1.3
-**Priority:** high
 **Completed:** 2026-08-18
 **Tests:** 751 passed（+57），ruff clean，mypy clean（42 source files）
 

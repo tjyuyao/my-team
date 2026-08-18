@@ -1,9 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: 审阅 P0-1、§四.3/§四.4；OPEN_ISSUE 编排层
+priority: high
+---
+
 # 编排层 Process Model：ProcessDef / ProcessInstance / Gate schema
 
-**Kind:** task
-**Phase:** v0.11 扩展表面
-**Source:** 审阅 P0-1、§四.3/§四.4；OPEN_ISSUE 编排层
-**Priority:** high
 
 ## 目标
 定义扩展表面中心对象 ProcessDef 的可执行语义。当前代码只有

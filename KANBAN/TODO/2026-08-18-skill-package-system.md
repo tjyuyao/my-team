@@ -1,8 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展协议
+source: SPEC §11.4；用户定位补充（个体户/一人公司）
+priority: high
+---
+
 # v0.11-17: Skill Package 系统（面向非专业用户的能力封装）
 
-**Phase:** v0.11 扩展协议
-**Source:** SPEC §11.4；用户定位补充（个体户/一人公司）
-**Priority:** high
 
 ## 目标
 非软件开发用户能够安装/卸载 Skill 包（SKILL.md + prompts + tools +

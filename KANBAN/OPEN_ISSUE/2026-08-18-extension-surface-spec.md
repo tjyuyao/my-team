@@ -1,8 +1,12 @@
+---
+kind: issue
+status: open
+source: SPEC §6 ToolPlugin / §11 场景包 / §12 安全 / §16 演进
+---
+
 # 扩展表面规范（Extension Surface）— 设计议题
 
 **Opened:** 2026-08-18
-**Kind:** issue（设计审查，未确认为任务）
-**Source:** SPEC §6 ToolPlugin / §11 场景包 / §12 安全 / §16 演进
 **Status:** OPEN — 持续讨论中
 
 ## 设计纪律：场景 = 测试向量
@@ -318,4 +322,3 @@ IngressEvent → ProcessInstance → assignment → human approval
 
 **下一步**：已并入 `KANBAN/PLAN/2026-08-18-v0.11.0-plan.md`
 （P0→P1→P2 路线图，v0.11 核心交付）与 7 个 P0 TODO（见 `KANBAN/TODO/2026-08-18-*.md`）。
-

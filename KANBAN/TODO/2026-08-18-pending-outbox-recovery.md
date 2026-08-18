@@ -1,9 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: 审阅 P0-2、P0-3、P0-7；SPEC §3.2/§8.2
+priority: high
+---
+
 # Pending op 跨 tick 生命周期 + Commit→Publish→Recovery + unknown/对账
 
-**Kind:** task
-**Phase:** v0.11 扩展表面
-**Source:** 审阅 P0-2、P0-3、P0-7；SPEC §3.2/§8.2
-**Priority:** high
 
 ## 目标
 闭合三处可靠性缺口：

@@ -1,9 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: 审阅 P0-5、§三；OPEN_ISSUE Authority 模型
+priority: high
+---
+
 # Authority 裁决算法：DecisionClaim + context 匹配 + composition + escalation
 
-**Kind:** task
-**Phase:** v0.11 扩展表面
-**Source:** 审阅 P0-5、§三；OPEN_ISSUE Authority 模型
-**Priority:** high
 
 ## 目标
 把 Authority 从"配置文件"变成"可执行裁决算法"。当前代码只有

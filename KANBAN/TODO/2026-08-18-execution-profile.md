@@ -1,9 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: 审阅 P0-4、§五；OPEN_ISSUE 发布层
+priority: high
+---
+
 # ExecutionProfile：不可变运行时语义版本绑定 + effective_tick 发布
 
-**Kind:** task
-**Phase:** v0.11 扩展表面
-**Source:** 审阅 P0-4、§五；OPEN_ISSUE 发布层
-**Priority:** high
 
 ## 目标
 ProcessInstance 依赖的不止 ProcessDef，还有 Role/Authority/ToolManifest/

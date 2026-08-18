@@ -1,9 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: 审阅 P0-6、§七；OPEN_ISSUE 能力层；SPEC §11
+priority: high
+---
+
 # 配置包 / 能力包 / 数据包信任边界 + 签名 / 命名空间
 
-**Kind:** task
-**Phase:** v0.11 扩展表面
-**Source:** 审阅 P0-6、§七；OPEN_ISSUE 能力层；SPEC §11
-**Priority:** high
 
 ## 目标
 "热插拔加载配置包"与"热插拔加载可执行代码"是两种完全不同的安全问题。

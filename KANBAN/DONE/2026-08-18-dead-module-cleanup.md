@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 收口
+source: SPEC §2、§12；OI-003 P1-5
+priority: medium
+---
+
 # v0.9-14: 僵尸组件清理与接线（IdentityEnforcer/Executors/FileOps/DelegationProtocol/HumanControl）
 
-**Phase:** v0.9 收口
-**Source:** SPEC §2、§12；OI-003 P1-5
-**Priority:** medium
 **Completed:** 2026-08-18
 **Tests:** 669 passed（-99 dead module tests），ruff clean，mypy clean（37 source files）
 

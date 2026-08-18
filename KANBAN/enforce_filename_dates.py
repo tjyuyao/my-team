@@ -20,7 +20,15 @@ import os
 from pathlib import Path
 
 DATE_PREFIX_FORMAT = "%Y-%m-%d"
-KANBAN_COLUMNS = ("PLAN", "OPEN_ISSUE", "TODO", "IN_PROGRESS", "DONE", "MILESTONE")
+KANBAN_COLUMNS = (
+    "PLAN",
+    "OPEN_ISSUE",
+    "CLOSED_ISSUE",
+    "TODO",
+    "IN_PROGRESS",
+    "DONE",
+    "MILESTONE",
+)
 
 
 def iter_board_files(root: Path):
@@ -113,12 +121,15 @@ def main() -> int:
             path.replace(new_path)
         renamed += 1
 
-    if args.check and (renamed or problems):
-        print(
-            f"\n{renamed} file(s) need renaming, {problems} problem(s); "
-            "run without --check to apply."
-        )
-        return 1
+    if args.check:
+        if renamed or problems:
+            print(
+                f"\n{renamed} file(s) need renaming, {problems} problem(s); "
+                "run without --check to apply."
+            )
+            return 1
+        print("\n0 file(s) need renaming")
+        return 0
 
     print(f"\n{renamed} file(s) renamed; board filename dates are enforced.")
     return 0

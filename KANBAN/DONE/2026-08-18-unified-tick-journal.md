@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 基础
+source: SPEC §3.2；OI-004 §2.2
+priority: high
+---
+
 # v0.9-4: 统一 TickJournal（单一事实源）
 
-**Phase:** v0.9 基础
-**Source:** SPEC §3.2；OI-004 §2.2
-**Priority:** high
 **Completed:** 2026-08-18
 **Tests:** 694 passed（+18），ruff clean，mypy clean（38 source files）
 

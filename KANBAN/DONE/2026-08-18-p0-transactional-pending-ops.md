@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 P0
+source: SPEC §3.3、§12.5；OI-003 P0-2
+priority: high
+---
+
 # P0-2: Pending op 注册纳入 tick 事务，回滚不留孤儿
 
-**Phase:** v0.9 P0
-**Source:** SPEC §3.3、§12.5；OI-003 P0-2
-**Priority:** high
 **Completed:** 2026-08-18
 **Tests:** 776 passed（+4），ruff clean，mypy clean
 

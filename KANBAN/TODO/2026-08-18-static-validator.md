@@ -1,9 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: 审阅 §八；OPEN_ISSUE 静态校验器节；SPEC §11.2
+priority: high
+---
+
 # 静态校验器：五类基础检查 + 可达性/终局/权限单调/敏感数据流/资源上限
 
-**Kind:** task
-**Phase:** v0.11 扩展表面
-**Source:** 审阅 §八；OPEN_ISSUE 静态校验器节；SPEC §11.2
-**Priority:** high
 
 ## 目标
 把 OPEN_ISSUE 已定的"静态校验器职责边界"落成可执行检查规则清单。

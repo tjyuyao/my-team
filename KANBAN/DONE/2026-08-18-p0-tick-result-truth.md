@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 P0
+source: SPEC §3.1、§14；OI-003 P0-3/P1-4
+priority: high
+---
+
 # P0-3: run_tick 返回真实内核结果，TickEngine 降为纯时钟
 
-**Phase:** v0.9 P0
-**Source:** SPEC §3.1、§14；OI-003 P0-3/P1-4
-**Priority:** high
 **Completed:** 2026-08-18
 **Tests:** 768 passed（+7），ruff clean，mypy clean
 

@@ -1,9 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: 审阅 P0-8、§四.2；OPEN_ISSUE 能力层
+priority: high
+---
+
 # 谓词三级边界（L0 声明式 / L1 受限纯函数 / L2 外部能力）
 
-**Kind:** task
-**Phase:** v0.11 扩展表面
-**Source:** 审阅 P0-8、§四.2；OPEN_ISSUE 能力层
-**Priority:** high
 
 ## 目标
 谓词只能解释状态，不能改变状态，也不能偷偷调用外部世界。当前

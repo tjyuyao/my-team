@@ -1,8 +1,12 @@
+---
+kind: task
+phase: v0.10 能力
+source: SPEC §7.2；OI-004 §1.4
+priority: high
+---
+
 # v0.10-8a: KB 读取/检索工具（知识库侧）
 
-**Phase:** v0.10 能力
-**Source:** SPEC §7.2；OI-004 §1.4
-**Priority:** high
 
 ## 目标
 Agent 能够读取有权限的知识库内容（能力层新增只读工具）。

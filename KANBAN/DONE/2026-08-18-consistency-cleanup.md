@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 收口
+source: SPEC §3、§14；OI-003 P1-6/P1-7/P2-8
+priority: medium
+---
+
 # v0.9-15: 一致性与可观察性收口（版本号、事件可见性、workspace_version）
 
-**Phase:** v0.9 收口
-**Source:** SPEC §3、§14；OI-003 P1-6/P1-7/P2-8
-**Priority:** medium
 **Completed:** 2026-08-18
 **Tests:** 676 passed（+7），ruff clean，mypy clean（37 source files）
 

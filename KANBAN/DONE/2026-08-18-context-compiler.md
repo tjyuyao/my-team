@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 基础 / v0.10 完整
+source: SPEC §5；OI-004 §1.1/§1.2
+priority: high
+---
+
 # v0.9-6: ContextCompiler —— 角色化观察与 token-budgeted briefing
 
-**Phase:** v0.9 基础 / v0.10 完整
-**Source:** SPEC §5；OI-004 §1.1/§1.2
-**Priority:** high
 **Completed:** 2026-08-18
 **Tests:** 768 passed（+17），ruff clean，mypy clean（43 source files）
 

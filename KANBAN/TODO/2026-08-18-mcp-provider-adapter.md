@@ -1,8 +1,12 @@
+---
+kind: task
+phase: v0.11 扩展协议
+source: SPEC §6.5；用户定位补充（个体户/一人公司 + 开发者生态）
+priority: medium
+---
+
 # v0.11-16: MCP Provider Adapter（MCP server → ToolManifest）
 
-**Phase:** v0.11 扩展协议
-**Source:** SPEC §6.5；用户定位补充（个体户/一人公司 + 开发者生态）
-**Priority:** medium
 
 ## 目标
 把 MCP server 暴露的工具接入内核，自动生成 ToolManifest，并走

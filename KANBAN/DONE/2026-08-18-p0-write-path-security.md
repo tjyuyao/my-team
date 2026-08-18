@@ -1,8 +1,13 @@
+---
+kind: task
+status: completed
+phase: v0.9 P0
+source: SPEC §7.1、§12.2；OI-003 P0-1
+priority: high
+---
+
 # P0-1: 修复 FILE_WRITE 路径穿越，写路径统一走 PrivateStore 防护
 
-**Phase:** v0.9 P0
-**Source:** SPEC §7.1、§12.2；OI-003 P0-1
-**Priority:** high
 **Completed:** 2026-08-18
 **Tests:** 772 passed（+11），ruff clean，mypy clean
 
