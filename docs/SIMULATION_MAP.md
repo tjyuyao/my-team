@@ -48,74 +48,38 @@ schedule 前单独调用）。
 | 9 | 派发+公布 | `_phase_dispatch` / `_phase_publish` | 慢操作交给执行器（Executor Admission）、生成下一回合唤醒事件；**只有提交成功才派发** |
 | 10 | 记总账 | `_phase_audit` | 本回合一切写进 Journal；审计事件是它的投影 |
 
-## 三、慢通道：为什么有些事要"下个回合才有结果"
+## 三、慢通道：LLM 的思考要跨回合
 
-**先说为什么有两条通道。** 一个 Agent 在回合里想做的事，分两种：
+Agent 想做的事分两种：**快事**（读文件、发信、记知识库——内核当场办，
+`PURE/READ_ONLY/STAGED_MUTATION`）和**慢事**（LLM 思考、外部 API、人类
+审批——要花真时间，不能让全世界等）。慢事像**点外卖**：Agent 下单
+（`PendingOperationRegistry.submit`）、自己先挂起睡觉，外卖小哥
+（`llm_dispatcher`/executor 后台执行）做好后，**下个回合**送到门口
+（`_phase_ingest` 投递），Agent 醒来接着干。
 
-- **快事**：读文件、写文件、查自己的收件箱、往知识库记一条——内核自己就能办，
-  当场给你结果（`ExecutionClass` 的 `PURE/READ_ONLY/STAGED_MUTATION`）。
-- **慢事**：让 LLM 再好好想想、调一个外部 API、请人类审批——这些需要"外面的
-  世界花时间"。如果让所有人干等这一件事，整台机器就卡死了。
+**LLM ReAct 主链路（一个思考回合怎么走完）：**
 
-**慢通道的比喻：点外卖，而不是自己去后厨。** Agent 的做法是——下单
-（提交请求），然后**自己先去睡觉**（进入等待状态，不占着世界）；外卖小哥
-（后台执行者）做好后，**下个回合**把餐送到门口（结果投递进 Agent 的
-continuation 记忆），Agent 醒来接着吃、接着干。
+最典型的慢通道就是 Agent 的思考，否则有的 Agent 思考时间长，有的 Agent
+思考时间短，系统业务就不能实时推进了。
 
-具体对应：
+```text
+tick t    Agent 唤醒 → 看简报 → 提交 LLM 请求 → 自己挂起（WAITING_FOR_LLM）
+tick t+1  后台拨号（llm_dispatcher → llm_gateway），世界照常转
+tick t+2  结果回来 → 验票（epoch / request_id）→ 投递唤醒 → Agent 续作
+tick t+3  Agent 把结果转为下一批动作（工具/发信/再想）→ 一个 ReAct 回合结束
+```
 
-| 环节 | 通俗说法 | 代码 |
-|---|---|---|
-| 下单 | Agent 提交（登记进"在途簿"） | `PendingOperationRegistry.submit` → `SUBMITTED` |
-| 受理 | 先看有没有"能办这事的店"（executor 注册且等级兼容），不合格直接拒单 | `ExecutorRegistry` Admission（`requires_executor(manifest.execution_class)` 为真的 `LOCAL_PROCESS`/`SANDBOXED_PROCESS`/`EXTERNAL_IRREVERSIBLE` 工具才走这里） |
-| 制作 | - LLM 的活：后台线程轮询在途簿，去拨号（llm_gateway 调模型）<br>- 工具的活：本机受限进程（sandbox_tools）或远程执行器 | `llm_dispatcher` / `llm_gateway`、executor |
-| 送餐 | 结果写回在途簿；下个回合的"收外围结果"阶段把它送到 Agent 床头，唤醒续作 | 结果回写 registry → `_phase_ingest` → `receive_llm_result` / `receive_tool_result` |
-| 悔单 | 本回合结算失败→整回合回滚：单子作废，结果永远不会送来（也不会误投） | 回滚时反注册（`_tick_pending_ops`），结果不投递 |
+tick 是世界节拍，ReAct 回合**跨 tick**：等待时 Agent 不占世界，也**绝不
+重复唤醒**——结果事件是唯一的闹钟（`_enqueue_result_wake`），没结果就没有
+下一个回合。
 
-两个"放心点"：
-- **只有结算成功才派单**（Commit 成功后 Publish 才把外卖送出去）——回滚的回合
-  不会留下任何在途的幽灵单；
-- **结果带着"门禁票"（state epoch）**：回合回滚后世界前进了一个纪元（epoch），
-  旧纪元才做出来的结果会被当作过期事件丢掉（fence），不会污染新世界。
+**为什么安全（四行）**：提交成功才派发（回滚的回合单子作废，无幽灵单）；
+回滚只撤本 tick 登记的 op（`remove_for_rollback`，request_id 可复用）；
+结果回来必须验票（epoch/request_id 不符即丢——旧世界的答案进不来）；
+超时给结构化错误，重试/放弃/升级由 Agent 自己决定。
 
-### 三.5 慢通道与 tick 的安全共存（五道闸门）
-
-慢通道跨 tick 在途，靠五道闸门与 tick 的原子提交语义安全并存：
-
-1. **派发闸门**：Publish 只在 Commit 成功后执行 → 已派发的 op 永远属于
-   已提交的 tick，永远不会被回滚（慢通道的在途世界与回滚世界从构造上
-   不相交）。
-2. **撤销闸门**：回滚只撤"本 tick 登记、尚未消费"的 op——`_rollback` 遍历
-   `_tick_pending_ops` 调 `remove_for_rollback`（清 op + seen_requests 防重放
-   记录，request_id 即刻可重用）。
-3. **验票闸门**：结果回来必须过双重 fence（`_phase_ingest`）——epoch 不符
-   （对旧世界算出的结果）丢弃；agent 已不再等它（superseded）丢弃。
-4. **终态闸门**：`complete`/`complete_tool`/`cancel` 对终态
-   （CANCELLED/TIMED_OUT/FAILED）一律拒绝改写——**op 生命周期裁决结果，
-   结果不裁决 op**；correlation 校验 `result.request_id == op.request_id`。
-5. **超时闸门**：`deadline_tick` 超时即清，投递结构化错误并唤醒 Agent，
-   **由 Agent 决定重试/放弃/升级**。
-
-**LLM 请求：必然慢通道，且绝不重复唤醒。**
-- 路由：`SubmitLLMRequest` 无条件登记 `OpType.LLM_REQUEST`（无同步分支，
-  SPEC §8.6 明文禁止同步 LLM）；`fake_llm` 也同路径返回（只是快）。
-- 等待中的 Agent 不会被下一个 tick 重复唤起：唤醒的唯一通道是结果事件
-  （`_enqueue_result_wake` 的 `TOOL_RESULT`）→ 事件不匹配就进不了 ready 集；
-  即便万一被激活，`llm_agent.decide_intents` 的二分（有结果才续作、无结果
-  才新请求）+ `begin_activation` 的 WAITING→resume 状态门 + registry
-  `pending_request_id` 唯一与 `seen_requests` 防重放，三重兜底。
-
-**读取一致性推论**：op 提交于 tick t、执行于 t+k——期间 agent 处于 WAITING、
-不会自己写，他人写不了他的私有空间 → dispatch 时按需读 ≡ 提交时读，一致；
-共享资源（KB）另有锁+版本兜底。
-
-**快慢通道的对称**：
-
-| | 快通道 | 慢通道 |
-|---|---|---|
-| 副作用发生时点 | 延后到 Commit | 提前于内核裁定（已发生） |
-| 失败怎么办 | 可回滚（前值恢复） | 不可回滚 → 补偿（T18 逆操作契约） |
-| 与 tick 事务 | 完全在事务内 | 登记在事务内，执行在事务外 |
+**快慢的对称**：快通道副作用延后到 Commit（可回滚）；慢通道副作用在登记后
+发生（不可回滚，靠补偿——T18 逆操作契约的另一半）。
 
 ## 四、世界存储（Object 群）
 
