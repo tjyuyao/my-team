@@ -1,6 +1,14 @@
-# KANBAN 格式严格化迁移 — 任务提示词
+---
+kind: task
+status: completed
+phase: v0.9 完成后
+source: 用户意见
+r7_exempt: v0.8.0-implementation-plan
+---
 
-你负责把 KANBAN 目录下所有看板文件迁移到新的严格格式（YAML frontmatter +
+# KANBAN 格式严格化迁移
+
+把 KANBAN 目录下所有看板文件迁移到新的严格格式（YAML frontmatter +
 统一的目录语义），并让两个校验器全绿。**只动 `KANBAN/` 和 `tests/test_kanban_invariants.py`（如需要）下的内容，不碰 `src/`、不碰 `git` 提交、不碰
 `KANBAN/MILESTONE/2026-08-18-v0.9.0.md`（该文件保持原样、不修改、不加入任何提交）。**
 

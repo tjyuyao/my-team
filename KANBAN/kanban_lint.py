@@ -15,6 +15,7 @@ block as its very first lines::
     phase: v0.10        # optional, free string
     source: SPEC §6.2   # optional, free string
     priority: high      # optional: high | medium | low
+    r7_exempt: a,b      # optional: comma-separated topics allowed to dangle
     ---
 
 Contract rules (see KANBAN/README.md):
@@ -194,11 +195,17 @@ def _pyproject_version(root: Path) -> tuple[int, int, int] | None:
     return None
 
 
+def _parse_exempt(raw: str) -> set[str]:
+    """Parse the comma-separated ``r7_exempt`` topic list."""
+    return {t.strip() for t in raw.split(",") if t.strip()}
+
+
 def check_board(root: Path) -> list[str]:
     """Return a list of human-readable violations (empty == board is valid)."""
     violations: list[str] = []
     files = list(iter_board_files(root))
     topics = {topic_of(p.name) for p in files}
+    fms: dict[Path, dict[str, str]] = {}
 
     for p in files:
         rel = str(p.relative_to(root))
@@ -221,6 +228,7 @@ def check_board(root: Path) -> list[str]:
         if fm is None:
             violations.append(f"{rel}: R3 missing YAML frontmatter (--- ... ---)")
             continue
+        fms[p] = fm
         kind = fm.get("kind")
         expected = COLUMN_KIND[p.parent.name]
         if kind is None or kind not in KINDS:
@@ -275,11 +283,12 @@ def check_board(root: Path) -> list[str]:
         except OSError:
             continue
         rel = str(p.relative_to(root))
+        exempt = _parse_exempt(fms.get(p, {}).get("r7_exempt", ""))
         for ref in extract_refs(text):
             t = topic_of(ref.split("/")[-1])
             if not TOPIC_RE.match(t):
                 continue  # spaces / wildcards / shell examples — not a ref
-            if t in REF_EXEMPT:
+            if t in REF_EXEMPT or t in exempt:
                 continue
             if t not in topics:
                 violations.append(f"{rel}: R7 dangling ref {ref!r} (topic {t!r})")
