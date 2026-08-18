@@ -235,11 +235,9 @@ class TestTickJournalPersistence:
                     "max_retries": 3,
                     "private_storage_limit_mb": 512,
                     "execution": {
-                        "execution_mode": "discrete_async",
                         "max_llm_calls_per_activation": 1,
                         "max_tool_calls_per_activation": 8,
                         "max_action_budget": 32,
-                        "max_micro_loop_rounds": 3,
                     },
                 },
                 "agent_tree": [

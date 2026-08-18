@@ -141,7 +141,7 @@ class TestE2ESimulationConfig:
     def test_execution_config_in_sim(self, two_agent_tree):
         """SimulationConfig should include ExecutionConfig."""
         config = SimulationConfig(
-            execution={"execution_mode": "discrete_async", "max_llm_calls_per_activation": 2},
+            execution={"max_llm_calls_per_activation": 2},
         )
         sim = Simulation(agent_tree=two_agent_tree, config=config)
         assert sim.config.execution.max_llm_calls_per_activation == 2

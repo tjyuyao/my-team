@@ -162,27 +162,18 @@ class AgentActivation(BaseModel):
     )
 
 
-class ExecutionMode(str, Enum):
-    """Agent execution mode.
+class ExecutionConfig(BaseModel):
+    """Per-activation budget limits (SPEC §3.1「每 tick 一轮」).
 
-    Sole mode (SPEC §3.1「每 tick 一轮」): each agent activates at most
+    There is no "execution mode" choice: each agent activates at most
     once per tick with at most one Decide (one LLM call); multi-step
-    reasoning is a cross-tick ReAct continuation. The former
-    BOUNDED_MICRO_LOOP mode (legacy SPEC §8.5) was never wired and is
-    formally abolished: same-tick LLM→Tool loops break atomic-commit
-    and read-consistency semantics.
+    reasoning is a cross-tick ReAct continuation. A tick is the atomic
+    state-commit unit and therefore aligns with one round of ReAct tool
+    calls by construction — the former BOUNDED_MICRO_LOOP mode (legacy
+    SPEC §8.5) was never wired and is formally abolished. These fields
+    are hard budget caps, not modes.
     """
 
-    DISCRETE_ASYNC = "discrete_async"
-
-
-class ExecutionConfig(BaseModel):
-    """Configuration for agent execution limits, per SPEC §3.1."""
-
-    execution_mode: ExecutionMode = Field(
-        default=ExecutionMode.DISCRETE_ASYNC,
-        description="Execution mode",
-    )
     max_llm_calls_per_activation: int = Field(
         default=1,
         ge=0,

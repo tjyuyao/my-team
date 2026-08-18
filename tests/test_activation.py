@@ -10,7 +10,6 @@ from my_team.agent_state import AgentState
 from my_team.models.activation import (
     AgentActivation,
     ExecutionConfig,
-    ExecutionMode,
     WakeCondition,
     WakeEventType,
     WakeupEvent,
@@ -151,7 +150,6 @@ class TestAgentActivation:
 class TestExecutionConfig:
     def test_defaults(self):
         cfg = ExecutionConfig()
-        assert cfg.execution_mode == ExecutionMode.DISCRETE_ASYNC
         assert cfg.max_llm_calls_per_activation == 1
         assert cfg.max_tool_calls_per_activation == 8
         assert cfg.max_action_budget == 32
