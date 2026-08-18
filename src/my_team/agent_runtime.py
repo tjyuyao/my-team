@@ -460,7 +460,8 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
       - delegate   → DelegateIntent
       - send_email → SendEmailIntent
       - write      → WritePrivateFileIntent
-      - read/ls    → SubmitToolRequest
+      - read/ls/kb_read/kb_list/kb_search/kb_write/kb_create
+                   → SubmitToolRequest
     """
     intents: list[Intent] = []
     for action in plan.actions:
@@ -491,7 +492,11 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
                 path=payload.get("path", ""),
                 content=payload.get("content", ""),
             ))
-        elif action.action_type in {"read", "ls", "kb_write", "kb_create"}:
+        elif action.action_type in {
+            "read", "ls",
+            "kb_read", "kb_list", "kb_search",  # v0.10 T8a
+            "kb_write", "kb_create",
+        }:
             intents.append(SubmitToolRequest(
                 agent_id=plan.agent_id,
                 task_id=payload.get("task_id", ""),

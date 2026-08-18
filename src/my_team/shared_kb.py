@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -542,6 +543,56 @@ class SharedKB:
             rpath for rpath, res in self._resources.items()
             if res.exists and rpath.startswith(prefix)
         ]
+
+    def search(
+        self,
+        query: str,
+        agent_id: str,
+        base_path: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Keyword search over READABLE KB entries (SPEC §7.2, T8a).
+
+        Candidate set = paths under ``base_path`` that exist AND for
+        which the agent holds READ permission. Unauthorized entries are
+        neither matched nor present in the result — deny-by-default, no
+        "exists but not allowed" leak.
+
+        Matching (v1, embedding-ready interface): case-insensitive
+        substring on path or content. Returns up to ``limit`` hits as
+        metadata + snippet (first 200 chars); full content goes through
+        read() — search never returns whole entries.
+        """
+        q = query.strip().lower()
+        if not q:
+            return []
+        base = base_path.strip("/")
+        prefix = base + "/" if base else ""
+
+        hits: list[dict[str, Any]] = []
+        for path, res in self._resources.items():
+            if not res.exists:
+                continue
+            # base_path scope: paths under the prefix (or all when empty)
+            if base and not path.startswith(prefix):
+                continue
+            # Permission filter FIRST — unauthorized entries are
+            # invisible to the search (SPEC §7.2, deny-by-default).
+            if not self._permissions.check(
+                agent_id, path, PermissionOp.READ.value,
+            ):
+                continue
+            if q in path.lower() or q in res.content.lower():
+                hits.append({
+                    "path": path,
+                    "version": res.version,
+                    "snippet": res.content[:200],
+                    "last_modified_by": res.last_modified_by,
+                    "last_modified_at_tick": res.last_modified_at_tick,
+                })
+                if len(hits) >= limit:
+                    break
+        return hits
 
     def get_resource(self, path: str) -> SharedKBResource | None:
         """Get a resource directly (for internal use)."""

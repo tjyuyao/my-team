@@ -114,6 +114,7 @@ from my_team.shared_kb import (
     PermissionRule,
     SharedKB,
     SharedKBResource,
+    SharedKBWriteError,
     VersionInfo,
 )
 from my_team.task_tree import InvalidTransitionError, TaskTree
@@ -668,6 +669,107 @@ class Simulation:
                 tick=context.tick,
             )
 
+        # v0.10 T8a: KB read side — every read goes through
+        # PermissionEngine (inside SharedKB.read/list_dir/search); the
+        # handlers only wrap results + record read audit (no content).
+        def handle_kb_read(
+            context: ToolContext, path: str = "", **_kw: Any,
+        ) -> Any:
+            if not path:
+                return ToolResult(
+                    success=False, error="kb_read requires 'path'",
+                    error_code="INVALID_ARGUMENT", retryable=False,
+                    agent_id=context.agent_id, tool_name="kb_read",
+                    tick=context.tick,
+                )
+            try:
+                resource = self._shared_kb.read(path, context.agent_id)
+            except SharedKBWriteError as exc:
+                return ToolResult(
+                    success=False, error=str(exc),
+                    error_code=(
+                        "permission_denied"
+                        if exc.reason.startswith("Permission denied")
+                        else "not_found"
+                    ),
+                    retryable=False,
+                    agent_id=context.agent_id, tool_name="kb_read",
+                    tick=context.tick,
+                )
+            self._audit_log.record(
+                AuditEventType.SHARED_KB_READ,
+                agent_id=context.agent_id,
+                tick=context.tick,
+                details={"path": path},
+            )
+            return ToolResult(
+                success=True,
+                data={
+                    "content": resource.content,
+                    "version": resource.version,
+                    "last_modified_by": resource.last_modified_by,
+                    "last_modified_at_tick": resource.last_modified_at_tick,
+                },
+                agent_id=context.agent_id, tool_name="kb_read",
+                tick=context.tick,
+            )
+
+        def handle_kb_list(
+            context: ToolContext, base_path: str = "", **_kw: Any,
+        ) -> Any:
+            try:
+                paths = self._shared_kb.list_dir(
+                    base_path, context.agent_id,
+                )
+            except SharedKBWriteError as exc:
+                return ToolResult(
+                    success=False, error=str(exc),
+                    error_code="permission_denied", retryable=False,
+                    agent_id=context.agent_id, tool_name="kb_list",
+                    tick=context.tick,
+                )
+            return ToolResult(
+                success=True, data={"paths": paths},
+                agent_id=context.agent_id, tool_name="kb_list",
+                tick=context.tick,
+            )
+
+        def handle_kb_search(
+            context: ToolContext,
+            query: str = "",
+            base_path: str = "",
+            limit: int = 20,
+            **_kw: Any,
+        ) -> Any:
+            if not query or not query.strip():
+                return ToolResult(
+                    success=False,
+                    error="kb_search requires non-empty 'query'",
+                    error_code="INVALID_ARGUMENT", retryable=False,
+                    agent_id=context.agent_id, tool_name="kb_search",
+                    tick=context.tick,
+                )
+            try:
+                limit_n = min(max(int(limit), 1), 100)
+            except (TypeError, ValueError):
+                limit_n = 20
+            hits = self._shared_kb.search(
+                query, context.agent_id,
+                base_path=base_path or "", limit=limit_n,
+            )
+            for hit in hits:
+                self._audit_log.record(
+                    AuditEventType.SHARED_KB_READ,
+                    agent_id=context.agent_id,
+                    tick=context.tick,
+                    details={"path": hit["path"], "search": query},
+                )
+            return ToolResult(
+                success=True, data={"results": hits},
+                agent_id=context.agent_id, tool_name="kb_search",
+                tick=context.tick,
+            )
+
         def handle_send_email(
             context: ToolContext,
             to: list[str] | None = None,
@@ -1078,6 +1180,9 @@ class Simulation:
             "ls": handle_ls,
             "write": handle_write,
             "kb_write": handle_kb_write,
+            "kb_read": handle_kb_read,
+            "kb_list": handle_kb_list,
+            "kb_search": handle_kb_search,
             "send_email": handle_send_email,
             "delegate": handle_delegate,
             "apply_patch": handle_apply_patch,

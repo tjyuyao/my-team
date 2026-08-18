@@ -329,6 +329,63 @@ class TestSharedKB:
             kb.read("project/research/nonexistent.md", "agent.research")
 
 
+class TestSharedKBSearch:
+    """T8a: SharedKB.search() — permission-filtered keyword search."""
+
+    def _kb(self) -> SharedKB:
+        kb = SharedKB(permissions=PermissionEngine([
+            PermissionRule(
+                scope="project/*", principal="agent.root",
+                allow=["read", "create"],
+            ),
+            PermissionRule(
+                scope="project/research/*", principal="agent.research",
+                allow=["read", "create"],
+            ),
+        ]))
+        kb.create("project/roadmap.md", "agent.root", "Q3 roadmap for the team", 0)
+        kb.create("project/research/notes.md", "agent.root", "agent design review", 0)
+        kb.create("project/research/secret.md", "agent.root", "hidden detail", 0)
+        return kb
+
+    def test_content_and_path_match_case_insensitive(self):
+        kb = self._kb()
+        hits = kb.search("REVIEW", "agent.root")
+        assert [h["path"] for h in hits] == ["project/research/notes.md"]
+        hits = kb.search("ROADMAP", "agent.root")
+        assert [h["path"] for h in hits] == ["project/roadmap.md"]
+
+    def test_unauthorized_entries_invisible(self):
+        """research cannot see project/roadmap.md even though it matches
+        the query — unauthorized entries are neither matched nor shown."""
+        kb = self._kb()
+        hits = kb.search("team", "agent.research")
+        assert hits == []
+        # permitted hit still found
+        hits = kb.search("review", "agent.research")
+        assert [h["path"] for h in hits] == ["project/research/notes.md"]
+
+    def test_base_path_scope(self):
+        kb = self._kb()
+        hits = kb.search("design", "agent.root",
+                         base_path="project/research")
+        assert [h["path"] for h in hits] == ["project/research/notes.md"]
+
+    def test_limit_and_empty_query(self):
+        kb = self._kb()
+        kb.create("project/a.md", "agent.root", "same", 0)
+        kb.create("project/b.md", "agent.root", "same", 0)
+        assert len(kb.search("same", "agent.root", limit=1)) == 1
+        assert kb.search("", "agent.root") == []
+        assert kb.search("   ", "agent.root") == []
+
+    def test_snippet_never_full_content(self):
+        kb = self._kb()
+        hits = kb.search("review", "agent.root")
+        assert hits[0]["snippet"] == "agent design review"
+        assert "content" not in hits[0]
+
+
 # ---------------------------------------------------------------------------
 # Audit Log
 # ---------------------------------------------------------------------------

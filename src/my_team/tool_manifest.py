@@ -318,6 +318,7 @@ def builtin_manifests() -> dict[str, ToolManifest]:
 
     Execution-class mapping:
       read/ls          → READ_ONLY (frozen snapshot view)
+      kb_read/kb_list/kb_search → READ_ONLY (v0.10 T8a, KB read side)
       write/kb_write   → STAGED_MUTATION (staged, committed atomically)
       send_email       → STAGED_MUTATION (outbox-staged; discarded on
                          rollback before delivery)
@@ -596,12 +597,76 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         max_output_bytes=200_000,
         supports_cancel=True,
     )
+    # v0.10 T8a: KB read-side tools (SharedKB 读侧能力 — OI-004 §1.5 此前
+    # 只能写不能读). All READ_ONLY: deterministic, idempotent, no effects,
+    # no pending-op path — same class as read/ls. Every read goes through
+    # PermissionEngine (SPEC §7.2 硬性要求).
+    kb_read = ToolManifest(
+        name="kb_read",
+        version="1.0.0",
+        execution_class=ExecutionClass.READ_ONLY,
+        description="Read an entry from the shared knowledge base",
+        input_schema={
+            "path": {"type": "string", "description": "KB entry path"},
+        },
+        required_inputs=("path",),
+        output_schema={
+            "content": {"type": "string"},
+            "version": {"type": "integer"},
+            "last_modified_by": {"type": "string"},
+            "last_modified_at_tick": {"type": "integer"},
+        },
+        capabilities=("kb:read",),
+        filesystem_scopes=("shared-kb",),
+        deterministic=True,
+        idempotent=True,
+        max_output_bytes=1_000_000,
+    )
+    kb_list = ToolManifest(
+        name="kb_list",
+        version="1.0.0",
+        execution_class=ExecutionClass.READ_ONLY,
+        description="List shared knowledge base paths under a prefix",
+        input_schema={
+            "base_path": {"type": "string",
+                          "description": "KB prefix to list under ('' = all readable)"},
+        },
+        output_schema={"paths": {"type": "array", "items": {"type": "string"}}},
+        capabilities=("kb:list",),
+        filesystem_scopes=("shared-kb",),
+        deterministic=True,
+        idempotent=True,
+        max_output_bytes=200_000,
+    )
+    kb_search = ToolManifest(
+        name="kb_search",
+        version="1.0.0",
+        execution_class=ExecutionClass.READ_ONLY,
+        description="Keyword search readable shared knowledge base entries "
+                    "(case-insensitive substring on path or content)",
+        input_schema={
+            "query": {"type": "string", "description": "Search keywords"},
+            "base_path": {"type": "string",
+                          "description": "Scope the search to a KB prefix"},
+            "limit": {"type": "integer", "description": "Max hits (default 20)"},
+        },
+        required_inputs=("query",),
+        output_schema={
+            "results": {"type": "array", "items": {"type": "object"}},
+        },
+        capabilities=("kb:search",),
+        filesystem_scopes=("shared-kb",),
+        deterministic=True,
+        idempotent=True,
+        max_output_bytes=200_000,
+    )
     return {
         m.name: m
         for m in (
             read, ls, write, kb_write, send_email, delegate,
             apply_patch, run_tests, git_diff, git_status,
             python_compute, python_transform,
+            kb_read, kb_list, kb_search,
         )
     }
 

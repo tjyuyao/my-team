@@ -315,6 +315,7 @@ class TestBuiltinManifests:
             "read", "ls", "write", "kb_write", "send_email", "delegate",
             "apply_patch", "run_tests", "git_diff", "git_status",
             "python_compute", "python_transform",
+            "kb_read", "kb_list", "kb_search",  # v0.10 T8a
         }
 
     def test_execution_classes(self) -> None:
@@ -322,6 +323,12 @@ class TestBuiltinManifests:
         reg = sim._tool_registry
         assert reg.get_manifest("read").execution_class is ExecutionClass.READ_ONLY
         assert reg.get_manifest("ls").execution_class is ExecutionClass.READ_ONLY
+        assert reg.get_manifest("kb_read").execution_class \
+            is ExecutionClass.READ_ONLY
+        assert reg.get_manifest("kb_list").execution_class \
+            is ExecutionClass.READ_ONLY
+        assert reg.get_manifest("kb_search").execution_class \
+            is ExecutionClass.READ_ONLY
         assert reg.get_manifest("write").execution_class \
             is ExecutionClass.STAGED_MUTATION
         assert reg.get_manifest("kb_write").execution_class \

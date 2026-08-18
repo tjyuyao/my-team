@@ -190,14 +190,14 @@ class TestPluginHandlerContext:
 
 
 class TestGeneratedToolDefinitions:
-    def test_all_twelve_builtins_generated(self) -> None:
+    def test_all_builtins_generated(self) -> None:
         manifests = builtin_manifests()
-        assert len(manifests) == 12
+        assert len(manifests) == 15  # 12 + kb_read/kb_list/kb_search (T8a)
         templates = PromptTemplates()
         tools = templates.render_tool_definitions(
             frozenset(manifests), manifests=manifests,
         )
-        assert len(tools) == 12
+        assert len(tools) == 15
         assert {t.name for t in tools} == set(manifests)
         for t in tools:
             m = manifests[t.name]

@@ -410,7 +410,7 @@ class TestGitTools:
 
 
 class TestBuiltinRegistration:
-    def test_ten_builtin_manifests(self) -> None:
+    def test_all_builtin_manifests(self) -> None:
         sim = Simulation(agent_tree=_make_tree(
             ["read", "write", "ls", "delegate", "apply_patch",
              "run_tests", "git_diff", "git_status"],
@@ -420,4 +420,5 @@ class TestBuiltinRegistration:
             "read", "ls", "write", "kb_write", "send_email", "delegate",
             "apply_patch", "run_tests", "git_diff", "git_status",
             "python_compute", "python_transform",
+            "kb_read", "kb_list", "kb_search",
         }
