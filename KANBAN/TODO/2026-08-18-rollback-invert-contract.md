@@ -26,8 +26,16 @@ KB 用 `kb_state_before`（记旧 resource+version）、邮件用 outbox 丢弃�
 - 每个 EffectType 声明 invert 契约：**记录什么前值 + 如何恢复**；
   EXTERNAL 类 effect 的 invert = 补偿工具引用或"不可逆"标记。
 - 回滚路径收敛为**单一入口**：逐 committed effect 执行其逆操作。
-- 行为语义不变（文件/KB/邮件/pending op 的回滚结果与现状完全一致），
-  只把机制从隐式散落整理为显式契约。
+- **失败分级显式化**（用户 2026-08-18 定稿）：只有系统级不变量破坏
+  （apply 抛未预期异常）才触发整回合回滚；可判定业务失败（权限/锁/版本/
+  patch 冲突/重复 task_id 等）一律**局部 FAILED**，其余 effect 照常提交，
+  不回滚世界。现状的隐式分级（靠"抛不抛异常"）改为显式声明：
+  每个 effect 的失败点声明"可判定失败 → FAILED"或"内核失败 → 回滚"。
+  连带修正：`task_tree.create` 对重复 task_id 的 raise 是否降级为可判定
+  失败（局部 FAILED + group 原子性），不再拉全回合回滚——行为变更点，
+  实现时确认并更新相关回滚用例。
+- 行为语义不变（文件/KB/邮件/pending op 的**内核级**回滚结果与现状
+  一致），只把机制从隐式散落整理为显式契约 + 失败分级。
 
 ## 实施步骤
 1. `transaction.py`：`EffectType` 侧新增 invert 定义表
@@ -50,7 +58,9 @@ KB 用 `kb_state_before`（记旧 resource+version）、邮件用 outbox 丢弃�
 - [ ] 回滚为单一入口，逐 effect 执行逆操作；无 file_previous/kb_state_before
       独立字典
 - [ ] 每个已实现 EffectType 有 invert 定义（契约一致性测试）
+- [ ] 失败分级显式：可判定失败局部 FAILED（其余照常提交）；仅内核异常
+      触发整回合回滚（测试覆盖两类路径）
 - [ ] 行为不变：文件恢复、新文件删除、KB 恢复、锁/op/邮件回滚语义与
-      现状一致（现有回滚测试全绿）
+      现状一致（现有回滚测试全绿，或已按分级决策显式更新）
 - [ ] 外部 effect 的 invert 语义明确（丢弃/补偿/不可逆标记）
 - [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过；kanban_lint 0 violation

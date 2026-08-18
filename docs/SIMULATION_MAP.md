@@ -44,7 +44,7 @@ schedule 前单独调用）。
 | 5 | 每人出招 | `_phase_decide` + `llm_agent` / `BaseAgent.decide` | 每个 Agent 做一轮决策：产出 `Intent` 列表 |
 | 6 | 先审后办 | `_phase_validate` | 预审意图：工具权限（`ToolRegistry`）、委派合法性、payload、预算 |
 | 7 | 登记 | `_phase_act` | 通过审核的意图 → `TransactionBuffer.stage`（本地效应）或 `PendingOperationRegistry.submit`（慢操作）；**绝不生效** |
-| 8 | 统一结算 | `_phase_commit` | Commit-Validate（现在还能不能做？）→ 冲突裁决 → 逐条应用；任何失败 → 整回合回滚（T18 将重构为逐 effect 逆操作契约） |
+| 8 | 统一结算 | `_phase_commit` | Commit-Validate（现在还能不能做？）→ 冲突裁决 → 逐条应用。**两级失败**：可判定失败（权限/锁/版本/patch 冲突）→ 该 effect 局部 FAILED、其余照常提交；仅 apply 抛未预期异常（系统级不变量破坏）→ 整回合回滚（T18 将重构为逐 effect 逆操作契约 + 显式失败分级） |
 | 9 | 派发+公布 | `_phase_dispatch` / `_phase_publish` | 慢操作交给执行器（Executor Admission）、生成下一回合唤醒事件；**只有提交成功才派发** |
 | 10 | 记总账 | `_phase_audit` | 本回合一切写进 Journal；审计事件是它的投影 |
 
