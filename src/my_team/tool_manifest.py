@@ -402,12 +402,20 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         name="send_email",
         version="1.0.0",
         execution_class=ExecutionClass.STAGED_MUTATION,
-        description="Send an email to another agent",
+        description="Send an email to another agent (attachments are "
+                    "structured refs — carried on the email, never copied)",
         input_schema={
             "to": {"type": "array", "items": {"type": "string"},
                    "description": "Recipient agent ids"},
             "subject": {"type": "string", "description": "Email subject"},
             "body": {"type": "string", "description": "Email body"},
+            "attachments": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Attachment refs: {ref_type, path, version, "
+                               "hash, size, mime} (e.g. ref_type=shared_kb "
+                               "with a KB path@version)",
+            },
         },
         required_inputs=("to", "subject", "body"),
         output_schema={"staged": {"type": "boolean"}},

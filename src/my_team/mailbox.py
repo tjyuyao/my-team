@@ -232,6 +232,7 @@ class MailSystem:
         requires_reply: bool = False,
         reply_to: str | None = None,
         thread_id: str = "",
+        attachments: list[Any] | None = None,
         **kwargs: Any,
     ) -> Email:
         """Create and queue a new email.
@@ -246,6 +247,7 @@ class MailSystem:
             to=to,
             subject=subject,
             body=body,
+            attachments=list(attachments) if attachments else [],
             email_type=email_type,
             task_id=task_id,
             created_at_tick=tick,

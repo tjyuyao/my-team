@@ -135,6 +135,12 @@ class SendEmailIntent(Intent):
     to: list[str] = Field(description="Recipient agent IDs")
     subject: str = Field(description="Email subject")
     body: str = Field(default="", description="Email body")
+    # v0.10 T8b: structured attachment references ({ref_type, path, version,
+    # hash, size, mime}), carried on the email (not copied).
+    attachments: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Attachment references",
+    )
     email_type: str = Field(default="progress", description="Email type")
     task_id: str = Field(default="", description="Associated task ID")
 

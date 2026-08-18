@@ -484,6 +484,7 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
                 subject=payload.get("subject", ""),
                 body=payload.get("body", ""),
                 email_type=payload.get("email_type", "progress"),
+                attachments=list(payload.get("attachments", [])),  # T8b
             ))
         elif action.action_type == "write":
             intents.append(WritePrivateFileIntent(

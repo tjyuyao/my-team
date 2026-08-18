@@ -23,6 +23,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from my_team.asset_store import AttachmentRef
+
 
 class OutboxStatus(str, Enum):
     """Lifecycle status of an outbox entry."""
@@ -56,6 +58,8 @@ class OutboxEntry(BaseModel):
     body: str = Field(default="", description="Body")
     email_type: str = Field(default="progress", description="Email type")
     task_id: str = Field(default="", description="Associated task")
+    # v0.10 T8b: structured attachment references (carried on the email)
+    attachments: list[AttachmentRef] = Field(default_factory=list)
 
     # Dispatch tracking
     attempt_count: int = Field(default=0, ge=0)
@@ -83,6 +87,7 @@ class Outbox:
         task_id: str = "",
         effect_id: str = "",
         idempotency_key: str = "",
+        attachments: list[AttachmentRef] | None = None,
     ) -> OutboxEntry:
         """Stage an email for dispatch (idempotency-checked).
 
@@ -103,6 +108,7 @@ class Outbox:
             body=body,
             email_type=email_type,
             task_id=task_id,
+            attachments=list(attachments) if attachments else [],
             max_retries=self._max_retries,
         )
         self._entries[entry.entry_id] = entry

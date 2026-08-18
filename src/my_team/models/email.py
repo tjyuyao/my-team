@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from my_team.asset_store import AttachmentRef
+
 
 class EmailType(str, Enum):
     """Supported email types per SPEC §4.5."""
@@ -66,6 +68,12 @@ class Email(BaseModel):
     cc: list[str] = Field(default_factory=list, description="CC agent IDs")
     subject: str = Field(description="Email subject line")
     body: str = Field(default="", description="Email body text")
+    # v0.10 T8b: structured attachment references (SPEC §4.3) — 大内容
+    # 只存引用，不复制正文。ref_type: 'shared_kb' | 'asset' (T10).
+    attachments: list[AttachmentRef] = Field(
+        default_factory=list,
+        description="Structured attachment references",
+    )
     email_type: EmailType = Field(description="Type of email")
     task_id: str = Field(default="", description="Associated task ID")
     created_at_tick: int = Field(default=0, description="Tick when email was created")

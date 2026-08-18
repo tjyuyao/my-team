@@ -41,7 +41,7 @@ from my_team.agent_runtime import (
 )
 from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
-from my_team.asset_store import AssetStore
+from my_team.asset_store import AssetStore, AttachmentRef
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
 from my_team.context_compiler import ContextCompiler
 from my_team.executor_registry import (
@@ -897,9 +897,12 @@ class Simulation:
             to: list[str] | None = None,
             subject: str = "",
             body: str = "",
+            attachments: list[dict[str, Any]] | None = None,
             **_kw: Any,
         ) -> Any:
-            # Stage as an email send effect — committed in Phase 8
+            # v0.10 T8b: attachments = list of structured refs
+            # ({ref_type, path, version, hash, size, mime}) — carried on
+            # the email, never copied.
             self._transaction_buffer.stage(
                 effect_type=EffectType.EMAIL_SEND,
                 agent_id=context.agent_id,
@@ -909,6 +912,10 @@ class Simulation:
                     "to": to or [],
                     "subject": subject,
                     "body": body,
+                    "attachments": [
+                        AttachmentRef.model_validate(a)
+                        for a in (attachments or [])
+                    ],
                 },
             )
             return ToolResult(
@@ -2544,6 +2551,19 @@ class Simulation:
                             "email_type": email.email_type.value,
                             "task_id": email.task_id,
                             "body": email.body,
+                            # v0.10 T8b: attachment refs visible to the
+                            # recipient's context (清单, not payload)
+                            "attachments": [
+                                {
+                                    "ref_type": a.ref_type,
+                                    "path": a.path,
+                                    "version": a.version,
+                                    "hash": a.hash,
+                                    "size": a.size,
+                                    "mime": a.mime,
+                                }
+                                for a in email.attachments
+                            ],
                         })
 
         return {
@@ -2938,6 +2958,12 @@ class Simulation:
                             "body": intent.body,
                             "email_type": intent.email_type,
                             "task_id": intent.task_id,
+                            # v0.10 T8b: attachment refs carried on the
+                            # email (never copied)
+                            "attachments": [
+                                AttachmentRef.model_validate(a)
+                                for a in intent.attachments
+                            ],
                         },
                     )
                     results.append(ActionResult(
@@ -3975,6 +4001,7 @@ class Simulation:
                         email_type=data.get("email_type", "progress"),
                         task_id=data.get("task_id", ""),
                         effect_id=effect.effect_id,
+                        attachments=data.get("attachments", []),
                     )
                     self._outbox.commit(entry.entry_id)
                     # invert_data: the entry to discard if this effect
@@ -4209,6 +4236,7 @@ class Simulation:
                 deliver_at_tick=tick
                 + self._config.email_delivery_latency_ticks,
                 task_id=entry.task_id,
+                attachments=list(entry.attachments),
             )
         self._outbox.dispatch(_deliver, current_tick=tick)
 
