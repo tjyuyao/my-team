@@ -3,7 +3,7 @@ kind: task
 status: completed
 phase: v0.9 完成后
 source: 用户意见
-r7_exempt: v0.8.0-implementation-plan
+r7_exempt: v0.8.0-implementation-plan, v080-p2-remaining
 ---
 
 # KANBAN 格式严格化迁移

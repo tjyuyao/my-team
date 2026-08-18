@@ -7,6 +7,12 @@ priority: high
 
 # v0.10-9: Ingress/Egress 与外部平台 Integration
 
+> ⚠️ **须重划（勿按本卡正文直接开工）**：映射层设计（IngressEvent 直接转
+> WakeEvent/TaskCreate/Record/Email）已被 `KANBAN/PLAN/v0.10.0-plan` 否决——
+> 扩展表面要求前门为 `IngressEvent → ProcessInstance`（最小测试向量）。
+> transport/去重/ack 部分方向中立、可先做；映射层待 SPEC §8.1 对齐 +
+> E1 process-model 落地后重写（见 plan「待重划项」）。下文映射相关条目
+> 已标注待重划。
 
 ## 目标
 外部平台事件（消息、评价、订单、评论、数据回传）能可靠进入内核；
@@ -19,7 +25,8 @@ priority: high
 - `IngressBuffer`：tick 之间写入，Ingest 阶段消费；
   `(source, external_id)` 持久化去重；事件持久化成功后才 ack。
 - `IngressEvent` 可转换为 WakeEvent / TaskCreate / Record / Email，
-  由场景包配置映射。
+  由场景包配置映射。 **〔待重划：应改为
+  `IngressEvent → ProcessInstance` 前门〕**
 - `Integration` 注册：name、credential_ref、rate_limits、
   manifests（出站工具）、ingress_event_types、health_check。
 - 出站工具（EXTERNAL_IRREVERSIBLE）必须提供幂等键与状态回查；
@@ -32,6 +39,7 @@ priority: high
 
 ## 验收标准
 - [ ] 平台事件注入后，Agent 在下一 tick 被唤醒并创建任务
+  **〔待重划：映射语义待 E1 落地后重写〕**
 - [ ] 重复 `(source, external_id)` 跨重启只入站一次
 - [ ] 出站工具在限流时保持 SUBMITTED 背压
 - [ ] 事件未持久化前不 ack（可测试故障注入）

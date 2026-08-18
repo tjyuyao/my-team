@@ -32,6 +32,7 @@ priority: medium
 
 ## 验收标准
 - [ ] 测试中注册自定义工具后 Agent 可调用，且未改 simulation.py
-- [ ] LLM 工具定义包含全部已注册工具（非手写 6 个）
+- [ ] LLM 工具定义包含全部已注册工具（由 manifest 生成、覆盖全部
+  12 个内置工具，非手写）
 - [ ] 无 manifest 工具在 policy 启用时被拒绝
 - [ ] 新增测试；`uv run pytest -q` 全绿；`ruff`/`mypy` 通过

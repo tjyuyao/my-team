@@ -18,8 +18,9 @@ priority: high
   事件或创建任务。
 - Task 携带 `deadline_tick + priority`；Schedule 阶段就绪集按
   `(priority, deadline_tick)` 排序。
-- 到期前 N tick 生成 `DEADLINE_APPROACHING` 事件；超时结构化
-  升级（通知 Manager → 转人工 → 关闭）。
+- 到期前 N tick 生成 `DEADLINE_APPROACHING` 事件；超时走结构化
+  escalation（on/mode/target，见 Authority 方向），不硬编码
+  「通知 Manager → 转人工 → 关闭」阶梯。
 - `WorkerPool`：一组同质 Worker + 路由策略
   （round_robin / least_busy / skill_match）。
 - `DelegateIntent.recipient` 支持 `agent_id` 或 `pool_id`；
