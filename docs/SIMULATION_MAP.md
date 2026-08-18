@@ -48,21 +48,35 @@ schedule 前单独调用）。
 | 9 | 派发+公布 | `_phase_dispatch` / `_phase_publish` | 慢操作交给执行器（Executor Admission）、生成下一回合唤醒事件；**只有提交成功才派发** |
 | 10 | 记总账 | `_phase_audit` | 本回合一切写进 Journal；审计事件是它的投影 |
 
-## 三、慢通道的生命周期（通俗"异步"）
+## 三、慢通道：为什么有些事要"下个回合才有结果"
 
-工具路由依据：`ExecutionClass`——`PURE/READ_ONLY/STAGED_MUTATION` 内核
-当场执行；`LOCAL_PROCESS/SANDBOXED_PROCESS/EXTERNAL_IRREVERSIBLE` 走慢通道
-（`requires_executor(manifest.execution_class)`）。
+**先说为什么有两条通道。** 一个 Agent 在回合里想做的事，分两种：
 
-```
-Act 登记:  PendingOperationRegistry.submit → SUBMITTED
-Publish:   ExecutorRegistry Admission（先有 executor、等级兼容才受理）
-执行:      llm_dispatcher（后台线程轮询，走 llm_gateway 调 LLM）
-           或 sandbox_tools（受限子进程）、外部 executor（远程）
-完成:      写回 registry → 下回合 Ingest 投递给 Agent 的 continuation
-           （receive_llm_result / receive_tool_result）
-回滚:      反注册（_tick_pending_ops），结果不投递
-```
+- **快事**：读文件、写文件、查自己的收件箱、往知识库记一条——内核自己就能办，
+  当场给你结果（`ExecutionClass` 的 `PURE/READ_ONLY/STAGED_MUTATION`）。
+- **慢事**：让 LLM 再好好想想、调一个外部 API、请人类审批——这些需要"外面的
+  世界花时间"。如果让所有人干等这一件事，整台机器就卡死了。
+
+**慢通道的比喻：点外卖，而不是自己去后厨。** Agent 的做法是——下单
+（提交请求），然后**自己先去睡觉**（进入等待状态，不占着世界）；外卖小哥
+（后台执行者）做好后，**下个回合**把餐送到门口（结果投递进 Agent 的
+continuation 记忆），Agent 醒来接着吃、接着干。
+
+具体对应：
+
+| 环节 | 通俗说法 | 代码 |
+|---|---|---|
+| 下单 | Agent 提交（登记进"在途簿"） | `PendingOperationRegistry.submit` → `SUBMITTED` |
+| 受理 | 先看有没有"能办这事的店"（executor 注册且等级兼容），不合格直接拒单 | `ExecutorRegistry` Admission（`requires_executor(manifest.execution_class)` 为真的 `LOCAL_PROCESS`/`SANDBOXED_PROCESS`/`EXTERNAL_IRREVERSIBLE` 工具才走这里） |
+| 制作 | - LLM 的活：后台线程轮询在途簿，去拨号（llm_gateway 调模型）<br>- 工具的活：本机受限进程（sandbox_tools）或远程执行器 | `llm_dispatcher` / `llm_gateway`、executor |
+| 送餐 | 结果写回在途簿；下个回合的"收外围结果"阶段把它送到 Agent 床头，唤醒续作 | 结果回写 registry → `_phase_ingest` → `receive_llm_result` / `receive_tool_result` |
+| 悔单 | 本回合结算失败→整回合回滚：单子作废，结果永远不会送来（也不会误投） | 回滚时反注册（`_tick_pending_ops`），结果不投递 |
+
+两个"放心点"：
+- **只有结算成功才派单**（Commit 成功后 Publish 才把外卖送出去）——回滚的回合
+  不会留下任何在途的幽灵单；
+- **结果带着"门禁票"（state epoch）**：回合回滚后世界前进了一个纪元（epoch），
+  旧纪元才做出来的结果会被当作过期事件丢掉（fence），不会污染新世界。
 
 ## 四、世界存储（Object 群）
 
