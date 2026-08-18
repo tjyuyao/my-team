@@ -31,9 +31,9 @@ KB 用 `kb_state_before`（记旧 resource+version）、邮件用 outbox 丢弃�
   patch 冲突/重复 task_id 等）一律**局部 FAILED**，其余 effect 照常提交，
   不回滚世界。现状的隐式分级（靠"抛不抛异常"）改为显式声明：
   每个 effect 的失败点声明"可判定失败 → FAILED"或"内核失败 → 回滚"。
-  连带修正：`task_tree.create` 对重复 task_id 的 raise 是否降级为可判定
-  失败（局部 FAILED + group 原子性），不再拉全回合回滚——行为变更点，
-  实现时确认并更新相关回滚用例。
+  **既定范围（用户已确认）**：`task_tree.create` 对重复 task_id 的 raise
+  降级为可判定失败（局部 FAILED + group 原子性），不再拉全回合回滚；
+  同步更新相关回滚用例断言（test_file_write_rollback 等）。
 - 行为语义不变（文件/KB/邮件/pending op 的**内核级**回滚结果与现状
   一致），只把机制从隐式散落整理为显式契约 + 失败分级。
 
