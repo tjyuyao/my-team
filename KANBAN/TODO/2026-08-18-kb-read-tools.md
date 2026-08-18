@@ -55,6 +55,12 @@ Agent 能够读取有权限的知识库内容（能力层新增只读工具）�
    ContextCompiler 的 KB 术语自动注入（glossary injector）、embedding 检索、
    KB 写/锁/版本改动。前述属 v0.11（SPEC §7.2 / OI-004 §1.5 的注入侧），
    本卡只交付"读侧工具"这一半。
+6. **下载无一等工具**："下载到本地" = Agent 显式两步组合：`kb_read`
+   返回 content（纯读取，READ_ONLY 无副作用）→ `write` 写入自己
+   PrivateStore（v0.8 已有）。不新增 kb_download 类工具——读取即落盘
+   会引入隐式副作用，违背"引用 + 权限、不隐式拷贝"原则。Asset 对象侧
+   的下载同样靠组合（T10 的 get → 私有写），二进制私有写缺口归 T10
+   （其验收"二进制文件可写入"已覆盖）。
 
 ## 产出
 - `SharedKB.search()` 方法与权限过滤单元测试。
