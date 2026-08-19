@@ -49,7 +49,6 @@ class IngressEvent(BaseModel):
         description="Deduplication key (defaults to (source, external_id))",
     )
     priority: IngressPriority = Field(default=IngressPriority.NORMAL)
-    deadline_hint: str | None = Field(default=None)
 
     @property
     def dedup_key(self) -> tuple[str, str]:

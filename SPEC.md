@@ -466,7 +466,6 @@ IngressEvent:
   payload: dict
   idempotency_key: str
   priority: str
-  deadline_hint: str | None  # wall-clock 截止提示（外部业务时间）
 ```
 
 - Ingest 阶段消费；`(source, external_id)` 去重（持久化，跨重启）。

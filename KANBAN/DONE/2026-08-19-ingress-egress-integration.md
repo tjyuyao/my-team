@@ -20,7 +20,7 @@ ProcessInstance`）属 v0.11 编排层 E1，本卡不再包含，也不按旧设
 
 ## 要求 / 规则
 - `IngressEvent` 模型：source、external_id、event_type、occurred_at、
-  payload、idempotency_key、priority、deadline_hint。
+  payload、idempotency_key、priority。
 - `IngressBuffer`：tick 之间写入，Ingest 阶段消费；`(source, external_id)`
   持久化去重；事件持久化成功后才 ack。
 - **出站等待与唤醒（WAITING_FOR_EXTERNAL）**：Agent 发出外部请求后
@@ -159,3 +159,6 @@ ProcessInstance`）属 v0.11 编排层 E1，本卡不再包含，也不按旧设
   SimulationStore 级）。
 - **数据点**：全量 861 passed（850+11）；`mypy src/` clean（47 源文件）；
   `ruff` 通过；kanban_lint 0。
+- **设计变更（2026-08-19）**：`IngressEvent.deadline_hint` 字段已删除。
+  Ingress 仅消息入站点（传输层），deadline 属任务语义（Task/ProcessInstance
+  层）；截止语义由 v0.11 E1 映射时在任务层承载，不在传输层预置。
