@@ -46,6 +46,21 @@ priority: high
 - **先决设计问题（开工时定）**：① cron 与模拟时间映射；② 就绪集排序与
   每 tick 一轮的交互。
 
+## 决策进展（2026-08-19，讨论定稿）
+
+- **决策 4（日历）——已定：引入真实日历**。tick ↔ 日映射
+  （`day_length_ticks` 可配置）+ cron 子集（日/周维度）。理由：对接外部
+  业务（每日发布/每周直播本质是日历语义）；"固定 tick 偏移"曾被视为替代，
+  系目标裁剪，已否决。
+- **决策 2（SLA 排序）——已定：引入激活容量** `max_active_agents_per_tick`。
+  Schedule 阶段按 `(priority, deadline_tick)` 决定容量内激活，超容者保持
+  就绪、下 tick 再竞争（幂等、无状态损失）；排序键取 agent 最紧急任务。
+  系统抗超负荷能力总览见 SPEC §14。
+- **决策 3（池路由）——待定**：立即路由（委派时按策略选中 worker，无竞态）
+  vs 延迟接单（任务入池待认领，有 claim 原子性 + 悬空兜底成本）。等裁决。
+- **术语**：SLA 全称与定义已补入 SPEC §9.2（Service Level Agreement，
+  服务等级协议 = deadline_tick + priority 承载的外部业务承诺）。
+
 ## 验收标准
 - [ ] interval 规则每 N tick 生成一次事件/任务
 - [ ] 就绪集按 priority/deadline 排序（测试可断言顺序）

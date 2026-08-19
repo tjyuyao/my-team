@@ -1,7 +1,7 @@
 ---
 kind: task
 phase: v0.10（v0.8 P2 遗留收尾；不依赖扩展表面，可并行）
-source: SPEC §6.3、§14；KANBAN/PLAN/v0.8.0-plan（P2-8）
+source: SPEC §6.3、§15；KANBAN/PLAN/v0.8.0-plan（P2-8）
 priority: medium
 ---
 

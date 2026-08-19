@@ -45,6 +45,19 @@
 - 不做多实例并发写同一 DB（SQLite 单写者；v1.0 前不引入分布式）。
 - 不追求无限规模（单个一人公司规模：个位数到几十个 Agent）。
 
+### 0.4 术语与缩写约定
+
+英文缩写首次出现时给出全称与定义；本文档关键缩写：
+
+- **LLM**（Large Language Model，大语言模型）：本系统的推理引擎。
+- **SLA**（Service Level Agreement，服务等级协议）：见 §9.2。
+- **MCP**（Model Context Protocol）：见 §6.5。
+- **KB**（Knowledge Base，知识库）：SharedKB 的简称。
+- **API**（Application Programming Interface，应用程序接口）：见 §13。
+
+后续章节使用缩写时不再重复全称；遇到未定义的缩写视为文档缺陷，
+应在审阅中指出补齐。
+
 ---
 
 ## 1. 核心设计原则
@@ -489,6 +502,11 @@ IngressEvent:
 
 ### 9.2 SLA 与优先级
 
+**SLA**（Service Level Agreement，服务等级协议）：外部业务对任务的
+**服务承诺**，由 `deadline_tick`（截止时刻）与 `priority`（重要等级）
+两个字段承载；调度按承诺等级排序执行，保证高承诺任务先获得执行时间片。
+SLA 排序与激活容量的协同见 §14 抗超负荷能力。
+
 - Task 携带 `deadline_tick` 与 `priority`；
 - Schedule 阶段按 `(priority, deadline_tick)` 排序就绪集；
 - 到期前 `N` tick 生成 `DEADLINE_APPROACHING` 事件；
@@ -649,7 +667,46 @@ GET  /audit?tick=...          审计查询
 
 ---
 
-## 14. 关键不变量（验收级）
+## 14. 抗超负荷能力（Capacity & Overload Resilience）
+
+系统在多维度设有限额，超限时统一遵循：**宁可排队、不可丢失；可背压、
+必可解释**。超限绝不导致崩溃或静默丢任务。所有限额参数均为配置项，
+上限的物理含义 = 系统在该维度的真实负荷能力（模拟并发、LLM 网关、
+子进程、外部平台配额、存储）。
+
+### 14.1 维度清单
+
+| 维度 | 限额参数 | 超限行为 |
+|---|---|---|
+| 激活（调度） | `max_active_agents_per_tick`（T11 引入） | 容量内按 `(priority, deadline_tick)` 选激活；超容者保持就绪，下 tick 再竞争（幂等，无状态损失） |
+| LLM 并发 | `max_concurrent_llm_requests` | 请求级背压：超限保持 SUBMITTED 排队，不拒绝 |
+| 每激活预算 | `max_llm_calls_per_activation` / `max_tool_calls_per_activation` / `max_action_budget` | PreValidate 拒绝（非背压；可解释，不改状态） |
+| 工具并发 | executor `max_concurrent` | 工具级背压：capacity 压力下 op 保持 PENDING 排队（retryable） |
+| 外部平台 | `Integration.rate_limits.max_calls` | provider 闸背压：保持 SUBMITTED，下 tick 再试（T9 两因独立性） |
+| 执行超时 | manifest `max_runtime_ms` | 超时杀进程组，op 置 TIMED_OUT |
+| 重试 | outbox `max_retries` | 达上限转失败/人工路径 |
+| 存储 | `private_storage_limit_mb` | 写拒绝（可解释） |
+| 输出 | `max_output_bytes` | 截断（不丢任务，只丢细节） |
+| 委派深度 | `max_delegation_depth` | PreValidate 拒绝（防递归失控） |
+
+### 14.2 语义分层
+
+- **背压（retryable）**：容量/配额类超限——op 保持排队状态，下 tick
+  自动再竞争；executor 容量与 provider 配额各自触发、互不混入
+  （T9 两因独立性：`放行 := executor_admitted ∧ provider_admitted`）。
+- **拒绝（非 retryable）**：预算/深度/合法性类超限——PreValidate 拒绝，
+  给出 reason，不改状态。
+- **截断/超时**：资源保护类——不丢任务，只降输出细节或终止单个执行。
+
+### 14.3 协同顺序（级联减压）
+
+激活名额（调度层）→ LLM 并发（请求层）→ 工具并发（执行层）→ 外部
+配额（平台层）：上层名额不足时，下层不产生请求，逐级减压；任一层
+超限只影响该层，不升格为整 tick 失败（T18 业务失败分级）。
+
+---
+
+## 15. 关键不变量（验收级）
 
 - [ ] 一个 tick 只产生一个 TickRecord；回滚 tick 不产生 dispatch。
 - [ ] 任何 pending op 都有明确的创建 tick 与终止 tick；不存在
@@ -665,7 +722,7 @@ GET  /audit?tick=...          审计查询
 
 ---
 
-## 15. 版本路线图
+## 16. 版本路线图
 
 - **v0.9 — 内核可信与真实运行**：P0 修复、统一 Journal、
   Runtime/Control Plane、LLM dispatcher、ContextCompiler 最小版。
@@ -680,7 +737,7 @@ GET  /audit?tick=...          审计查询
 
 ---
 
-## 16. 与旧版 SPEC 的关系
+## 17. 与旧版 SPEC 的关系
 
 本文件是 v0.9 目标架构 Spec，取代 SPEC.v0.8.legacy.md 作为当前
 设计权威。旧版保留为 v0.1–v0.8 实现的历史记录。迁移过程中，
