@@ -466,7 +466,7 @@ IngressEvent:
   payload: dict
   idempotency_key: str
   priority: str
-  deadline_hint: str | None
+  deadline_hint: str | None  # wall-clock 截止提示（外部业务时间）
 ```
 
 - Ingest 阶段消费；`(source, external_id)` 去重（持久化，跨重启）。
@@ -495,20 +495,34 @@ IngressEvent:
 
 ### 9.1 Calendar Scheduler
 
+**时间模型（业务层 = 真实时间；底层引擎 = 离散时间 tick）**：
+- **业务层一律真实时间**（wall-clock datetime），不论系统内部还是外部：
+  `deadline`、`IngressEvent.occurred_at` / `deadline_hint`、cron 触发
+  时刻全部是真实时间；Task/Email/外部承诺等业务层字段**不出现任何 tick
+  概念**。
+- **底层引擎 = 离散时间（tick）**：引擎每 tick 检查真实时钟、处理到期
+  事件、执行一轮阶段；tick **对业务层完全透明、不可感知**，只驱动系统
+  本身的推进速度（每 tick 对应的真实时间间隔 / 人类调速 / 暂停）。
+- **到期判定**：引擎每 tick 用**真实时间直接比较**（真实时钟 ≥ deadline、
+  cron 时刻已到）即触发；不存在 tick 化的业务时间字段（无
+  `deadline_tick` 换算视图）。
+
 - `ScheduleRule`：`{rule_id, target, cron | interval_ticks,
-  next_run_tick, action}`；
+  next_run_tick, action}`（`next_run_tick` 为底层引擎的到期检查刻度，
+  规则本身以真实时间/interval 表达）；
 - 每 tick 评估，到期生成 TIMER_EXPIRY 事件或创建任务；
 - 支持"每日发布""每周选题会""到期前 N tick 提醒"。
 
 ### 9.2 SLA 与优先级
 
 **SLA**（Service Level Agreement，服务等级协议）：外部业务对任务的
-**服务承诺**，由 `deadline_tick`（截止时刻）与 `priority`（重要等级）
-两个字段承载；调度按承诺等级排序执行，保证高承诺任务先获得执行时间片。
-SLA 排序与激活容量的协同见 §14 抗超负荷能力。
+**服务承诺**，由 `deadline`（真实日历时间截止，见 §9.1 时间模型）与
+`priority`（重要等级）两个字段承载；调度按承诺等级排序执行，保证高
+承诺任务先获得执行时间片。SLA 排序与激活容量的协同见 §14 抗超负荷能力。
 
-- Task 携带 `deadline_tick` 与 `priority`；
-- Schedule 阶段按 `(priority, deadline_tick)` 排序就绪集；
+- Task 携带 `deadline`（真实时间）与 `priority`；
+- Schedule 阶段按 `(priority, deadline)` 排序就绪集（deadline 为真实
+  时间，直接比较，无 tick 换算）；
 - 到期前 `N` tick 生成 `DEADLINE_APPROACHING` 事件；
 - 超时走结构化 escalation（`on` = unresolved | condition_breached |
   exception，`mode` = arbitrate | transfer | advise），不硬编码
@@ -678,7 +692,7 @@ GET  /audit?tick=...          审计查询
 
 | 维度 | 限额参数 | 超限行为 |
 |---|---|---|
-| 激活（调度） | `max_active_agents_per_tick`（T11 引入） | 容量内按 `(priority, deadline_tick)` 选激活；超容者保持就绪，下 tick 再竞争（幂等，无状态损失） |
+| 激活（调度） | `max_active_agents_per_tick`（T11 引入） | 容量内按 `(priority, deadline)` 选激活（deadline 为真实时间，直接比较）；超容者保持就绪，下 tick 再竞争（幂等，无状态损失） |
 | LLM 并发 | `max_concurrent_llm_requests` | 请求级背压：超限保持 SUBMITTED 排队，不拒绝 |
 | 每激活预算 | `max_llm_calls_per_activation` / `max_tool_calls_per_activation` / `max_action_budget` | PreValidate 拒绝（非背压；可解释，不改状态） |
 | 工具并发 | executor `max_concurrent` | 工具级背压：capacity 压力下 op 保持 PENDING 排队（retryable） |
