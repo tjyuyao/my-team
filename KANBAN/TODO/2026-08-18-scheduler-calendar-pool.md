@@ -44,13 +44,14 @@ priority: high
 - **WorkerPool 接单竞态（已被决策 3 消解）**：原担心 `recipient` 扩为
   `agent_id | pool_id` 后池内谁接单/防双接需原子语义；决策 3 定为
   pool = service manager 后，分配权在 manager 单点串行、同 tick 提交原子，
-  child 不并行抢单，竞态不存在。需转述为「manager 转发给 child 的两级
-  委派 tick/所有权语义」（先决设计问题①）。
+  child 不并行抢单，竞态不存在。委派语义见任务模型定稿（§4.2：
+  委派=建副本，assigner/assignee 责任声明）。
 - **cron vs tick**：cron 表达式与模拟时间的映射是决策点（interval_ticks
   简单，cron 需定对齐规则）。
 - **先决设计问题（开工时定）**：① cron 与模拟时间映射；② 就绪集排序与
-  每 tick 一轮的交互；③ manager 转发 child 的两级委派 tick/所有权语义
-  （立即转 发是否同 tick 完成、终责归属 manager 还是 worker）。
+  每 tick 一轮的交互；③ manager 委派副本给 child 的 **tick 时序**（委派
+  副本在 manager 所在 tick 立即可见、还是 child 下 tick 才激活；责任由
+  assigner/assignee 声明，不再悬而未决）。
 
 ## 决策进展（2026-08-19，讨论定稿）
 
@@ -73,8 +74,9 @@ priority: high
   规则最简退化形），pool 只是这一动作的退化档，不值得独立设计。
   立即/延迟是同一 manager 的**两种可配置行为**（`routing` 配置项切换），
   均不引入框架新实体：
-  - **立即（指派式）**：manager 收到委派当场按规则选中 child 转发——零
-    唤醒，复用"委派→直接子级"现成路径；等待期任务已归属目标 child 队列。
+  - **立即（指派式）**：manager 收到委派当场按规则选中 child 并**委派副本**
+    （新 task，assignee=该 child）——零唤醒，复用"委派→直接子级"现成路径；
+    等待期任务已归属目标 child。
   - **延迟（认领式）**：任务先入 manager 的**待分配区（manager 自身状态
     字段，非新实体）**，等观察到某 child 空闲/有容量再转——多一个
     "child 空出→唤醒 manager 再分派"的 WakeEvent hook。
@@ -83,8 +85,12 @@ priority: high
   由此 `DelegateIntent.recipient` 不需扩展 `pool_id`（委派目标就是那个
   service manager）；Pool 专有机制（`AgentConfig.worker_pools`、
   `owner_pool`、pool_id 路由逻辑）全部删除。前提：`kind=service`（SPEC
-  §4.1 已规划、代码未实现）需先落地；两级委派的 tick/所有权语义在 T11
-  开工时定。
+  §4.1 已规划、代码未实现）需先落地。
+- **任务模型（2026-08-19 定稿，SPEC §4.2）**：任务书**不可变**；责任由
+  `assigner`/`assignee` 声明（**不限 kind**——规则/LLM 均可为责任人）；
+  向下委派即使一字不改也**新建副本**（新 task_id），责任随副本转移，形成
+  逐层独立的责任关系；任务树**不单独持久化**，由副本间 `derived_from`
+  引用沿委派链动态推导（组织/审计视图）。
 - **术语**：SLA 全称与定义已补入 SPEC §9.2（Service Level Agreement，
   服务等级协议 = deadline（真实时间）+ priority 承载的外部业务承诺）。
   业务层一律真实时间，无 tick 概念（§9.1）。

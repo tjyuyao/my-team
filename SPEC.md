@@ -235,15 +235,34 @@ AgentConfig:
 
 ### 4.2 任务 Task
 
-在 v0.8 Task 基础上增加：
+任务（task）是可追踪的工作陈述，由**责任**与**内容**两部分构成。
 
-- `deadline: str | None`：响应/完成时限（**真实日历时间**，见 §9.1
-  时间模型；原 `sla_ticks`/`deadline_tick` 为早期 tick 化遗留，迁移后
-  业务层不再出现 tick 字段）；
-- `priority`：调度排序；
-- `depends_on: list[task_id]`：任务依赖（新增，B 阻塞于 A）；
-- `source_event_id`：来源 Ingress 事件（客服 ticket 等）；
-- `artifacts`：文本引用或 Asset 引用。
+**责任**：
+- `assigner`：委派方（谁分派这个任务）；
+- `assignee`：责任方（谁承接/执行，对 assigner 负责）。assignee **不限定
+  `kind`**——规则型（service）或 LLM agent 均可承担任务责任，责任人由
+  任务字段声明，不由 agent 是否有推理能力决定（pool manager 语境见 §9.3）。
+
+**内容（任务书正文，不可变）**：标题、描述、验收标准（required_outputs）、
+`deadline`（真实时间，见 §9.1）、`priority`、`depends_on: list[task_id]`
+（执行前置：B 阻塞于 A，可先于执行期有声）、`artifacts`、`source_event_id`。
+任务书一经生成不改写；任何需求变更 = 派生新任务，不改原任务书正文。
+
+**委派 = 建副本（task materialization）**：assignee 向下委派时，即使内容
+一字不改，也**新建一个副本任务**（新 task_id），在副本上改写
+assigner/assignee 与（可选）deadline/验收；原任务书不变。责任随副本转移：
+副本对它的 assigner 负责，形成逐层独立的责任关系（不依赖 agent 的 kind）。
+
+**任务树 = 任务间引用关系的视图（不单独持久化）**：树不由独立数据结构
+维护一致性，而是由副本间的**任务间引用**沿委派链动态推导：
+- `derived_from: task_id | None`：本副本由哪一任务分解而来；
+- （可由引用反向得出子级，用于组织/审计视图）。
+每层 agent 通过其 briefing 上下文（专注任务、收件箱）感知分解责任；父任务
+可对子级聚合状态（如 `WAITING_FOR_CHILDREN`），但**树的形状由引用关系导出，
+不另建全局任务树数据**。
+
+> 术语对齐（实现迁移）：既有 `creator_agent_id`/`owner_agent_id` 语义并入
+> `assigner`/`assignee`；`parent_task_id` 并入 `derived_from` 引用链。
 
 ### 4.3 消息 / Email
 

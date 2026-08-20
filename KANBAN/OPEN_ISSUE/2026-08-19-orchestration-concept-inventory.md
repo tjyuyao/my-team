@@ -30,8 +30,10 @@ v0.10-11，欠实现不欠决策）／**❓ 未定**（真正设计空白，需�
 
 | 概念 | 状态 | 工作方式 | 缺口 |
 |---|---|---|---|
-| 任务树 + 状态机 | ✅ | `task.py`：完整状态转换（DRAFT→…→COMPLETED），priority、父/子、WAITING_FOR_CHILDREN | — |
-| 任务依赖 depends_on | ⏳ | SPEC §4.2「B 阻塞于 A」 | 代码 Task 无此字段 |
+| 任务书（不可变）+ 状态机 | ✅ | `task.py`：任务状态机（DRAFT→…→COMPLETED）+ 生命周期状态（IN_PROGRESS 等） | — |
+| 委派 = 副本 (task materialization) | ⏳ | §4.2 定稿：委派即新建不可变副本（新 task_id）+ `derived_from` 引用；assigner/assignee 声明责任（不限 kind） | 代码仍 creator/owner + 单任务可变，未迁移 |
+| 任务树 = 引用视图 | ⏳ | §4.2 定稿：树不单独持久化，由副本引用链动态推导 | 未实现（现用 parent/child 字段维护） |
+| 任务依赖 depends_on | ⏳ | §4.2 执行前置（B 阻塞于 A），与"分解建树"正交 | 代码 Task 无此字段 |
 | SLA | ⏳ | §9.2 = deadline(真实时间)+priority | `deadline_tick` 未迁移（`task.py`/`intent.py`） |
 
 ## C. 何时做 —— 调度层
