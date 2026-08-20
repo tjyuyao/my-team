@@ -219,7 +219,6 @@ AgentConfig:
   role: str                              # 角色（场景包定义）
   parent_id: str | None
   children: list[str]
-  worker_pools: list[str]                # 新增：所属 WorkerPool
   tools: list[str]                       # 能力授权（工具名）
   observation_policy: str                # 新增：观察策略名
   llm_profile: str | None                # kind=llm
@@ -230,17 +229,19 @@ AgentConfig:
 
 - 组织树静态；日常运行不变更父子关系。
 - `kind=human` 的 Agent 由 UI 队列驱动，不由 LLM 驱动。
-- `kind=service` 的 Agent 是外部服务的代理（可选优化）。
+- `kind=service` 的 Agent 是外部服务的代理（可选优化）；**兼作
+  WorkerPool 的 manager 节点**（决策 3：pool = kind=service manager +
+  children，见 §9.3）。
 
 ### 4.2 任务 Task
 
 在 v0.8 Task 基础上增加：
 
-- `sla_ticks: int | None`：响应/完成时限；
+- `deadline: str | None`：响应/完成时限（**真实日历时间**，见 §9.1
+  时间模型；原 `sla_ticks`/`deadline_tick` 为早期 tick 化遗留，迁移后
+  业务层不再出现 tick 字段）；
 - `priority`：调度排序；
 - `depends_on: list[task_id]`：任务依赖（新增，B 阻塞于 A）；
-- `owner_pool: str | None`：当委派到 WorkerPool 时由路由层选择
-  具体 Agent（新增）；
 - `source_event_id`：来源 Ingress 事件（客服 ticket 等）；
 - `artifacts`：文本引用或 Asset 引用。
 
@@ -529,10 +530,19 @@ IngressEvent:
 
 ### 9.3 WorkerPool
 
-- `WorkerPool`：一组同质 Worker + 路由策略（round_robin /
-  least_busy / skill_match）。
-- `DelegateIntent.recipient` 可以是 `agent_id` 或 `pool_id`；
-  池路由发生在 Act/Commit 阶段，选择结果写入 Journal。
+**决策 3（2026-08-19 定稿）：pool 不设独立一等原语，建模为组织树上的
+一个 `kind=service` manager + children + 声明式路由规则。** 选择动作本就
+存在（LLM manager 复杂判定选人，service manager 读状态+规则选人是同一
+动作的规则最简档），pool 只是该动作的退化形，不值得独立设计。立即/延迟
+是同一 manager 的两种可配置行为（`routing` 配置项：`immediate | deferred`），
+均不引入框架新实体；分配权在 manager 单点串行、同 tick 提交原子，无认领
+竞态。由此：
+- `DelegateIntent.recipient` 仍为 `agent_id`，指向该 service manager；
+  **不引入 `pool_id`**。
+- 删除 `AgentConfig.worker_pools`、Task `owner_pool` 等 Pool 专有机制。
+- 路由规则（round_robin / least_busy / skill_match）由 manager 声明式
+  配置；`routing=immediate` 委派当场转发，`deferred` 先入 manager 待分配
+  区，观察到 child 空闲再分派（经 WakeEvent 唤醒）。结果写入 Journal。
 
 ---
 

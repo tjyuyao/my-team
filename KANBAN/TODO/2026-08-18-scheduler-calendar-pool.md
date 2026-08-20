@@ -22,10 +22,11 @@ priority: high
 - 到期前 N tick 生成 `DEADLINE_APPROACHING` 事件；超时走结构化
   escalation（on/mode/target，见 Authority 方向），不硬编码
   「通知 Manager → 转人工 → 关闭」阶梯。
-- `WorkerPool`：一组同质 Worker + 路由策略
-  （round_robin / least_busy / skill_match）。
-- `DelegateIntent.recipient` 支持 `agent_id` 或 `pool_id`；
-  池路由结果写入 Journal。
+- `WorkerPool` = 一个 `kind=service` manager + children + 声明式路由
+  规则（round_robin / least_busy / skill_match）；无独立 `pool_id`
+  机制，`DelegateIntent.recipient` 仍为 `agent_id`（指向该 manager），
+  池路由行为由 manager 内部按 `routing`（immediate|deferred）执行，
+  结果写入 Journal。
 
 ## 产出
 - Calendar Scheduler 与 WorkerPool 路由。
@@ -40,13 +41,16 @@ priority: high
   确定性排序，无 priority/deadline 概念（Task 模型已有 priority +
   `deadline_tick` 遗留字段，迁移见决策进展）；需与「每 tick 一轮唯一
   执行」并发约束交互设计。
-- **WorkerPool 接单竞态**：`DelegateIntent.recipient` 从 `agent_id` 扩为
-  `agent_id | pool_id`；池内谁接单、同一任务防双接，需原子语义；路由
-  结果写 Journal。
+- **WorkerPool 接单竞态（已被决策 3 消解）**：原担心 `recipient` 扩为
+  `agent_id | pool_id` 后池内谁接单/防双接需原子语义；决策 3 定为
+  pool = service manager 后，分配权在 manager 单点串行、同 tick 提交原子，
+  child 不并行抢单，竞态不存在。需转述为「manager 转发给 child 的两级
+  委派 tick/所有权语义」（先决设计问题①）。
 - **cron vs tick**：cron 表达式与模拟时间的映射是决策点（interval_ticks
   简单，cron 需定对齐规则）。
 - **先决设计问题（开工时定）**：① cron 与模拟时间映射；② 就绪集排序与
-  每 tick 一轮的交互。
+  每 tick 一轮的交互；③ manager 转发 child 的两级委派 tick/所有权语义
+  （立即转 发是否同 tick 完成、终责归属 manager 还是 worker）。
 
 ## 决策进展（2026-08-19，讨论定稿）
 
@@ -63,8 +67,24 @@ priority: high
   激活，超容者保持
   就绪、下 tick 再竞争（幂等、无状态损失）；排序键取 agent 最紧急任务。
   系统抗超负荷能力总览见 SPEC §14。
-- **决策 3（池路由）——待定**：立即路由（委派时按策略选中 worker，无竞态）
-  vs 延迟接单（任务入池待认领，有 claim 原子性 + 悬空兜底成本）。等裁决。
+- **决策 3（池路由）——已定：不设独立 WorkerPool 原语；pool = 一个
+  `kind=service` manager + children + 声明式路由规则**。选择动作本就存在
+  （LLM manager 复杂判定选人，service manager 读状态+规则选人是同一动作的
+  规则最简退化形），pool 只是这一动作的退化档，不值得独立设计。
+  立即/延迟是同一 manager 的**两种可配置行为**（`routing` 配置项切换），
+  均不引入框架新实体：
+  - **立即（指派式）**：manager 收到委派当场按规则选中 child 转发——零
+    唤醒，复用"委派→直接子级"现成路径；等待期任务已归属目标 child 队列。
+  - **延迟（认领式）**：任务先入 manager 的**待分配区（manager 自身状态
+    字段，非新实体）**，等观察到某 child 空闲/有容量再转——多一个
+    "child 空出→唤醒 manager 再分派"的 WakeEvent hook。
+  - **无认领竞态**：分配权在 manager（单点、同 tick 提交原子性），child
+    不并行抢单，"两个空闲同时抢一单"在这一架构下不存在。
+  由此 `DelegateIntent.recipient` 不需扩展 `pool_id`（委派目标就是那个
+  service manager）；Pool 专有机制（`AgentConfig.worker_pools`、
+  `owner_pool`、pool_id 路由逻辑）全部删除。前提：`kind=service`（SPEC
+  §4.1 已规划、代码未实现）需先落地；两级委派的 tick/所有权语义在 T11
+  开工时定。
 - **术语**：SLA 全称与定义已补入 SPEC §9.2（Service Level Agreement，
   服务等级协议 = deadline（真实时间）+ priority 承载的外部业务承诺）。
   业务层一律真实时间，无 tick 概念（§9.1）。

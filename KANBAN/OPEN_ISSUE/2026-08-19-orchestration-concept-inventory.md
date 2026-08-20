@@ -23,7 +23,7 @@ v0.10-11，欠实现不欠决策）／**❓ 未定**（真正设计空白，需�
 | 概念 | 状态 | 工作方式 | 缺口 |
 |---|---|---|---|
 | 组织树 | ✅ | `agent_tree.py`：静态父子树，parent/children/可委派给直接子级；含环检测 | 无 |
-| 委派 DelegateIntent | ✅ | `intent.py`：分派到 `recipient_agent_id`（**仅限人**） | 无 `pool_id` 分支 |
+| 委派 DelegateIntent | ✅ | `intent.py`：分派到 `recipient_agent_id`（**仅限人**） | 决策 3 明确**不引入 `pool_id`**（pool = service manager 节点，仍委派到 agent_id） |
 | AgentConfig.kind | ❓ | SPEC §4.1 规划 `llm\|human\|service` | **代码无 `kind` 字段**——Human Worker(T12a) 前置 |
 
 ## B. 做什么 —— 任务层
@@ -41,7 +41,7 @@ v0.10-11，欠实现不欠决策）／**❓ 未定**（真正设计空白，需�
 | AgentScheduler | ✅ | `scheduler.py`：事件驱动 ready set + WakeCondition；每 tick 每 agent≤1 激活；claim/defer/consume/requeue(回滚) | ready set 按 `agent_id` 排序，**无 (priority,deadline) 排序**、无容量上限 |
 | 激活容量 | ⏳ | §14.1 `max_active_agents_per_tick`（T11 决策 2 已定） | 未实现 |
 | Calendar / ScheduleRule | ⏳ | §9.1 cron 子集（日/周；决策 4 已定真实日历） | **代码零实现** |
-| WorkerPool | ❓ | §9.3 同质 worker + 路由 | 零实现；**路由语义（决策 3）未定**：立即路由 vs 延迟接单 |
+| WorkerPool | ⏳ | §9.3 决策 3 已定：pool = `kind=service` manager + children + 声明式路由（round_robin/least_busy/skill_match）；立即/延迟为 `routing` 配置项，无独立原语、无 `pool_id` | 零实现；前置需落地 `kind=service` 字段 |
 
 ## D. 谁能做 / 需批准 —— 决策权限层
 
@@ -60,26 +60,27 @@ v0.10-11，欠实现不欠决策）／**❓ 未定**（真正设计空白，需�
 
 ## 缺口性质分类
 
-**ⓐ 已定未做（欠实现不欠决策，按 roadmap 排队）**：deadline_tick→真实时间
-迁移(B)；激活容量(C)；Calendar(C)；WorkerPool 骨架(C)；依赖 depends_on(B)；
-ApprovalGate(D)；Human Worker(D)。
+**ⓐ 已定未做（欠实现不欠决策，按 roadmap 排队）**：`deadline_tick`→真实时间
+迁移(B)；激活容量(C)；Calendar(C)；WorkerPool = service-manager pattern 落地
+(C，前置 `kind=service`)；`kind` 字段(A)；依赖 depends_on(B)；ApprovalGate(D)；
+Human Worker(D)。
 
-**ⓑ 真正设计空白（需决策）**：
-1. **WorkerPool 路由语义（T11 决策 3）**：立即路由（委派时按策略选中 worker，
-   转普通委派）vs 延迟接单（入池待认领，claim 原子性+悬空兜底）。
-   注：OI-005/OI-006 溯源显示原始客服场景要的是**立即路由**（委派到池、按负载/
-   技能选中、任务立即有人负责可追踪）；自主认领语义在来源链中未出现。
+**ⓑ 真正设计空白（需决策）**：**已空**——WorkerPool 路由语义（决策 3）已于
+2026-08-19 定稿：pool = service manager + children + 声明式路由，立即/延迟为
+`routing` 配置项，无独立原语、无 `pool_id`。（溯源佐证：OI-005/OI-006 原始客服
+场景要的是委派到池、按负载/技能选中，即立即语义；认领竞态被 manager 单点串行
+消解。）
 
-**ⓒ 潜在偏离/扩张（非缺陷，需显式定位）**：WorkerPool 本身。与 Email/组织架构
+**ⓒ 潜在偏离/扩张（非缺陷，需显式定位）**：WorkerPool 的定位。与 Email/组织架构
 核心的边界判断——
 - 组织树 / 委派 / Email：**点对点、少而精、可精确指定人**（组织架构建模）；
 - WorkerPool：**量大、同质、可互换、不关心是谁**（客服运营建模）。
-接 `pool_id` 后 `DelegateIntent.recipient` 从「指定人」扩展为「指定人或指定
-供给组」，邮箱投递之外的第二种选址逻辑进入 Schedule/Commit——这是唯一需要在
-架构层拍板的分歧，其余缺口都是已定未做的排队。
+决策 3 将此偏离**消除**：pool 不再是独立选址原语，而是「组织树上一个
+`kind=service` manager + children」——委派仍是点到该 manager 节点，邮箱投递之外
+的第二种选址逻辑不进入 Schedule/Commit（分派是 manager 内部行为）。
 
 ## 交叉引用
 
-- `KANBAN/TODO/scheduler-calendar-pool`（T11，决策 3 待裁决）
+- `KANBAN/TODO/scheduler-calendar-pool`（T11，决策 3 已定，待开工）
 - `KANBAN/TODO/human-worker`（T12a）
 - `KANBAN/OPEN_ISSUE/extension-surface-spec`（OI-005/006 出处：Authority/编排层/池）
