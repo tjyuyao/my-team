@@ -80,7 +80,7 @@ from my_team.models.activation import (
     WakeEventType,
     WakeupEvent,
 )
-from my_team.models.agent import AgentConfig
+from my_team.models.agent import AgentConfig, PoolMode
 
 # New v0.6.0 models
 from my_team.models.continuation import AgentContinuation, ContinuationPhase
@@ -419,6 +419,10 @@ class Simulation:
         self._calendar_store = CalendarStore()
         # Fires staged this tick; wakes enqueued post-commit only.
         self._calendar_fires_this_tick: list[dict[str, Any]] = []
+        # T11 决策 3: round-robin cursors per pool manager. In-memory
+        # fairness state — resets on restart (benign: fairness only;
+        # least_busy is the default strategy and is stateless).
+        self._pool_cursors: dict[str, int] = {}
         # T11: fire-once tracking for deadline wake events (task_id →
         # {"approaching", "expired"}). Rolled-back ticks un-mark what
         # they fired so events re-fire after rollback (no loss).
@@ -2614,6 +2618,131 @@ class Simulation:
         # creation) for due rules; wakes are enqueued post-commit only.
         self._check_calendar(tick)
 
+        # T11 决策 3: deferred-mode WorkerPool dispatch — pair pending
+        # umbrella tasks with idle children, staged atomically.
+        self._dispatch_deferred_pools(tick)
+
+    def _select_pool_child(
+        self,
+        manager_id: str,
+        strategy: Any,
+        skill: str | None = None,
+    ) -> str | None:
+        """Declarative child selection for a pool manager (T11 决策 3).
+
+        All strategies are kernel-executed rules on the manager's
+        children — no LLM involvement. Returns None when the pool has
+        no children.
+        """
+        from my_team.models.agent import PoolStrategy
+
+        child_ids = sorted(self._agent_tree.child_ids(manager_id))
+        if not child_ids:
+            return None
+        if strategy == PoolStrategy.SKILL_MATCH and skill:
+            matched = [
+                cid for cid in child_ids
+                if self._child_has_skill(cid, skill)
+            ]
+            if matched:
+                child_ids = matched
+            # No match → fall through to least_busy over all children.
+        if strategy == PoolStrategy.ROUND_ROBIN and len(child_ids) > 0:
+            cursor = self._pool_cursors.get(manager_id, 0)
+            self._pool_cursors[manager_id] = (cursor + 1) % len(child_ids)
+            return child_ids[cursor]
+        # least_busy (default; also the skill_match fallback):
+        return min(
+            child_ids,
+            key=lambda cid: (
+                sum(
+                    1
+                    for t in self._task_tree.get_owner_tasks(cid)
+                    if t.is_active
+                ),
+                cid,
+            ),
+        )
+
+    def _child_has_skill(self, agent_id: str, skill: str) -> bool:
+        config = self._agent_tree.get(agent_id)
+        skills = config.metadata.get("skills", [])
+        return config.role == skill or skill in skills
+
+    def _dispatch_deferred_pools(self, tick: int) -> None:
+        """Deferred-mode pool dispatch (T11 决策 3).
+
+        Pending work is derived statelessly — owner == manager ∧
+        ASSIGNED ∧ no copy derived from it — so no extra queue entity
+        exists. Each tick, Ingest pairs pending tasks with idle
+        children (no active tasks) and stages each dispatch as an
+        atomic group (copy + notification email). Assignment stays a
+        single-point serial decision of the manager (kernel-executed
+        rule), same-tick commit-atomic: no claim races.
+        """
+        from my_team.models.agent import PoolMode
+
+        for config in self._agent_tree:
+            if config.kind != "service" or config.pool is None:
+                continue
+            if config.pool.mode != PoolMode.DEFERRED:
+                continue
+            manager_id = config.agent_id
+            owned = self._task_tree.get_owner_tasks(manager_id)
+            dispatched = {
+                t.derived_from for t in self._task_tree
+                if t.derived_from is not None
+            }
+            pending = [
+                t for t in owned
+                if t.status == TaskStatus.ASSIGNED
+                and t.task_id not in dispatched
+            ]
+            idle_children = [
+                cid for cid in sorted(self._agent_tree.child_ids(manager_id))
+                if not any(
+                    t.is_active
+                    for t in self._task_tree.get_owner_tasks(cid)
+                )
+            ]
+            for task, child in zip(pending, idle_children):
+                from uuid import uuid4
+                copy_id = f"task.{tick}.{uuid4().hex[:8]}"
+                group_id = f"pool.{manager_id}.{tick}.{copy_id}"
+                self._transaction_buffer.stage(
+                    effect_type=EffectType.TASK_CREATE,
+                    agent_id=manager_id,
+                    resource=copy_id,
+                    data={
+                        "task_id": copy_id,
+                        "title": task.title,
+                        "description": task.description,
+                        "creator_agent_id": manager_id,
+                        "owner_agent_id": child,
+                        "parent_task_id": task.task_id,
+                        "derived_from": task.task_id,
+                        "priority": task.priority.value,
+                        "deadline": task.deadline,
+                    },
+                    group_id=group_id,
+                    atomicity="group",
+                )
+                self._transaction_buffer.stage(
+                    effect_type=EffectType.EMAIL_SEND,
+                    agent_id=manager_id,
+                    resource=f"email:{manager_id}",
+                    data={
+                        "from_agent": manager_id,
+                        "to": [child],
+                        "subject": f"[POOL] {task.title}",
+                        "body": task.description,
+                        "email_type": "delegation",
+                        "task_id": copy_id,
+                    },
+                    group_id=group_id,
+                    atomicity="group",
+                )
+
     def register_schedule_rule(self, rule: ScheduleRule) -> ScheduleRule:
         """Register a calendar rule (SPEC §9.1). Validates target and
         stamps ``registered_at`` with the current business time; the
@@ -3432,6 +3561,37 @@ class Simulation:
                 if isinstance(intent, DelegateIntent):
                     from uuid import uuid4
                     task_id = f"task.{tick}.{uuid4().hex[:8]}"
+                    recipient = self._agent_tree.get(
+                        intent.recipient_agent_id,
+                    )
+                    # T11 决策 3: delegation into an immediate-mode
+                    # WorkerPool expands here — original (assignee =
+                    # pool manager) + working copy (assignee = selected
+                    # child, derived_from = original) + worker notice,
+                    # all one atomic group; zero wake latency.
+                    pool_copy_id: str | None = None
+                    pool_child: str | None = None
+                    if (
+                        recipient.kind == "service"
+                        and recipient.pool is not None
+                        and recipient.pool.mode == PoolMode.IMMEDIATE
+                    ):
+                        pool_child = self._select_pool_child(
+                            intent.recipient_agent_id,
+                            recipient.pool.strategy,
+                            skill=intent.skill,
+                        )
+                        if pool_child is None:
+                            results.append(ActionResult(
+                                action=action, success=False,
+                                error=(
+                                    f"WorkerPool '{intent.recipient_agent_id}'"
+                                    " has no workers"
+                                ),
+                                error_code="INVALID_ARGUMENT",
+                            ))
+                            continue
+                        pool_copy_id = f"task.{tick}.{uuid4().hex[:8]}"
                     self._transaction_buffer.stage(
                         effect_type=EffectType.TASK_CREATE,
                         agent_id=agent_id,
@@ -3448,17 +3608,39 @@ class Simulation:
                         group_id=intent.intent_id,
                         atomicity="group",
                     )
+                    if pool_copy_id is not None and pool_child is not None:
+                        assert pool_child is not None
+                        self._transaction_buffer.stage(
+                            effect_type=EffectType.TASK_CREATE,
+                            agent_id=agent_id,
+                            resource=pool_copy_id,
+                            data={
+                                "task_id": pool_copy_id,
+                                "title": intent.task_title,
+                                "description": intent.task_description,
+                                "creator_agent_id": (
+                                    intent.recipient_agent_id
+                                ),
+                                "owner_agent_id": pool_child,
+                                "parent_task_id": task_id,
+                                "derived_from": task_id,
+                                "priority": "normal",
+                                "deadline": intent.deadline,
+                            },
+                            group_id=intent.intent_id,
+                            atomicity="group",
+                        )
                     self._transaction_buffer.stage(
                         effect_type=EffectType.EMAIL_SEND,
                         agent_id=agent_id,
                         resource=f"email:{agent_id}",
                         data={
                             "from_agent": agent_id,
-                            "to": [intent.recipient_agent_id],
+                            "to": [pool_child or intent.recipient_agent_id],
                             "subject": f"[DELEGATE] {intent.task_title}",
                             "body": intent.task_description,
                             "email_type": "delegation",
-                            "task_id": task_id,
+                            "task_id": pool_copy_id or task_id,
                         },
                         group_id=intent.intent_id,
                         atomicity="group",
@@ -3818,6 +4000,23 @@ class Simulation:
                             error=(
                                 f"'{agent_id}' cannot delegate to '{target_id}'"
                                 " (not a direct child)"
+                            ),
+                            error_code="INVALID_ARGUMENT",
+                        ))
+                        continue
+                    # T11 决策 3: a bare kind=service proxy takes no
+                    # delegated work — it must declare pool config.
+                    target_cfg = self._agent_tree.get(target_id)
+                    if (
+                        target_cfg.kind == "service"
+                        and target_cfg.pool is None
+                    ):
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"'{target_id}' is a service agent without "
+                                "WorkerPool config"
                             ),
                             error_code="INVALID_ARGUMENT",
                         ))
@@ -4571,6 +4770,7 @@ class Simulation:
                         parent_task_id=parent_task_id,
                         priority=priority,
                         deadline=data.get("deadline"),
+                        derived_from=data.get("derived_from"),
                         status=TaskStatus.ASSIGNED,
                         tick=tick,
                     )

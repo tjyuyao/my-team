@@ -7,9 +7,9 @@ per SPEC §4.1, §4.2, §4.3.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AgentRole(str, Enum):
@@ -63,6 +63,33 @@ class SharedKBPermission(BaseModel):
     )
 
 
+class PoolMode(str, Enum):
+    """WorkerPool routing behavior (T11 决策 3, SPEC §9.3)."""
+
+    IMMEDIATE = "immediate"  # delegate → select child → copy same tick
+    DEFERRED = "deferred"    # queue at manager; dispatch when child idle
+
+
+class PoolStrategy(str, Enum):
+    """Declarative child-selection rules (round_robin needs no LLM)."""
+
+    ROUND_ROBIN = "round_robin"
+    LEAST_BUSY = "least_busy"
+    SKILL_MATCH = "skill_match"
+
+
+class PoolConfig(BaseModel):
+    """WorkerPool behavior on a ``kind=service`` manager (SPEC §9.3).
+
+    pool = service manager + children + declarative routing rules —
+    no independent pool primitive, no pool_id. Selection is executed
+    by the kernel as the manager's rule-driven behavior.
+    """
+
+    mode: PoolMode = PoolMode.IMMEDIATE
+    strategy: PoolStrategy = PoolStrategy.LEAST_BUSY
+
+
 class AgentConfig(BaseModel):
     """Agent configuration as loaded from JSON, per SPEC §17.
 
@@ -73,6 +100,21 @@ class AgentConfig(BaseModel):
     agent_id: str = Field(description="Unique identifier, e.g. 'agent.research'")
     display_name: str = Field(description="Human-readable name")
     role: str = Field(description="Agent role identifier")
+    kind: Literal["llm", "human", "service"] = Field(
+        default="llm",
+        description=(
+            "Agent kind (SPEC §4.1): llm = LLM-driven; human = UI-queue "
+            "driven; service = external-service proxy / rule-driven "
+            "(WorkerPool manager, §9.3)"
+        ),
+    )
+    pool: PoolConfig | None = Field(
+        default=None,
+        description=(
+            "WorkerPool routing config; only valid for kind=service "
+            "managers with children (T11 决策 3)"
+        ),
+    )
     parent_id: str | None = Field(
         default=None,
         description="Parent agent ID (null for root)",
@@ -97,3 +139,12 @@ class AgentConfig(BaseModel):
         default_factory=dict,
         description="Additional role-specific configuration",
     )
+
+    @model_validator(mode="after")
+    def _validate_pool(self) -> AgentConfig:
+        if self.pool is not None and self.kind != "service":
+            raise ValueError(
+                f"Agent '{self.agent_id}': pool config requires "
+                f"kind='service' (got '{self.kind}')",
+            )
+        return self
