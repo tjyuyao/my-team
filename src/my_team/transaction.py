@@ -41,6 +41,7 @@ class EffectType(str, Enum):
     STATE_TRANSITION = "state_transition"
     RECORD_UPSERT = "record_upsert"
     RECORD_DELTA = "record_delta"
+    RULE_ADVANCE = "rule_advance"
 
 
 # Effect types that have external (non-in-memory) side effects.
@@ -144,6 +145,10 @@ INVERT_CONTRACT: dict[EffectType, InvertSpec] = {
     EffectType.RECORD_UPSERT: InvertSpec(
         kind=InvertKind.RESTORE_PREVIOUS,
         recorded="prior record (or None) + appended ledger entry ids → restore + remove entries",
+    ),
+    EffectType.RULE_ADVANCE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded="prev (next_run_tick, last_fired_at) → restore schedule state",
     ),
     EffectType.RECORD_DELTA: InvertSpec(
         kind=InvertKind.RESTORE_PREVIOUS,

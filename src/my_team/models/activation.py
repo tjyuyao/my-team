@@ -26,6 +26,7 @@ class WakeEventType(str, Enum):
     TIMER_EXPIRY = "timer_expiry"
     BOOTSTRAP = "bootstrap"
     EXTERNAL_RESULT = "external_result"  # T9: outbound external op completed
+    SCHEDULE_TRIGGER = "schedule_trigger"  # T11: calendar rule fired (emit_event)
 
 
 class WaitingState(str, Enum):

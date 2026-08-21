@@ -21,6 +21,7 @@ import json
 import os
 import signal
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -43,6 +44,7 @@ from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
 from my_team.asset_store import AssetStore, AttachmentRef
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
+from my_team.calendar import CalendarStore, ScheduleAction, ScheduleRule
 from my_team.context_compiler import ContextCompiler
 from my_team.executor_registry import (
     ExecutorRegistry,
@@ -411,6 +413,12 @@ class Simulation:
 
         # Agent scheduler (event-driven activation)
         self._scheduler = AgentScheduler(config=self._config.execution)
+        # T11: calendar rules (SPEC §9.1) — advancement is a staged
+        # RULE_ADVANCE effect, committed atomically with the rule's
+        # task creation (T11 决策 1).
+        self._calendar_store = CalendarStore()
+        # Fires staged this tick; wakes enqueued post-commit only.
+        self._calendar_fires_this_tick: list[dict[str, Any]] = []
         # T11: fire-once tracking for deadline wake events (task_id →
         # {"approaching", "expired"}). Rolled-back ticks un-mark what
         # they fired so events re-fire after rollback (no loss).
@@ -2180,6 +2188,7 @@ class Simulation:
         # T4: start journal record for this tick
         self._journal.start_tick(tick, self._state_epoch)
         self._deadline_fired_this_tick = []
+        self._calendar_fires_this_tick = []
 
         # Phase 1: Ingest — collect completed external operations + deliver emails
         self._phase_ingest(tick)
@@ -2600,6 +2609,99 @@ class Simulation:
         # with DEADLINE_APPROACHING / TIMER_EXPIRY (fire once per task
         # per kind; rollback un-marks, see run_tick).
         self._check_deadlines(tick)
+
+        # T11: calendar rules (SPEC §9.1) — stage RULE_ADVANCE (+ task
+        # creation) for due rules; wakes are enqueued post-commit only.
+        self._check_calendar(tick)
+
+    def register_schedule_rule(self, rule: ScheduleRule) -> ScheduleRule:
+        """Register a calendar rule (SPEC §9.1). Validates target and
+        stamps ``registered_at`` with the current business time; the
+        first cron fire is the next occurrence strictly after it."""
+        if rule.target_agent_id not in self._agent_tree:
+            raise ValueError(
+                f"Schedule rule '{rule.rule_id}' targets unknown agent "
+                f"'{rule.target_agent_id}'",
+            )
+        rule.registered_at = self._tick_engine.wall_now()
+        return self._calendar_store.register(rule)
+
+    def _check_calendar(self, tick: int) -> None:
+        """Evaluate due schedule rules and stage their effects.
+
+        Due-ness is read-only evaluation against the business clock;
+        the advancement itself is a staged RULE_ADVANCE effect grouped
+        atomically with any created task — commit applies both or the
+        rollback inverts both (T11 决策 1). Wake events for EMIT_EVENT
+        rules are enqueued post-commit (Publish), never on a rolled
+        back tick.
+        """
+        now = self._tick_engine.wall_now()
+        for rule in self._calendar_store.enabled():
+            fire: dict[str, Any] | None = None
+            if rule.interval_ticks is not None:
+                if tick < rule.next_run_tick:
+                    continue
+                fire = {
+                    "rule_id": rule.rule_id,
+                    "next_run_tick": tick + rule.interval_ticks,
+                    "last_fired_at": None,  # interval rules: unchanged
+                }
+            else:
+                assert rule.cron is not None
+                base = rule.last_fired_at or rule.registered_at or now
+                next_fire = rule.cron.next_fire_after(base)
+                if now < next_fire:
+                    continue
+                fire = {
+                    "rule_id": rule.rule_id,
+                    "next_run_tick": None,
+                    "last_fired_at": next_fire,
+                }
+            assert fire is not None
+
+            group_id = f"cal.{rule.rule_id}.{tick}"
+            self._transaction_buffer.stage(
+                effect_type=EffectType.RULE_ADVANCE,
+                agent_id=rule.target_agent_id,
+                resource=rule.rule_id,
+                data={
+                    "rule_id": rule.rule_id,
+                    "next_run_tick": fire["next_run_tick"],
+                    "last_fired_at": fire["last_fired_at"],
+                },
+                group_id=group_id,
+                atomicity="group",
+            )
+            if (
+                rule.action == ScheduleAction.CREATE_TASK
+                and rule.task_template is not None
+            ):
+                from uuid import uuid4
+                task_id = f"task.{tick}.{uuid4().hex[:8]}"
+                template = rule.task_template
+                deadline = (
+                    now + timedelta(minutes=template.deadline_offset_minutes)
+                    if template.deadline_offset_minutes is not None
+                    else None
+                )
+                self._transaction_buffer.stage(
+                    effect_type=EffectType.TASK_CREATE,
+                    agent_id=rule.target_agent_id,
+                    resource=task_id,
+                    data={
+                        "task_id": task_id,
+                        "title": template.title,
+                        "description": template.description,
+                        "creator_agent_id": "system:calendar",
+                        "owner_agent_id": rule.target_agent_id,
+                        "priority": template.priority.value,
+                        "deadline": deadline,
+                    },
+                    group_id=group_id,
+                    atomicity="group",
+                )
+            self._calendar_fires_this_tick.append(fire)
 
     def _check_deadlines(self, tick: int) -> None:
         """Scan active tasks against the business wall clock.
@@ -3822,6 +3924,30 @@ class Simulation:
         # Executor Admission + dispatch of SUBMITTED ops (v0.8.0 P1-4/5)
         self._phase_dispatch(tick)
 
+        # T11: calendar EMIT_EVENT wakes — enqueued here (post-commit)
+        # so a rolled-back tick never dispatches (SPEC §3.1: 回滚 tick
+        # 不产生 dispatch). CREATE_TASK rules need no wake: the task's
+        # owner sees it via normal task visibility next tick.
+        if not self._last_tick_rolled_back:
+            for fire in self._calendar_fires_this_tick:
+                rule = self._calendar_store.get(fire["rule_id"])
+                if rule.action != ScheduleAction.EMIT_EVENT:
+                    continue
+                runtime_state = self._agent_runtime_states.get(
+                    rule.target_agent_id,
+                )
+                if runtime_state is None:
+                    continue
+                self._scheduler.enqueue_event(WakeupEvent(
+                    event_type=WakeEventType.SCHEDULE_TRIGGER,
+                    target_agent_id=rule.target_agent_id,
+                    tick=tick,
+                    visible_at_tick=tick + 1,
+                    source_agent_id="system:calendar",
+                    details={"rule_id": rule.rule_id},
+                ))
+        self._calendar_fires_this_tick = []
+
         # Timeout checks
         self._timeout_checker.check_task_timeouts(
             self._tick_engine.wall_now(), tick,
@@ -4203,6 +4329,16 @@ class Simulation:
                         prior = data.get("task_state_before")
                         if prior is not None:
                             self._task_tree._tasks[effect.resource] = prior
+                    elif effect.effect_type == EffectType.RULE_ADVANCE:
+                        self._calendar_store.restore(
+                            effect.resource,
+                            prev_next_run_tick=data.get(
+                                "prev_next_run_tick", 0,
+                            ),
+                            prev_last_fired_at=data.get(
+                                "prev_last_fired_at",
+                            ),
+                        )
                     # LOCK_RELEASE / STATE_TRANSITION: declared
                     # RESTORE_PREVIOUS but never staged by the kernel —
                     # nothing to apply.
@@ -4437,6 +4573,31 @@ class Simulation:
                         deadline=data.get("deadline"),
                         status=TaskStatus.ASSIGNED,
                         tick=tick,
+                    )
+
+                elif effect.effect_type == EffectType.RULE_ADVANCE:
+                    # T11 决策 1: schedule-state advancement is part of
+                    # the tick transaction — invert_data captures the
+                    # prior state for the single rollback entry.
+                    data = effect.data
+                    rule_id = data["rule_id"]
+                    if not self._calendar_store.exists(rule_id):
+                        _fail_locally(
+                            effect,
+                            f"Schedule rule '{rule_id}' not found",
+                        )
+                        continue
+                    rule = self._calendar_store.get(rule_id)
+                    effect.invert_data["prev_next_run_tick"] = (
+                        rule.next_run_tick
+                    )
+                    effect.invert_data["prev_last_fired_at"] = (
+                        rule.last_fired_at
+                    )
+                    self._calendar_store.advance(
+                        rule_id,
+                        next_run_tick=data.get("next_run_tick"),
+                        last_fired_at=data.get("last_fired_at"),
                     )
 
                 elif effect.effect_type == EffectType.TASK_UPDATE:
