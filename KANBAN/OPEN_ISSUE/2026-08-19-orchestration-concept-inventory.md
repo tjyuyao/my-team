@@ -24,26 +24,26 @@ v0.10-11，欠实现不欠决策）／**❓ 未定**（真正设计空白，需�
 |---|---|---|---|
 | 组织树 | ✅ | `agent_tree.py`：静态父子树，parent/children/可委派给直接子级；含环检测 | 无 |
 | 委派 DelegateIntent | ✅ | `intent.py`：分派到 `recipient_agent_id`（**仅限人**） | 决策 3 明确**不引入 `pool_id`**（pool = service manager 节点，仍委派到 agent_id） |
-| AgentConfig.kind | ❓ | SPEC §4.1 规划 `llm\|human\|service` | **代码无 `kind` 字段**——Human Worker(T12a) 前置 |
+| AgentConfig.kind | ✅ | `models/agent.py`：`llm\|human\|service` + PoolConfig 校验 | Human Worker(T12a) 仍待做 |
 
 ## B. 做什么 —— 任务层
 
 | 概念 | 状态 | 工作方式 | 缺口 |
 |---|---|---|---|
 | 任务书（不可变）+ 状态机 | ✅ | `task.py`：任务状态机（DRAFT→…→COMPLETED）+ 生命周期状态（IN_PROGRESS 等） | — |
-| 委派 = 副本 (task materialization) | ⏳ | §4.2 定稿：委派即新建不可变副本（新 task_id）+ `derived_from` 引用；assigner/assignee 声明责任（不限 kind） | 代码仍 creator/owner + 单任务可变，未迁移 |
-| 任务树 = 引用视图 | ⏳ | §4.2 定稿：树不单独持久化，由副本引用链动态推导 | 未实现（现用 parent/child 字段维护） |
+| 委派 = 副本 (task materialization) | ◐ | §4.2：Task 已有 `derived_from`，pool 副本已落地；assigner/assignee 改名未做（字段名仍 creator/owner） | 改名留独立小卡 |
+| 任务树 = 引用视图 | ◐ | §4.2：derived_from 已落 Task/pool 副本；树视图仍用 parent/child 索引 | 视图查询待 v0.11 E1 |
 | 任务依赖 depends_on | ⏳ | §4.2 执行前置（B 阻塞于 A），与"分解建树"正交 | 代码 Task 无此字段 |
-| SLA | ⏳ | §9.2 = deadline(真实时间)+priority | `deadline_tick` 未迁移（`task.py`/`intent.py`） |
+| SLA | ✅ | §9.2 = deadline(真实时间)+priority；就绪集排序+容量已实现 | — |
 
 ## C. 何时做 —— 调度层
 
 | 概念 | 状态 | 工作方式 | 缺口 |
 |---|---|---|---|
 | AgentScheduler | ✅ | `scheduler.py`：事件驱动 ready set + WakeCondition；每 tick 每 agent≤1 激活；claim/defer/consume/requeue(回滚) | ready set 按 `agent_id` 排序，**无 (priority,deadline) 排序**、无容量上限 |
-| 激活容量 | ⏳ | §14.1 `max_active_agents_per_tick`（T11 决策 2 已定） | 未实现 |
-| Calendar / ScheduleRule | ⏳ | §9.1 cron 子集（日/周；决策 4 已定真实日历） | **代码零实现** |
-| WorkerPool | ⏳ | §9.3 决策 3 已定：pool = `kind=service` manager + children + 声明式路由（round_robin/least_busy/skill_match）；立即/延迟为 `routing` 配置项，无独立原语、无 `pool_id` | 零实现；前置需落地 `kind=service` 字段 |
+| 激活容量 | ✅ | `ExecutionConfig.max_active_agents_per_tick`；超容 requeue 幂等再竞争；推迟可审计 | — |
+| Calendar / ScheduleRule | ✅ | `calendar.py`：CronSpec(日/周)+interval_ticks；RULE_ADVANCE 进 commit(T11决策1)；EMIT_EVENT 仅 post-commit | — |
+| WorkerPool | ✅ | §9.3：pool = service manager + children + PoolConfig{mode,strategy}；立即展开副本 derived_from；延迟无状态分派 | — |
 
 ## D. 谁能做 / 需批准 —— 决策权限层
 

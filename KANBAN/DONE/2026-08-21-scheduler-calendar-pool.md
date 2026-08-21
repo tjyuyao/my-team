@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.10 调度
 source: SPEC §9；OI-005 §1.1、OI-006 §3
 priority: high
@@ -53,6 +54,36 @@ priority: high
   副本在 manager 所在 tick 立即可见、还是 child 下 tick 才激活；责任由
   assigner/assignee 声明，不再悬而未决）。
 
+### 先决问题裁决（2026-08-21 开工定）
+
+- **① cron 与时间映射——已定：TickEngine 增加虚拟墙钟**。
+  `wall_now = anchor + current_tick × tick_duration`（anchor 为真实
+  datetime 锚点，可注入；确定性、可回放）。业务字段（Task/Email/
+  DelegateIntent 的 `deadline`、cron 触发时刻）一律真实 datetime；
+  每 tick 用 `wall_now` 直接比较。cron 子集用结构化表达：
+  `{freq: daily|weekly, days_of_week: [0-6], at_time: "HH:MM"}`（日/周
+  维度），不做字符串 cron 解析。`interval_ticks` 规则保留为引擎刻度节奏
+  （非业务时间）。**引擎侧 op 超时（pending_ops/tool_protocol 的
+  deadline_tick）属 tick 域，不改名不迁移**。
+- **② 就绪集排序与容量交互——已定**：`compute_ready_set` 按 agent 最紧急
+  任务排序（priority 降序 → deadline 升序[真实时间] → agent_id 兜底），
+  无任务者排最后；`ExecutionConfig.max_active_agents_per_tick`（默认 8）
+  截取容量内激活；超容候选的事件 requeue 回 QUEUED（QUEUED 存活 end_tick，
+  下 tick 重转 ELIGIBLE 再竞争——幂等无状态损失）。
+- **③ manager 委派副本 tick 时序——已定**：
+  - *立即模式*：上游 DelegateIntent→pool manager 在同 tick Act/Commit
+    展开为一组原子 effect：原任务(assignee=manager) + 副本任务
+    (assigner=manager, assignee=选中 child, derived_from=原任务) + 委派
+    邮件；child 下 tick 经 wake event 激活。
+  - *延迟模式*：原任务(assignee=manager)提交 → Publish 发
+    DELEGATION_RECEIVED 唤醒 manager → manager（kind=service，规则驱动
+    Decide，无 LLM 调用）下 tick 激活，从待分配区（可无状态推导：owner=
+    manager 且 ASSIGNED 且无 derived 副本的任务）按策略选 idle child 发
+    副本 DelegateIntent；child 完成/取消任务时 Publish 发 CHILD_IDLE
+    唤醒 manager 续派。
+  - 责任链全部由 assigner/assignee 字段声明；creator/owner→
+    assigner/assignee 的代码改名随本卡落地（或立后续卡，视迁移面）。
+
 ## 决策进展（2026-08-19，讨论定稿）
 
 - **决策 4（日历）——已定：引入真实日历**。业务语义一律真实时间：
@@ -96,8 +127,31 @@ priority: high
   业务层一律真实时间，无 tick 概念（§9.1）。
 
 ## 验收标准
-- [ ] interval 规则每 N tick 生成一次事件/任务
-- [ ] 就绪集按 priority/deadline 排序（测试可断言顺序）
-- [ ] deadline 前 N tick 生成 DEADLINE_APPROACHING
-- [ ] 委派到 pool 后任务由池内 Worker 接单，且遵守路由策略
-- [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过
+- [x] interval 规则每 N tick 生成一次事件/任务
+  （`test_calendar_scheduler.py::test_interval_rule_creates_task_every_n_ticks`）
+- [x] 就绪集按 priority/deadline 排序（测试可断言顺序）
+  （`test_sla_capacity.py`，含容量截取与超容再竞争）
+- [x] deadline 前 N tick 生成 DEADLINE_APPROACHING
+  （`test_deadline_monitor.py`，真实时间阈值 + 回滚 un-mark 防丢唤醒）
+- [x] 委派到 pool 后任务由池内 Worker 接单，且遵守路由策略
+  （`test_pool_routing.py`：least_busy / round_robin / skill_match +
+  立即展开副本 derived_from + 延迟分派排队）
+- [x] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过（905 passed）
+
+## 实现注记（2026-08-21 落地）
+
+- **提交切面**：A 时间地基+deadline 迁移 → B SLA 排序+容量 → C deadline
+  监控 → D Calendar → E Pool。引擎侧 op 超时（pending_ops/tool_protocol
+  的 `deadline_tick`）属 tick 域，保留不改名。
+- **延迟分派实现细化**：未用"child 空出→WakeEvent 唤醒 manager"钩子，
+  而是 Ingest 每 tick 无状态推导待分配（owner=manager ∧ ASSIGNED ∧ 无
+  derived 副本）×空闲 child 并原子暂存——语义等价（分派都发生在容量释放
+  的下一 tick），少一个唤醒钩子；一人公司规模下轮询成本可忽略。
+- **round_robin 游标为内存态**：重启归零（仅影响公平性，不影响正确性；
+  默认策略 least_busy 无状态）。
+- **escalation 归一为特殊邮件**（含责任转移位）按用户设计属 v0.11 E1
+  process-model；本卡交付的"升级事件"即 DEADLINE_APPROACHING /
+  TIMER_EXPIRY 结构化唤醒。
+- **creator/owner→assigner/assignee 改名未随本卡落地**：Task 模型已带
+  `derived_from` 与真实时间 `deadline`，字段改名是纯机械迁移，留作独立
+  小卡避免本卡 diff 失控。

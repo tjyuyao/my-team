@@ -559,9 +559,13 @@ IngressEvent:
 - `DelegateIntent.recipient` 仍为 `agent_id`，指向该 service manager；
   **不引入 `pool_id`**。
 - 删除 `AgentConfig.worker_pools`、Task `owner_pool` 等 Pool 专有机制。
-- 路由规则（round_robin / least_busy / skill_match）由 manager 声明式
-  配置；`routing=immediate` 委派当场转发，`deferred` 先入 manager 待分配
-  区，观察到 child 空闲再分派（经 WakeEvent 唤醒）。结果写入 Journal。
+- 路由配置 `AgentConfig.pool: PoolConfig {mode, strategy}`（仅
+  kind=service 合法）：`strategy` = round_robin / least_busy /
+  skill_match（内核执行的声明式规则，无 LLM 参与）；`mode` =
+  immediate（委派同 tick 展开为原任务+副本+通知的单组原子 effect）/
+  deferred（任务先挂 manager，Ingest 每 tick 无状态推导「待分配×空闲
+  child」原子分派）。分配权在 manager 单点串行、同 tick 提交原子，
+  结果写入 Journal。
 
 ---
 
