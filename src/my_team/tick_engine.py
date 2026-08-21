@@ -57,6 +57,15 @@ class TickConfig(BaseModel):
         default="hour",
         description="Unit: minute, hour, day",
     )
+    deadline_approaching_ticks: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "DEADLINE_APPROACHING fires when wall_now() is within this "
+            "many ticks of a task's real-time deadline (SPEC §9.2; "
+            "engine-domain threshold against the business clock)"
+        ),
+    )
     start_paused: bool = Field(
         default=False,
         description="Whether simulation starts in paused state",

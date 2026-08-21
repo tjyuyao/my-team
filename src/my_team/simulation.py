@@ -411,6 +411,11 @@ class Simulation:
 
         # Agent scheduler (event-driven activation)
         self._scheduler = AgentScheduler(config=self._config.execution)
+        # T11: fire-once tracking for deadline wake events (task_id →
+        # {"approaching", "expired"}). Rolled-back ticks un-mark what
+        # they fired so events re-fire after rollback (no loss).
+        self._deadline_fired: dict[str, set[str]] = {}
+        self._deadline_fired_this_tick: list[tuple[str, str]] = []
 
         # Agent runtimes
         self._runtimes: dict[str, AgentRuntime] = {}
@@ -2174,6 +2179,7 @@ class Simulation:
 
         # T4: start journal record for this tick
         self._journal.start_tick(tick, self._state_epoch)
+        self._deadline_fired_this_tick = []
 
         # Phase 1: Ingest — collect completed external operations + deliver emails
         self._phase_ingest(tick)
@@ -2233,6 +2239,11 @@ class Simulation:
         # requeued — the agents re-activate next tick and re-observe
         # the rolled-back state.
         rolled_back = self._last_tick_rolled_back
+        if rolled_back:
+            # T11: the tick's staged state was invalidated — un-mark
+            # deadline fires so TIMER_EXPIRY / DEADLINE_APPROACHING
+            # re-fire after re-execution (no lost wake).
+            self._unmark_deadline_fires()
         for candidate in ready:
             activation = self._scheduler._activations_this_tick.get(candidate.agent_id)
             if activation:
@@ -2584,6 +2595,81 @@ class Simulation:
                     rs2.receive_llm_result(op.result, tick)
                     self._enqueue_result_wake(op, tick, result=op.result)
                 self._pending_ops.remove(op.request_id)
+
+        # T11: real-time deadline monitoring (SPEC §9.2) — wake owners
+        # with DEADLINE_APPROACHING / TIMER_EXPIRY (fire once per task
+        # per kind; rollback un-marks, see run_tick).
+        self._check_deadlines(tick)
+
+    def _check_deadlines(self, tick: int) -> None:
+        """Scan active tasks against the business wall clock.
+
+        For each non-terminal task with a real-time ``deadline``:
+        - ``now >= deadline`` → TIMER_EXPIRY to the owner;
+        - ``deadline - threshold <= now < deadline`` →
+          DEADLINE_APPROACHING to the owner.
+        Each kind fires once per task; a rolled-back tick un-marks its
+        fires so nothing is lost on re-execution.
+        """
+        now = self._tick_engine.wall_now()
+        threshold = self._tick_engine.config.deadline_approaching_ticks * (
+            self._tick_engine.config.tick_duration_timedelta
+        )
+        for task in self._task_tree.get_active_tasks():
+            if task.deadline is None:
+                continue
+            fired = self._deadline_fired.setdefault(task.task_id, set())
+            if now >= task.deadline:
+                kind = "expired"
+            elif now >= task.deadline - threshold:
+                kind = "approaching"
+            else:
+                continue
+            if kind in fired:
+                continue
+            fired.add(kind)
+            self._deadline_fired_this_tick.append((task.task_id, kind))
+            owner = task.owner_agent_id
+            runtime_state = self._agent_runtime_states.get(owner)
+            if runtime_state is None:
+                continue  # human/service targets without runtime state
+            self._scheduler.enqueue_event(WakeupEvent(
+                event_type=(
+                    WakeEventType.TIMER_EXPIRY
+                    if kind == "expired"
+                    else WakeEventType.DEADLINE_APPROACHING
+                ),
+                target_agent_id=owner,
+                tick=tick,
+                visible_at_tick=tick,  # Ingest→Schedule same tick
+                source_agent_id="system",
+                task_id=task.task_id,
+                details={
+                    "deadline": task.deadline.isoformat(),
+                    "now": now.isoformat(),
+                    "kind": kind,
+                },
+            ))
+            self._audit_log.record(
+                AuditEventType.AGENT_WOKEN,
+                agent_id=owner,
+                tick=tick,
+                details={
+                    "task_id": task.task_id,
+                    "wake": kind,
+                    "deadline": task.deadline.isoformat(),
+                },
+            )
+
+    def _unmark_deadline_fires(self) -> None:
+        """Rollback recovery: un-mark deadline events fired this tick."""
+        for task_id, kind in self._deadline_fired_this_tick:
+            fired = self._deadline_fired.get(task_id)
+            if fired is not None:
+                fired.discard(kind)
+                if not fired:
+                    self._deadline_fired.pop(task_id, None)
+        self._deadline_fired_this_tick = []
 
     def _enqueue_result_wake(
         self,
