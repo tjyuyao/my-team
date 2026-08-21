@@ -8,6 +8,7 @@ Per SPEC §4.5:
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -82,9 +83,12 @@ class Email(BaseModel):
     priority: EmailPriority = Field(default=EmailPriority.NORMAL)
     requires_reply: bool = Field(default=False, description="Whether a reply is expected")
     reply_to: str | None = Field(default=None, description="Email ID this is replying to")
-    deadline_tick: int | None = Field(
+    deadline: datetime | None = Field(
         default=None,
-        description="Associated task deadline for sort priority (SPEC §13.3)",
+        description=(
+            "Associated task deadline for sort priority (SPEC §13.3; "
+            "real-calendar time per §9.1)"
+        ),
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 

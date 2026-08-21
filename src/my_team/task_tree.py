@@ -9,6 +9,7 @@ Per SPEC §4.4, §11.2:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from my_team.models.task import TASK_TRANSITIONS, Task, TaskPriority, TaskStatus
@@ -61,7 +62,7 @@ class TaskTree:
         description: str = "",
         parent_task_id: str | None = None,
         priority: TaskPriority = TaskPriority.NORMAL,
-        deadline_tick: int | None = None,
+        deadline: datetime | None = None,
         required_outputs: list[str] | None = None,
         tick: int = 0,
         **kwargs: Any,
@@ -75,7 +76,7 @@ class TaskTree:
             owner_agent_id: Agent responsible for execution.
             parent_task_id: Parent task (None for root tasks).
             priority: Task priority.
-            deadline_tick: Tick by which task must complete.
+            deadline: Real-calendar completion deadline (SPEC §9.1).
             required_outputs: Expected output descriptions.
             tick: Current simulation tick.
 
@@ -96,7 +97,7 @@ class TaskTree:
             owner_agent_id=owner_agent_id,
             parent_task_id=parent_task_id,
             priority=priority,
-            deadline_tick=deadline_tick,
+            deadline=deadline,
             required_outputs=required_outputs or [],
             created_at_tick=tick,
             updated_at_tick=tick,
@@ -216,13 +217,17 @@ class TaskTree:
         """Get all tasks in active (non-terminal) states."""
         return [t for t in self._tasks.values() if t.is_active]
 
-    def get_expired_tasks(self, current_tick: int) -> list[Task]:
-        """Get all tasks that have passed their deadline."""
+    def get_expired_tasks(self, now: datetime) -> list[Task]:
+        """Get all tasks whose real-calendar deadline has passed (SPEC §9.1).
+
+        Args:
+            now: Current business wall-clock time (engine.wall_now()).
+        """
         expired: list[Task] = []
         for task in self._tasks.values():
             if (
-                task.deadline_tick is not None
-                and current_tick > task.deadline_tick
+                task.deadline is not None
+                and now > task.deadline
                 and not task.is_terminal
             ):
                 expired.append(task)

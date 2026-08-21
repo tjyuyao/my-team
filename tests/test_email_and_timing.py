@@ -7,8 +7,12 @@ Covers review gaps:
 """
 
 
+from datetime import datetime, timedelta, timezone
+
 from my_team.mailbox import MailSystem
 from my_team.models.email import EmailPriority, EmailType
+
+_BASE = datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc)
 
 # ---------------------------------------------------------------------------
 # Email Deadline Sorting (§13.3)
@@ -27,7 +31,7 @@ class TestEmailDeadlineSorting:
             subject="Urgent task",
             email_type=EmailType.DELEGATION,
             tick=0,
-            deadline_tick=10,
+            deadline=_BASE + timedelta(minutes=10),
         )
         # Email without deadline
         e2 = ms.create_email(
@@ -56,7 +60,7 @@ class TestEmailDeadlineSorting:
             subject="Later deadline",
             email_type=EmailType.DELEGATION,
             tick=0,
-            deadline_tick=20,
+            deadline=_BASE + timedelta(minutes=20),
         )
         e_earlier = ms.create_email(
             from_agent="agent.c",
@@ -64,7 +68,7 @@ class TestEmailDeadlineSorting:
             subject="Earlier deadline",
             email_type=EmailType.DELEGATION,
             tick=0,
-            deadline_tick=5,
+            deadline=_BASE + timedelta(minutes=5),
         )
 
         ms.deliver(1)
@@ -84,7 +88,7 @@ class TestEmailDeadlineSorting:
             subject="Low priority",
             email_type=EmailType.DELEGATION,
             tick=0,
-            deadline_tick=10,
+            deadline=_BASE + timedelta(minutes=10),
             priority=EmailPriority.LOW,
         )
         ms.create_email(
@@ -93,7 +97,7 @@ class TestEmailDeadlineSorting:
             subject="Urgent priority",
             email_type=EmailType.DELEGATION,
             tick=0,
-            deadline_tick=10,
+            deadline=_BASE + timedelta(minutes=10),
             priority=EmailPriority.URGENT,
         )
 

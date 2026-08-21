@@ -9,6 +9,7 @@ Per SPEC §4.5, §5.1, §13.3:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from my_team.models.email import Email, EmailPriority, EmailStatus, EmailType
@@ -21,15 +22,18 @@ _PRIORITY_ORDER = {
     EmailPriority.LOW: 3,
 }
 
+# Sentinel for "no deadline" — sorts after every real deadline.
+_NO_DEADLINE = datetime.max.replace(tzinfo=timezone.utc)
 
-def _sort_key(email: Email) -> tuple[int, int, int, int, str]:
+
+def _sort_key(email: Email) -> tuple[int, int, datetime, int, str]:
     """Sort key per SPEC §13.3 ordering rules.
 
     Order:
     1. system_notice (rank 0)
     2. human_message (rank 1)
     3. priority (urgent=0, high=1, normal=2, low=3)
-    4. deadline_tick (earlier deadline first; None = no deadline, sorted last)
+    4. deadline (real-calendar time; earlier first, None = last)
     5. created_at_tick (earlier first — lower tick = higher priority)
     6. email_id (deterministic tiebreak)
     """
@@ -42,7 +46,7 @@ def _sort_key(email: Email) -> tuple[int, int, int, int, str]:
 
     # Deadline rank: emails with earlier deadlines sort first.
     # Emails without a deadline (None) sort after those with deadlines.
-    deadline_rank = email.deadline_tick if email.deadline_tick is not None else 999999
+    deadline_rank = email.deadline if email.deadline is not None else _NO_DEADLINE
 
     return (
         type_rank,

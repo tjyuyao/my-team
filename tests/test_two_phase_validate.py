@@ -13,6 +13,8 @@ Verifies the split principle:
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from my_team.agent_runtime import ActionResult, AgentAction
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType
@@ -150,7 +152,7 @@ class TestPreValidateTaskValidity:
         sim.task_tree.create(
             task_id="task.001", title="T1",
             creator_agent_id="agent.root", owner_agent_id="agent.root",
-            deadline_tick=5,
+            deadline=sim.tick_engine.wall_now() - timedelta(minutes=1),
         )
         # Validate at tick 6 — deadline 5 has passed
         intent = CompleteTaskIntent(
@@ -169,7 +171,7 @@ class TestPreValidateTaskValidity:
         sim.task_tree.create(
             task_id="task.001", title="T1",
             creator_agent_id="agent.root", owner_agent_id="agent.root",
-            deadline_tick=10,
+            deadline=sim.tick_engine.wall_now() + timedelta(hours=1),
         )
         intent = CompleteTaskIntent(
             agent_id="agent.root", task_id="task.001",
@@ -316,7 +318,7 @@ class TestCommitValidateTask:
         sim.task_tree.create(
             task_id="task.001", title="T1",
             creator_agent_id="agent.root", owner_agent_id="agent.root",
-            deadline_tick=5,
+            deadline=sim.tick_engine.wall_now() - timedelta(minutes=1),
         )
         intent = CompleteTaskIntent(
             agent_id="agent.root", task_id="task.001", summary="done",

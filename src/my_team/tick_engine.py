@@ -10,8 +10,9 @@ Per SPEC §8:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +40,15 @@ class TickConfig(BaseModel):
         default="seconds",
         description="Unit: seconds, minutes, hours",
     )
+    anchor: datetime | None = Field(
+        default=None,
+        description=(
+            "Wall-clock anchor for business time (SPEC §9.1 时间模型): "
+            "wall_now() = anchor + current_tick × tick_duration. "
+            "None = construction time (UTC). Deterministic and replayable — "
+            "the OS clock is never read after construction."
+        ),
+    )
     simulation_time_per_tick_value: int = Field(
         default=1,
         description="How much simulation time one tick represents",
@@ -55,6 +65,23 @@ class TickConfig(BaseModel):
         default=True,
         description="Ensure reproducible execution order",
     )
+
+    _DURATION_UNITS: ClassVar[dict[str, timedelta]] = {
+        "seconds": timedelta(seconds=1),
+        "minutes": timedelta(minutes=1),
+        "hours": timedelta(hours=1),
+    }
+
+    @property
+    def tick_duration_timedelta(self) -> timedelta:
+        """Tick duration as a timedelta."""
+        unit = self._DURATION_UNITS.get(self.tick_duration_unit)
+        if unit is None:
+            raise ValueError(
+                f"Invalid tick_duration_unit '{self.tick_duration_unit}' "
+                f"(expected one of {sorted(self._DURATION_UNITS)})"
+            )
+        return unit * self.tick_duration_value
 
 
 class SimulationState(str, Enum):
@@ -144,6 +171,7 @@ class TickEngine:
     def __init__(self, config: TickConfig | None = None) -> None:
         self._config = config or TickConfig()
         self._current_tick = 0
+        self._anchor = self._config.anchor or datetime.now(timezone.utc)
         self._state = (
             SimulationState.PAUSED if self._config.start_paused
             else SimulationState.CREATED
@@ -160,6 +188,25 @@ class TickEngine:
     @property
     def config(self) -> TickConfig:
         return self._config
+
+    @property
+    def anchor(self) -> datetime:
+        """Wall-clock anchor for business time (SPEC §9.1)."""
+        return self._anchor
+
+    def wall_now(self) -> datetime:
+        """Current business wall-clock time (SPEC §9.1 时间模型).
+
+        ``anchor + current_tick × tick_duration`` — deterministic and
+        replayable. Business-layer fields (Task/Email deadlines, cron
+        trigger times) are real datetimes compared directly against
+        this clock; the tick counter itself is never visible to the
+        business layer. Pausing freezes tick advancement and therefore
+        freezes business time.
+        """
+        return self._anchor + self._current_tick * (
+            self._config.tick_duration_timedelta
+        )
 
     def can_advance(self) -> bool:
         """Check if the simulation can advance to the next tick."""

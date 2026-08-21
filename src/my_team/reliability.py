@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 from collections import deque
+from datetime import datetime
 from enum import Enum
 from typing import Any, Callable
 
@@ -204,30 +205,37 @@ class TimeoutChecker:
         self._locks = lock_manager
         self._audit = audit_log
 
-    def check_task_timeouts(self, current_tick: int) -> list[str]:
-        """Check for and expire overdue tasks.
+    def check_task_timeouts(self, now: datetime, tick: int) -> list[str]:
+        """Check for and expire overdue tasks (real-calendar deadlines).
+
+        Args:
+            now: Current business wall-clock time (engine.wall_now()).
+            tick: Current tick (for audit records and state stamps).
 
         Returns list of expired task IDs.
         """
-        expired = self._tasks.get_expired_tasks(current_tick)
+        expired = self._tasks.get_expired_tasks(now)
         expired_ids: list[str] = []
 
         for task in expired:
-            self._tasks.expire_task(task.task_id, current_tick)
+            self._tasks.expire_task(task.task_id, tick)
             expired_ids.append(task.task_id)
 
             self._audit.record(
                 AuditEventType.AGENT_FAILED,
                 agent_id=task.owner_agent_id,
-                tick=current_tick,
+                tick=tick,
                 details={
                     "task_id": task.task_id,
                     "failure_type": "timeout",
-                    "deadline_tick": task.deadline_tick,
+                    "deadline": task.deadline.isoformat() if task.deadline else None,
                     "owner": task.owner_agent_id,
                 },
                 success=False,
-                error=f"Task expired at tick {current_tick} (deadline: {task.deadline_tick})",
+                error=(
+                    f"Task expired at {now.isoformat()} "
+                    f"(deadline: {task.deadline.isoformat() if task.deadline else None})"
+                ),
             )
 
         return expired_ids
@@ -259,13 +267,14 @@ class TimeoutChecker:
 
         return released
 
-    def check_all(self, current_tick: int) -> dict[str, Any]:
+    def check_all(self, now: datetime, tick: int) -> dict[str, Any]:
         """Run all timeout checks. Returns summary."""
-        expired_tasks = self.check_task_timeouts(current_tick)
-        expired_locks = self.check_lock_timeouts(current_tick)
+        expired_tasks = self.check_task_timeouts(now, tick)
+        expired_locks = self.check_lock_timeouts(tick)
 
         return {
-            "tick": current_tick,
+            "tick": tick,
+            "now": now.isoformat(),
             "expired_tasks": expired_tasks,
             "expired_locks": expired_locks,
         }

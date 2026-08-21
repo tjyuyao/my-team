@@ -474,7 +474,7 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
                 task_title=payload.get("task_title", ""),
                 task_description=payload.get("task_description", ""),
                 parent_task_id=payload.get("parent_task_id", ""),
-                deadline_tick=payload.get("deadline_tick"),
+                deadline=payload.get("deadline"),
             ))
         elif action.action_type == "send_email":
             intents.append(SendEmailIntent(

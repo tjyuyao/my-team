@@ -3,6 +3,8 @@
 Covers: timeout/retry, lock lease, deterministic replay.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from my_team.audit import AuditEventType, AuditLog
@@ -16,6 +18,8 @@ from my_team.reliability import (
 )
 from my_team.shared_kb import LockManager
 from my_team.task_tree import TaskTree
+
+_BASE = datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc)
 
 # ---------------------------------------------------------------------------
 # RetryManager
@@ -121,13 +125,13 @@ class TestTimeoutChecker:
         task_tree.create(
             task_id="t1", title="Task",
             creator_agent_id="a", owner_agent_id="a",
-            deadline_tick=5,
+            deadline=_BASE + timedelta(minutes=5),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)
         task_tree.update_status("t1", TaskStatus.ACCEPTED, tick=1)
         task_tree.update_status("t1", TaskStatus.IN_PROGRESS, tick=2)
 
-        expired = tc.check_task_timeouts(current_tick=7)
+        expired = tc.check_task_timeouts(now=_BASE + timedelta(minutes=7), tick=7)
         assert "t1" in expired
 
     def test_check_lock_timeouts(self, checker):
@@ -143,7 +147,7 @@ class TestTimeoutChecker:
         task_tree.create(
             task_id="t1", title="Task",
             creator_agent_id="a", owner_agent_id="a",
-            deadline_tick=5,
+            deadline=_BASE + timedelta(minutes=5),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)
         task_tree.update_status("t1", TaskStatus.ACCEPTED, tick=1)
@@ -151,7 +155,7 @@ class TestTimeoutChecker:
 
         lock_manager.acquire("res", "agent.a", current_tick=0, lease_ticks=2)
 
-        result = tc.check_all(current_tick=7)
+        result = tc.check_all(now=_BASE + timedelta(minutes=7), tick=7)
         assert len(result["expired_tasks"]) == 1
         assert len(result["expired_locks"]) == 1
 
@@ -160,13 +164,13 @@ class TestTimeoutChecker:
         task_tree.create(
             task_id="t1", title="Task",
             creator_agent_id="a", owner_agent_id="a",
-            deadline_tick=100,
+            deadline=_BASE + timedelta(minutes=100),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)
 
         lock_manager.acquire("res", "agent.a", current_tick=0, lease_ticks=10)
 
-        result = tc.check_all(current_tick=5)
+        result = tc.check_all(now=_BASE + timedelta(minutes=5), tick=5)
         assert len(result["expired_tasks"]) == 0
         assert len(result["expired_locks"]) == 0
 
@@ -175,13 +179,13 @@ class TestTimeoutChecker:
         task_tree.create(
             task_id="t1", title="Task",
             creator_agent_id="a", owner_agent_id="a",
-            deadline_tick=5,
+            deadline=_BASE + timedelta(minutes=5),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)
         task_tree.update_status("t1", TaskStatus.ACCEPTED, tick=1)
         task_tree.update_status("t1", TaskStatus.IN_PROGRESS, tick=2)
 
-        tc.check_task_timeouts(current_tick=7)
+        tc.check_task_timeouts(now=_BASE + timedelta(minutes=7), tick=7)
         entries = audit_log.for_event_type(AuditEventType.AGENT_FAILED)
         assert len(entries) == 1
         assert entries[0].details["failure_type"] == "timeout"

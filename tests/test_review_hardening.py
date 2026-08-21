@@ -14,6 +14,7 @@ Verifies:
 
 from __future__ import annotations
 
+from datetime import timedelta
 from uuid import uuid4
 
 from my_team.agent_runtime import ActionResult, AgentAction
@@ -267,7 +268,7 @@ class TestStructuredErrorCodes:
         sim.task_tree.create(
             task_id="task.001", title="T",
             creator_agent_id="agent.root", owner_agent_id="agent.root",
-            deadline_tick=5,
+            deadline=sim.tick_engine.wall_now() - timedelta(minutes=1),
         )
         plan: dict[str, list[Intent]] = {"agent.root": [CompleteTaskIntent(
             agent_id="agent.root", task_id="task.001", summary="s",

@@ -8,6 +8,7 @@ Per SPEC §4.4, §11.2:
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -108,9 +109,20 @@ class Task(BaseModel):
     )
     status: TaskStatus = Field(default=TaskStatus.DRAFT)
     priority: TaskPriority = Field(default=TaskPriority.NORMAL)
-    deadline_tick: int | None = Field(
+    deadline: datetime | None = Field(
         default=None,
-        description="Tick by which task must be completed",
+        description=(
+            "Real-calendar completion deadline (SPEC §9.1 时间模型 — "
+            "business layer is always wall-clock; no tick fields)"
+        ),
+    )
+    derived_from: str | None = Field(
+        default=None,
+        description=(
+            "Task this copy was derived from (delegation creates a copy; "
+            "SPEC §4.2 委派=建副本). The task tree view follows these "
+            "references along the delegation chain."
+        ),
     )
     required_outputs: list[str] = Field(
         default_factory=list,

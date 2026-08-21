@@ -20,6 +20,7 @@ committed atomically with other effects in Phase 7 (Commit).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -156,9 +157,19 @@ class DelegateIntent(Intent):
     task_title: str = Field(description="Task title")
     task_description: str = Field(default="", description="Task description")
     parent_task_id: str = Field(default="", description="Parent task ID")
-    deadline_tick: int | None = Field(
+    deadline: datetime | None = Field(
         default=None,
-        description="Task deadline tick",
+        description=(
+            "Task deadline (real-calendar time, SPEC §9.1 — no tick fields "
+            "in the business layer)"
+        ),
+    )
+    skill: str | None = Field(
+        default=None,
+        description=(
+            "Skill tag for pool routing (skill_match strategy) when the "
+            "recipient is a WorkerPool service manager (SPEC §9.3)"
+        ),
     )
 
 

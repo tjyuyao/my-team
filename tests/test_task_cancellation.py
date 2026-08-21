@@ -5,6 +5,8 @@ Covers review gaps:
 - Root agent capability restrictions
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from my_team.agent_runtime import (
@@ -30,7 +32,7 @@ class TestTaskCancellation:
             title="Parent",
             creator_agent_id="agent.root",
             owner_agent_id="agent.research",
-            deadline_tick=20,
+            deadline=_BASE + timedelta(minutes=20),
         )
         child = tt.create(
             task_id="task.child",
@@ -38,7 +40,7 @@ class TestTaskCancellation:
             creator_agent_id="agent.research",
             owner_agent_id="agent.web_research",
             parent_task_id=parent.task_id,
-            deadline_tick=15,
+            deadline=_BASE + timedelta(minutes=15),
         )
         grandchild = tt.create(
             task_id="task.grandchild",
@@ -46,7 +48,7 @@ class TestTaskCancellation:
             creator_agent_id="agent.web_research",
             owner_agent_id="agent.web_research",
             parent_task_id=child.task_id,
-            deadline_tick=10,
+            deadline=_BASE + timedelta(minutes=10),
         )
         return tt, parent, child, grandchild
 
@@ -143,3 +145,6 @@ class TestRootAgentIsolation:
         """Root cannot directly commit transaction effects."""
         ctx = root_agent.tool_context
         assert "commit_effect" not in ctx.allowed_tools
+
+
+_BASE = datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc)

@@ -3214,6 +3214,7 @@ class Simulation:
                             "creator_agent_id": agent_id,
                             "owner_agent_id": intent.recipient_agent_id,
                             "parent_task_id": intent.parent_task_id or None,
+                            "deadline": intent.deadline,
                         },
                         group_id=intent.intent_id,
                         atomicity="group",
@@ -3564,17 +3565,15 @@ class Simulation:
                         ))
                         continue
                     task = self._task_tree.get(intent.task_id)
-                    if (
-                        task.deadline_tick is not None
-                        and task.deadline_tick < tick
-                    ):
+                    now = self._tick_engine.wall_now()
+                    if task.deadline is not None and task.deadline < now:
                         results.append(ActionResult(
                             action=action,
                             success=False,
                             error=(
                                 f"Task '{intent.task_id}' deadline passed "
-                                f"(deadline_tick={task.deadline_tick} < "
-                                f"tick={tick})"
+                                f"(deadline={task.deadline.isoformat()} < "
+                                f"now={now.isoformat()})"
                             ),
                             error_code="DEADLINE_EXCEEDED",
                         ))
@@ -3697,7 +3696,9 @@ class Simulation:
         self._phase_dispatch(tick)
 
         # Timeout checks
-        self._timeout_checker.check_task_timeouts(tick)
+        self._timeout_checker.check_task_timeouts(
+            self._tick_engine.wall_now(), tick,
+        )
         self._timeout_checker.check_lock_timeouts(tick)
 
     def _phase_dispatch(self, tick: int) -> None:
@@ -3918,13 +3919,12 @@ class Simulation:
                     f"Task '{task_id}' is already terminal "
                     f"({task.status.value})"
                 )
-            if (
-                task.deadline_tick is not None
-                and task.deadline_tick < tick
-            ):
+            now = self._tick_engine.wall_now()
+            if task.deadline is not None and task.deadline < now:
                 return (
                     f"Task '{task_id}' deadline passed "
-                    f"(deadline_tick={task.deadline_tick} < tick={tick})"
+                    f"(deadline={task.deadline.isoformat()} < "
+                    f"now={now.isoformat()})"
                 )
             return None
 
@@ -4291,6 +4291,12 @@ class Simulation:
                         )
                         continue
                     effect.invert_data["task_id"] = task_id
+                    try:
+                        priority = TaskPriority(
+                            data.get("priority", TaskPriority.NORMAL.value),
+                        )
+                    except ValueError:
+                        priority = TaskPriority.NORMAL
                     self._task_tree.create(
                         task_id=task_id,
                         title=data.get("title", ""),
@@ -4300,7 +4306,8 @@ class Simulation:
                         ),
                         owner_agent_id=data.get("owner_agent_id", ""),
                         parent_task_id=parent_task_id,
-                        priority=TaskPriority.NORMAL,
+                        priority=priority,
+                        deadline=data.get("deadline"),
                         status=TaskStatus.ASSIGNED,
                         tick=tick,
                     )
