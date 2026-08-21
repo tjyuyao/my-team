@@ -78,6 +78,7 @@ class AuditEventType(str, Enum):
     # Agent activation (event-driven scheduling)
     AGENT_ACTIVATED = "agent.activated"
     AGENT_WOKEN = "agent.woken"
+    AGENT_CAPACITY_DEFERRED = "agent.capacity_deferred"
     AGENT_IDLE = "agent.idle"
 
     # General

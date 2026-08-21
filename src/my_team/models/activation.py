@@ -194,6 +194,17 @@ class ExecutionConfig(BaseModel):
         le=1024,
         description="Maximum total actions per activation",
     )
+    max_active_agents_per_tick: int = Field(
+        default=8,
+        ge=1,
+        le=4096,
+        description=(
+            "Activation capacity per tick (SPEC §14.1 抗超负荷): Schedule "
+            "selects within capacity by (priority, deadline) — real time, "
+            "direct comparison; over-capacity agents stay ready and "
+            "re-compete next tick (idempotent, no state loss). T11 决策 2."
+        ),
+    )
 
 
 class AgentWaitState(BaseModel):

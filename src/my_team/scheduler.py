@@ -2,10 +2,19 @@
 
 Determines which agents activate each tick based on wake conditions
 and pending events. Only agents with matching events are scheduled.
+
+T11 决策 2 (SLA 排序与激活容量): the ready set is ordered by each
+agent's most urgent task — ``(priority desc, deadline asc, agent_id)``
+with deadline as real-calendar time (SPEC §9.1) — and cut to
+``max_active_agents_per_tick``. Over-capacity candidates keep their
+events (requeued to QUEUED) and re-compete next tick: idempotent,
+no state loss.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -18,6 +27,26 @@ from my_team.models.activation import (
     WakeCondition,
     WakeupEvent,
 )
+
+#: Returns ``(priority_rank, deadline)`` for an agent's most urgent
+#: active task; ``(-1, None)`` when the agent has no active tasks.
+#: Higher rank = more urgent; earlier deadline = more urgent.
+UrgencyFn = Callable[[str], tuple[int, "datetime | None"]]
+
+#: Sentinel sorting after every real deadline.
+_NO_DEADLINE = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _urgency_key(agent_id: str, urgency: UrgencyFn | None) -> tuple:
+    """Sort key: priority desc → deadline asc → agent_id (deterministic)."""
+    if urgency is None:
+        return (0, _NO_DEADLINE, agent_id)
+    rank, deadline = urgency(agent_id)
+    if deadline is not None and deadline.tzinfo is None:
+        # Normalize naive datetimes to UTC so comparisons never mix
+        # offset-aware and offset-naive values.
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return (-rank, deadline if deadline is not None else _NO_DEADLINE, agent_id)
 
 
 class EventStatus(str, Enum):
@@ -99,10 +128,17 @@ class AgentScheduler:
         self._activations_this_tick: dict[str, AgentActivation] = {}
         self._activation_history: list[AgentActivation] = []
         self._activation_counter = 0
+        self._last_overflow: list[ReadyCandidate] = []
 
     @property
     def config(self) -> ExecutionConfig:
         return self._config
+
+    @property
+    def last_overflow(self) -> list[ReadyCandidate]:
+        """Candidates cut by activation capacity in the last
+        compute_ready_set call (T11 决策 2; for audit/explainability)."""
+        return list(self._last_overflow)
 
     def register_agent(
         self,
@@ -139,10 +175,16 @@ class AgentScheduler:
         self,
         tick: int,
         agent_states: dict[str, AgentState],
+        urgency: UrgencyFn | None = None,
     ) -> list[ReadyCandidate]:
         """Determine which agents should activate this tick.
 
-        Returns list of ReadyCandidate in deterministic order (sorted by agent_id).
+        Returns at most ``max_active_agents_per_tick`` ReadyCandidates,
+        ordered by SLA urgency (T11 决策 2): the agent's most urgent
+        task — ``(priority desc, deadline asc [real time], agent_id)``.
+        Over-capacity candidates' events are requeued to QUEUED so they
+        survive end_tick and re-compete next tick.
+
         Each candidate contains all matching events for that agent.
         """
         # Mark eligible events
@@ -181,15 +223,30 @@ class AgentScheduler:
                     agent_events[agent_id] = []
                 agent_events[agent_id].append(event)
 
-        # Build ReadyCandidates (deterministic order)
-        candidates: list[ReadyCandidate] = []
-        for agent_id in sorted(agent_events.keys()):
-            events = tuple(agent_events[agent_id])
-            candidates.append(ReadyCandidate(
+        # Build ReadyCandidates ordered by SLA urgency (deterministic
+        # tiebreak on agent_id).
+        candidates: list[ReadyCandidate] = [
+            ReadyCandidate(
                 agent_id=agent_id,
-                events=events,
+                events=tuple(agent_events[agent_id]),
                 tick=tick,
-            ))
+            )
+            for agent_id in sorted(
+                agent_events.keys(),
+                key=lambda aid: _urgency_key(aid, urgency),
+            )
+        ]
+
+        # Activation capacity (SPEC §14.1): select within capacity;
+        # over-capacity candidates keep their events queued for the
+        # next tick's competition.
+        capacity = self._config.max_active_agents_per_tick
+        self._last_overflow = []
+        if len(candidates) > capacity:
+            self._last_overflow = candidates[capacity:]
+            for cand in self._last_overflow:
+                self.requeue_events([e.event_id for e in cand.events])
+            candidates = candidates[:capacity]
 
         return candidates
 

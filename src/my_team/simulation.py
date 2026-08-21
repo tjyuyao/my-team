@@ -261,6 +261,14 @@ class AgentRuntimeState:
         )
 
 
+_TASK_PRIORITY_RANK = {
+    TaskPriority.LOW: 0,
+    TaskPriority.NORMAL: 1,
+    TaskPriority.HIGH: 2,
+    TaskPriority.URGENT: 3,
+}
+
+
 class Simulation:
     """Complete simulation that integrates all components.
 
@@ -2641,6 +2649,24 @@ class Simulation:
             for aid, rs in self._agent_runtime_states.items()
         }
 
+    def _agent_urgency(self, agent_id: str) -> tuple[int, Any]:
+        """Most urgent active task of an agent — SLA sort key
+        (T11 决策 2): highest priority, then earliest real-time
+        deadline. Returns (rank, deadline); (-1, None) if none."""
+        best_rank = -1
+        best_deadline: Any = None
+        for t in self._task_tree.get_owner_tasks(agent_id):
+            if t.is_terminal:
+                continue
+            rank = _TASK_PRIORITY_RANK[t.priority]
+            if rank > best_rank:
+                best_rank = rank
+                best_deadline = t.deadline
+            elif rank == best_rank and t.deadline is not None:
+                if best_deadline is None or t.deadline < best_deadline:
+                    best_deadline = t.deadline
+        return best_rank, best_deadline
+
     def _phase_schedule(self, tick: int) -> list[ReadyCandidate]:
         """Phase 3: Compute ready set from pending events + agent states.
 
@@ -2661,7 +2687,22 @@ class Simulation:
                     ))
 
         agent_states = self._get_agent_states()
-        ready = self._scheduler.compute_ready_set(tick, agent_states)
+        ready = self._scheduler.compute_ready_set(
+            tick, agent_states, urgency=self._agent_urgency,
+        )
+
+        # Capacity-deferred agents (T11 决策 2): explainable per
+        # SPEC §14 — audited so overload behavior is always visible.
+        for cand in self._scheduler.last_overflow:
+            self._audit_log.record(
+                AuditEventType.AGENT_CAPACITY_DEFERRED,
+                agent_id=cand.agent_id,
+                tick=tick,
+                details={
+                    "event_count": len(cand.events),
+                    "reason": "max_active_agents_per_tick",
+                },
+            )
 
         # Begin activations for ready candidates
         for candidate in ready:
