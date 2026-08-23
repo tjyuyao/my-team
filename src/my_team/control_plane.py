@@ -110,7 +110,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 "task_id": tid,
                 "title": task.title,
                 "status": task.status.value,
-                "owner_agent_id": task.owner_agent_id,
+                "assignee_agent_id": task.assignee_agent_id,
             })
         self._json_response({"tasks": tasks})
 

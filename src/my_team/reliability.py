@@ -223,13 +223,13 @@ class TimeoutChecker:
 
             self._audit.record(
                 AuditEventType.AGENT_FAILED,
-                agent_id=task.owner_agent_id,
+                agent_id=task.assignee_agent_id,
                 tick=tick,
                 details={
                     "task_id": task.task_id,
                     "failure_type": "timeout",
                     "deadline": task.deadline.isoformat() if task.deadline else None,
-                    "owner": task.owner_agent_id,
+                    "owner": task.assignee_agent_id,
                 },
                 success=False,
                 error=(

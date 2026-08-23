@@ -261,8 +261,11 @@ assigner/assignee 与（可选）deadline/验收；原任务书不变。责任�
 可对子级聚合状态（如 `WAITING_FOR_CHILDREN`），但**树的形状由引用关系导出，
 不另建全局任务树数据**。
 
-> 术语对齐（实现迁移）：既有 `creator_agent_id`/`owner_agent_id` 语义并入
-> `assigner`/`assignee`；`parent_task_id` 并入 `derived_from` 引用链。
+> 术语对齐（实现迁移）：责任字段已落地为
+> `assigner_agent_id`/`assignee_agent_id`（2026-08-21，原
+> `creator_agent_id`/`owner_agent_id`）；shared_kb 锁域的
+> `LockInfo.owner_agent_id` 是锁持有者概念，不属责任链，保留不改。
+> `parent_task_id` 并入 `derived_from` 引用链仍未迁移。
 
 ### 4.3 消息 / Email
 

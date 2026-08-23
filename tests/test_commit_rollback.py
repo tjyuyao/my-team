@@ -83,8 +83,8 @@ class TestDeterministicFailureStaysLocal:
         sim.task_tree.create(
             task_id="task.duplicate",
             title="Existing",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.research",
+            assigner_agent_id="agent.root",
+            assignee_agent_id="agent.research",
         )
 
         sim._transaction_buffer.stage(
@@ -105,8 +105,8 @@ class TestDeterministicFailureStaysLocal:
             data={
                 "task_id": "task.duplicate",
                 "title": "Duplicate",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.research",
+                "assigner_agent_id": "agent.root",
+                "assignee_agent_id": "agent.research",
             },
         )
 
@@ -140,8 +140,8 @@ class TestDeterministicFailureStaysLocal:
             data={
                 "task_id": "task.ok",
                 "title": "OK",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.research",
+                "assigner_agent_id": "agent.root",
+                "assignee_agent_id": "agent.research",
             },
         )
         sim._transaction_buffer.stage(
@@ -176,8 +176,8 @@ class TestDeterministicFailureStaysLocal:
         sim.task_tree.create(
             task_id="task.prior",
             title="Prior",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.research",
+            assigner_agent_id="agent.root",
+            assignee_agent_id="agent.research",
         )
         sim.mail_system.create_email(
             from_agent="agent.root",
@@ -208,8 +208,8 @@ class TestDeterministicFailureStaysLocal:
             data={
                 "task_id": "task.prior",
                 "title": "Duplicate",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.research",
+                "assigner_agent_id": "agent.root",
+                "assignee_agent_id": "agent.research",
             },
         )
 
@@ -236,8 +236,8 @@ class TestCommitRollback:
         sim.task_tree.create(
             task_id="task.conflict",
             title="Existing",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.research",
+            assigner_agent_id="agent.root",
+            assignee_agent_id="agent.research",
         )
 
         # Order: valid TASK_CREATE first, then a kernel-boom FILE_WRITE
@@ -248,8 +248,8 @@ class TestCommitRollback:
             data={
                 "task_id": "task.first",
                 "title": "First",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.research",
+                "assigner_agent_id": "agent.root",
+                "assignee_agent_id": "agent.research",
             },
         )
         _stage_kernel_boom(sim)

@@ -252,7 +252,7 @@ class ContextCompiler:
         elif policy.task_scope == TaskScope.OWNED:
             filtered = {
                 k: v for k, v in tasks.items()
-                if v.get("owner") == agent_id
+                if v.get("assignee") == agent_id
             }
         elif policy.task_scope == TaskScope.FOCUS:
             focus_task_id = ""
@@ -270,7 +270,7 @@ class ContextCompiler:
             child_ids = set(agent_config.children) if agent_config else set()
             filtered = {
                 k: v for k, v in tasks.items()
-                if v.get("owner") == agent_id or v.get("owner") in child_ids
+                if v.get("assignee") == agent_id or v.get("assignee") in child_ids
             }
 
         result["task_states"] = filtered
@@ -398,7 +398,7 @@ class ContextCompiler:
                     "task_id": task_id,
                     "status": status,
                     "title": task_data.get("title", ""),
-                    "owner": task_data.get("owner", ""),
+                    "assignee": task_data.get("assignee", ""),
                 })
         result["pending_decisions"] = pending
         return _estimate_tokens(str(pending))

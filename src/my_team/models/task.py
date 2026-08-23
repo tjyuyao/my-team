@@ -97,8 +97,8 @@ class Task(BaseModel):
     task_id: str = Field(description="Unique identifier, e.g. 'task.2026.001'")
     title: str = Field(description="Task title")
     description: str = Field(default="", description="Detailed task description")
-    creator_agent_id: str = Field(description="Agent that created the task")
-    owner_agent_id: str = Field(description="Agent currently responsible")
+    assigner_agent_id: str = Field(description="Agent that created the task")
+    assignee_agent_id: str = Field(description="Agent currently responsible")
     parent_task_id: str | None = Field(
         default=None,
         description="Parent task ID (None for root tasks)",

@@ -53,14 +53,14 @@ def _make_snapshot(tick: int = 0) -> dict:
             "task.1": {
                 "status": "in_progress",
                 "title": "Research task",
-                "owner": "agent.research",
-                "creator": "agent.root",
+                "assignee": "agent.research",
+                "assigner": "agent.root",
             },
             "task.2": {
                 "status": "completed",
                 "title": "Done task",
-                "owner": "agent.root",
-                "creator": "agent.root",
+                "assignee": "agent.root",
+                "assigner": "agent.root",
             },
         },
         "emails": [
@@ -270,11 +270,11 @@ class TestContextCompilerViaSimulation:
         # Create tasks
         sim.task_tree.create(
             task_id="task.r1", title="Root task",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
         )
         sim.task_tree.create(
             task_id="task.w1", title="Worker task",
-            creator_agent_id="agent.root", owner_agent_id="agent.research",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.research",
         )
         sim.run_tick()
         # Verify context compiler was used (observations produced)

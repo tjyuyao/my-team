@@ -99,7 +99,7 @@ class TestInvertContract:
         sim = _two_agent_sim()
         sim.task_tree.create(
             task_id="task.existing", title="Existing",
-            creator_agent_id="agent.root", owner_agent_id="agent.research",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.research",
         )
         group = f"group.{uuid4().hex[:8]}"
         sim._transaction_buffer.stage(
@@ -109,8 +109,8 @@ class TestInvertContract:
             data={
                 "task_id": "task.existing",
                 "title": "Dup",
-                "creator_agent_id": "agent.root",
-                "owner_agent_id": "agent.research",
+                "assigner_agent_id": "agent.root",
+                "assignee_agent_id": "agent.research",
             },
             group_id=group,
             atomicity="group",

@@ -123,7 +123,7 @@ class TestE2EMultiTickDelegation:
         active_tasks = sim.task_tree.get_active_tasks()
         assert len(active_tasks) == 1
         assert active_tasks[0].title == "Market Analysis"
-        assert active_tasks[0].owner_agent_id == "agent.research"
+        assert active_tasks[0].assignee_agent_id == "agent.research"
 
         # Verify: email was queued (deliver at tick 1)
         assert sim.current_tick == 1

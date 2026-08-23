@@ -151,7 +151,7 @@ class TestPreValidateTaskValidity:
         sim = Simulation(agent_tree=_make_tree())
         sim.task_tree.create(
             task_id="task.001", title="T1",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
             deadline=sim.tick_engine.wall_now() - timedelta(minutes=1),
         )
         # Validate at tick 6 — deadline 5 has passed
@@ -170,7 +170,7 @@ class TestPreValidateTaskValidity:
         sim = Simulation(agent_tree=_make_tree())
         sim.task_tree.create(
             task_id="task.001", title="T1",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
             deadline=sim.tick_engine.wall_now() + timedelta(hours=1),
         )
         intent = CompleteTaskIntent(
@@ -214,7 +214,7 @@ class TestCommitValidateTask:
         sim = Simulation(agent_tree=_make_tree())
         sim.task_tree.create(
             task_id=task_id, title="T1",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
         )
         return sim, task_id
 
@@ -282,11 +282,11 @@ class TestCommitValidateTask:
         sim = Simulation(agent_tree=_make_tree())
         sim.task_tree.create(
             task_id="task.bad", title="Bad",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
         )
         sim.task_tree.create(
             task_id="task.good", title="Good",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
         )
         sim.task_tree.cancel_task("task.bad", tick=0)
 
@@ -317,7 +317,7 @@ class TestCommitValidateTask:
         sim = Simulation(agent_tree=_make_tree())
         sim.task_tree.create(
             task_id="task.001", title="T1",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
             deadline=sim.tick_engine.wall_now() - timedelta(minutes=1),
         )
         intent = CompleteTaskIntent(

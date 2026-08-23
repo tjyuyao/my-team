@@ -182,7 +182,7 @@ class TestEffectGroupAtomicity:
         sim = Simulation(agent_tree=_make_tree(["send_email"]))
         sim.task_tree.create(
             task_id="task.001", title="T1",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
         )
         sim.task_tree.cancel_task("task.001", tick=0)
 
@@ -267,7 +267,7 @@ class TestStructuredErrorCodes:
         assert r1.error_code == "TASK_NOT_FOUND"
         sim.task_tree.create(
             task_id="task.001", title="T",
-            creator_agent_id="agent.root", owner_agent_id="agent.root",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.root",
             deadline=sim.tick_engine.wall_now() - timedelta(minutes=1),
         )
         plan: dict[str, list[Intent]] = {"agent.root": [CompleteTaskIntent(

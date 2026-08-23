@@ -124,7 +124,7 @@ class TestTimeoutChecker:
         tc, task_tree, _, _ = checker
         task_tree.create(
             task_id="t1", title="Task",
-            creator_agent_id="a", owner_agent_id="a",
+            assigner_agent_id="a", assignee_agent_id="a",
             deadline=_BASE + timedelta(minutes=5),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)
@@ -146,7 +146,7 @@ class TestTimeoutChecker:
         tc, task_tree, lock_manager, _ = checker
         task_tree.create(
             task_id="t1", title="Task",
-            creator_agent_id="a", owner_agent_id="a",
+            assigner_agent_id="a", assignee_agent_id="a",
             deadline=_BASE + timedelta(minutes=5),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)
@@ -163,7 +163,7 @@ class TestTimeoutChecker:
         tc, task_tree, lock_manager, _ = checker
         task_tree.create(
             task_id="t1", title="Task",
-            creator_agent_id="a", owner_agent_id="a",
+            assigner_agent_id="a", assignee_agent_id="a",
             deadline=_BASE + timedelta(minutes=100),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)
@@ -178,7 +178,7 @@ class TestTimeoutChecker:
         tc, task_tree, _, audit_log = checker
         task_tree.create(
             task_id="t1", title="Task",
-            creator_agent_id="a", owner_agent_id="a",
+            assigner_agent_id="a", assignee_agent_id="a",
             deadline=_BASE + timedelta(minutes=5),
         )
         task_tree.update_status("t1", TaskStatus.ASSIGNED, tick=0)

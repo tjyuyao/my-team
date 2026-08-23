@@ -1,11 +1,15 @@
 ---
 kind: task
+status: completed
 phase: v0.10 任务模型
 source: SPEC §4.2；KANBAN/DONE/scheduler-calendar-pool 实现注记
 priority: medium
 ---
 
 # Task 责任字段改名：creator/owner → assigner/assignee
+
+**Status:** DONE
+**Completed:** 2026-08-23
 
 ## 目标
 按任务模型定稿（SPEC §4.2，2026-08-19 用户定稿）对齐责任术语：
@@ -38,8 +42,20 @@ priority: medium
 ## 产出
 - 改名后的模型/API/调用点 + 测试迁移 + SPEC 注记更新。
 
+## 完成注记（2026-08-23）
+- 落地面较立卡实测多 2 处：context_compiler.py 消费 snapshot 任务键
+  `owner`（TaskScope OWNED/SUBTREE 过滤 + pending_decisions 输出），
+  随 snapshot 键改名同步；reliability.py 任务超时 audit details 键
+  `owner` → `assignee`。
+- 快照持久化键 `"owner_map"` → `"assignee_map"`，存取两侧同改，
+  test_persistence / test_tick_journal 全绿。
+- 验收 grep：任务域 0 处旧名；锁域保留 4 处
+  （shared_kb.py + simulation/reliability 的 `lock.owner_agent_id`）。
+
 ## 验收标准
-- [ ] 任务域不再出现 `creator_agent_id` / `owner_agent_id`
+- [x] 任务域不再出现 `creator_agent_id` / `owner_agent_id`
       （shared_kb 锁域除外，grep 可验证）
-- [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过
-- [ ] SPEC §4.2 术语注记更新为已落地
+- [x] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过
+      （902 passed；3 个 run_tests 子进程失败为沙箱环境预存问题，
+      干净 HEAD 上同样失败）
+- [x] SPEC §4.2 术语注记更新为已落地

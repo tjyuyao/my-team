@@ -66,13 +66,13 @@ def _stage_business_failure(sim: Simulation) -> None:
     NOT a crash."""
     sim.task_tree.create(
         task_id="task.dup", title="T",
-        creator_agent_id="agent.root", owner_agent_id="agent.root",
+        assigner_agent_id="agent.root", assignee_agent_id="agent.root",
     )
     sim._transaction_buffer.stage(
         EffectType.TASK_CREATE, "agent.root", "task.dup",
         data={"task_id": "task.dup", "title": "Dup",
-              "creator_agent_id": "agent.root",
-              "owner_agent_id": "agent.root"},
+              "assigner_agent_id": "agent.root",
+              "assignee_agent_id": "agent.root"},
     )
 
 

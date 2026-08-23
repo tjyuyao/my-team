@@ -133,13 +133,13 @@ class TestImmediateMode:
         _delegate(sim)
         originals = [
             tid for tid in sim.task_tree.all_ids()
-            if sim.task_tree.get(tid).owner_agent_id == "agent.pool"
+            if sim.task_tree.get(tid).assignee_agent_id == "agent.pool"
         ]
         assert len(originals) == 1
         copies = _copies(sim)
         assert len(copies) == 1
         copy = copies[0]
-        assert copy.owner_agent_id in _WORKERS
+        assert copy.assignee_agent_id in _WORKERS
         assert copy.derived_from == originals[0]
         assert copy.parent_task_id == originals[0]
         assert copy.deadline == _BASE + timedelta(hours=2)
@@ -149,17 +149,17 @@ class TestImmediateMode:
         for wid in ("agent.w1", "agent.w2"):
             sim.task_tree.create(
                 task_id=f"pre.{wid}", title="load",
-                creator_agent_id="agent.root", owner_agent_id=wid,
+                assigner_agent_id="agent.root", assignee_agent_id=wid,
                 status=TaskStatus.IN_PROGRESS,
             )
         _delegate(sim)
-        assert _copies(sim)[0].owner_agent_id == "agent.w3"
+        assert _copies(sim)[0].assignee_agent_id == "agent.w3"
 
     def test_round_robin_cycles(self):
         sim = _make_sim(PoolConfig(strategy=PoolStrategy.ROUND_ROBIN))
         for i in range(3):
             _delegate(sim, title=f"T{i}")
-        owners = [c.owner_agent_id for c in sorted(_copies(sim),
+        owners = [c.assignee_agent_id for c in sorted(_copies(sim),
                                                    key=lambda c: c.title)]
         assert owners == ["agent.w1", "agent.w2", "agent.w3"]
 
@@ -169,12 +169,12 @@ class TestImmediateMode:
             skills={"agent.w2": ["refund"]},
         )
         _delegate(sim, skill="refund")
-        assert _copies(sim)[0].owner_agent_id == "agent.w2"
+        assert _copies(sim)[0].assignee_agent_id == "agent.w2"
         # Unmatched skill falls back to least_busy (all idle → w1).
         _delegate(sim, skill="unknown-skill", title="T2")
         copies = sorted(_copies(sim), key=lambda c: c.title)
         assert len(copies) == 2
-        assert copies[1].owner_agent_id == "agent.w1"
+        assert copies[1].assignee_agent_id == "agent.w1"
 
 
 class TestDeferredMode:
@@ -184,7 +184,7 @@ class TestDeferredMode:
         # Umbrella sits with the manager; no copy until an ingest runs.
         owned = [
             tid for tid in sim.task_tree.all_ids()
-            if sim.task_tree.get(tid).owner_agent_id == "agent.pool"
+            if sim.task_tree.get(tid).assignee_agent_id == "agent.pool"
         ]
         assert len(owned) == 1
         assert _copies(sim) == []
@@ -192,7 +192,7 @@ class TestDeferredMode:
         sim.run_tick()  # ingest pairs pending with idle child
         copies = _copies(sim)
         assert len(copies) == 1
-        assert copies[0].owner_agent_id in _WORKERS
+        assert copies[0].assignee_agent_id in _WORKERS
         assert copies[0].derived_from == owned[0]
 
     def test_second_task_queues_until_worker_frees(self):
@@ -201,7 +201,7 @@ class TestDeferredMode:
         sim.run_tick()          # T1 → first idle worker (w1)
         _delegate(sim, title="T2")
         sim.run_tick()          # T2 → next idle worker (w2)
-        assert {c.owner_agent_id for c in _copies(sim)} == {
+        assert {c.assignee_agent_id for c in _copies(sim)} == {
             "agent.w1", "agent.w2",
         }
 
@@ -209,7 +209,7 @@ class TestDeferredMode:
         for wid in _WORKERS:
             sim.task_tree.create(
                 task_id=f"load.{wid}", title="load",
-                creator_agent_id="agent.root", owner_agent_id=wid,
+                assigner_agent_id="agent.root", assignee_agent_id=wid,
                 status=TaskStatus.IN_PROGRESS,
             )
         _delegate(sim, title="T4")
@@ -217,7 +217,7 @@ class TestDeferredMode:
         assert [t for t in _copies(sim) if t.title == "T4"] == []
         queued = [
             t for t in sim.task_tree
-            if t.owner_agent_id == "agent.pool" and t.title == "T4"
+            if t.assignee_agent_id == "agent.pool" and t.title == "T4"
         ]
         assert len(queued) == 1
 
@@ -230,7 +230,7 @@ class TestDeferredMode:
         sim.run_tick()
         t4_copies = [t for t in _copies(sim) if t.title == "T4"]
         assert len(t4_copies) == 1
-        assert t4_copies[0].owner_agent_id == "agent.w3"
+        assert t4_copies[0].assignee_agent_id == "agent.w3"
 
 
 class TestBareServiceRejection:

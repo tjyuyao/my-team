@@ -187,7 +187,7 @@ class TestStatusView:
     def test_view_task_tree(self, full_system):
         full_system["task_tree"].create(
             task_id="t1", title="Task 1",
-            creator_agent_id="agent.root", owner_agent_id="agent.research",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.research",
         )
         result = full_system["human"].view_task_tree()
         assert result["count"] == 1

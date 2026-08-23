@@ -51,14 +51,14 @@ class TaskTree:
         self._tasks: dict[str, Task] = {}
         self._children_map: dict[str, list[str]] = {}  # parent_task_id → [child_ids]
         self._parent_map: dict[str, str | None] = {}   # task_id → parent_task_id
-        self._owner_map: dict[str, list[str]] = {}      # agent_id → [task_ids]
+        self._assignee_map: dict[str, list[str]] = {}      # agent_id → [task_ids]
 
     def create(
         self,
         task_id: str,
         title: str,
-        creator_agent_id: str,
-        owner_agent_id: str,
+        assigner_agent_id: str,
+        assignee_agent_id: str,
         description: str = "",
         parent_task_id: str | None = None,
         priority: TaskPriority = TaskPriority.NORMAL,
@@ -72,8 +72,8 @@ class TaskTree:
         Args:
             task_id: Unique task identifier.
             title: Task title.
-            creator_agent_id: Agent that created the task.
-            owner_agent_id: Agent responsible for execution.
+            assigner_agent_id: Agent that created the task.
+            assignee_agent_id: Agent responsible for execution.
             parent_task_id: Parent task (None for root tasks).
             priority: Task priority.
             deadline: Real-calendar completion deadline (SPEC §9.1).
@@ -93,8 +93,8 @@ class TaskTree:
             task_id=task_id,
             title=title,
             description=description,
-            creator_agent_id=creator_agent_id,
-            owner_agent_id=owner_agent_id,
+            assigner_agent_id=assigner_agent_id,
+            assignee_agent_id=assignee_agent_id,
             parent_task_id=parent_task_id,
             priority=priority,
             deadline=deadline,
@@ -114,9 +114,9 @@ class TaskTree:
             self._children_map[parent_task_id].append(task_id)
 
         # Update owner map
-        if owner_agent_id not in self._owner_map:
-            self._owner_map[owner_agent_id] = []
-        self._owner_map[owner_agent_id].append(task_id)
+        if assignee_agent_id not in self._assignee_map:
+            self._assignee_map[assignee_agent_id] = []
+        self._assignee_map[assignee_agent_id].append(task_id)
 
         return task
 
@@ -208,9 +208,9 @@ class TaskTree:
             return None
         return self._tasks.get(parent_id)
 
-    def get_owner_tasks(self, agent_id: str) -> list[Task]:
+    def get_assignee_tasks(self, agent_id: str) -> list[Task]:
         """Get all tasks owned by an agent."""
-        task_ids = self._owner_map.get(agent_id, [])
+        task_ids = self._assignee_map.get(agent_id, [])
         return [self._tasks[tid] for tid in task_ids if tid in self._tasks]
 
     def get_active_tasks(self) -> list[Task]:

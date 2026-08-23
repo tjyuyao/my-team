@@ -255,7 +255,7 @@ class TestTickJournalPersistence:
                 "tick_engine": {"current_tick": 0, "state": "created"},
                 "state_epoch": 0,
                 "private_store_base_path": "private",
-                "tasks": {"tasks": {}, "parent_map": {}, "children_map": {}, "owner_map": {}},
+                "tasks": {"tasks": {}, "parent_map": {}, "children_map": {}, "assignee_map": {}},
                 "emails": {"all": {}, "pending": [], "mailboxes": {}},
                 "scheduler": {
                     "wake_conditions": {}, "events": [],

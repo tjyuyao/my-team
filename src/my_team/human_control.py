@@ -282,7 +282,7 @@ class HumanControl:
             return None
         agent = self._agent_tree.get(agent_id)
         mailbox = self._mail.get_mailbox(agent_id)
-        owner_tasks = self._task_tree.get_owner_tasks(agent_id)
+        assignee_tasks = self._task_tree.get_assignee_tasks(agent_id)
 
         return {
             "agent_id": agent_id,
@@ -291,8 +291,8 @@ class HumanControl:
             "children": agent.children,
             "inbox_unread": mailbox.unread_count if mailbox else 0,
             "outbox_count": len(mailbox.outbox) if mailbox else 0,
-            "active_tasks": len([t for t in owner_tasks if t.is_active]),
-            "completed_tasks": len([t for t in owner_tasks if t.is_terminal]),
+            "active_tasks": len([t for t in assignee_tasks if t.is_active]),
+            "completed_tasks": len([t for t in assignee_tasks if t.is_terminal]),
         }
 
     # -- Command router -----------------------------------------------------

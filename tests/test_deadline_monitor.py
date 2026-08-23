@@ -50,8 +50,8 @@ def _make_sim() -> Simulation:
 
 def _add_task(sim: Simulation, deadline: datetime) -> str:
     sim.task_tree.create(
-        task_id="t.1", title="T", creator_agent_id="agent.root",
-        owner_agent_id="agent.root", deadline=deadline,
+        task_id="t.1", title="T", assigner_agent_id="agent.root",
+        assignee_agent_id="agent.root", deadline=deadline,
         status=TaskStatus.ASSIGNED,
     )
     return "t.1"

@@ -115,7 +115,7 @@ class TestSaveLoadRoundtrip:
         # Direct state: task, KB resource + permission + lock, outbox entry
         sim.task_tree.create(
             task_id="task.001", title="T1",
-            creator_agent_id="agent.root", owner_agent_id="agent.research",
+            assigner_agent_id="agent.root", assignee_agent_id="agent.research",
         )
         sim._permission_engine.add_rules([
             PermissionRule(
@@ -156,7 +156,7 @@ class TestSaveLoadRoundtrip:
         # Tasks
         assert sim2.task_tree.exists("task.001")
         t = sim2.task_tree.get("task.001")
-        assert t.title == "T1" and t.owner_agent_id == "agent.research"
+        assert t.title == "T1" and t.assignee_agent_id == "agent.research"
 
         # Outbox: committed entry survives and can still dispatch
         entry = sim2._outbox.get(outbox_entry.entry_id)

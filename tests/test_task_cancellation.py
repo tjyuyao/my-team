@@ -30,23 +30,23 @@ class TestTaskCancellation:
         parent = tt.create(
             task_id="task.parent",
             title="Parent",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.research",
+            assigner_agent_id="agent.root",
+            assignee_agent_id="agent.research",
             deadline=_BASE + timedelta(minutes=20),
         )
         child = tt.create(
             task_id="task.child",
             title="Child",
-            creator_agent_id="agent.research",
-            owner_agent_id="agent.web_research",
+            assigner_agent_id="agent.research",
+            assignee_agent_id="agent.web_research",
             parent_task_id=parent.task_id,
             deadline=_BASE + timedelta(minutes=15),
         )
         grandchild = tt.create(
             task_id="task.grandchild",
             title="Grandchild",
-            creator_agent_id="agent.web_research",
-            owner_agent_id="agent.web_research",
+            assigner_agent_id="agent.web_research",
+            assignee_agent_id="agent.web_research",
             parent_task_id=child.task_id,
             deadline=_BASE + timedelta(minutes=10),
         )
@@ -93,8 +93,8 @@ class TestTaskCancellation:
         task = tt.create(
             task_id="task.solo",
             title="Solo",
-            creator_agent_id="agent.root",
-            owner_agent_id="agent.root",
+            assigner_agent_id="agent.root",
+            assignee_agent_id="agent.root",
         )
         cancelled = tt.cancel_task(task.task_id, tick=0)
         assert len(cancelled) == 1

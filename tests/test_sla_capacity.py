@@ -197,13 +197,13 @@ class TestTaskTreeUrgency:
         tt: TaskTree = sim.task_tree
         # agent.a: URGENT without deadline; agent.b: HIGH with deadline.
         tt.create(
-            task_id="t.a", title="A", creator_agent_id="root",
-            owner_agent_id="agent.a", priority=TaskPriority.URGENT,
+            task_id="t.a", title="A", assigner_agent_id="root",
+            assignee_agent_id="agent.a", priority=TaskPriority.URGENT,
             status=TaskStatus.ASSIGNED,
         )
         tt.create(
-            task_id="t.b", title="B", creator_agent_id="root",
-            owner_agent_id="agent.b", priority=TaskPriority.HIGH,
+            task_id="t.b", title="B", assigner_agent_id="root",
+            assignee_agent_id="agent.b", priority=TaskPriority.HIGH,
             deadline=sim.tick_engine.wall_now() + timedelta(hours=1),
             status=TaskStatus.ASSIGNED,
         )

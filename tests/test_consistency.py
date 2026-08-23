@@ -220,7 +220,7 @@ class TestTaskEmailConsistency:
 
         task = sim.task_tree.get_active_tasks()[0]
         assert task.title == "Consistency Test"
-        assert task.owner_agent_id == "agent.research"
+        assert task.assignee_agent_id == "agent.research"
 
     def test_task_created_with_assigned_status(self) -> None:
         """Tasks created by delegate should have ASSIGNED status (not DRAFT)."""

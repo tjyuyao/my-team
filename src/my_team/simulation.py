@@ -988,8 +988,8 @@ class Simulation:
                     "task_id": task_id,
                     "title": task_title,
                     "description": task_description,
-                    "creator_agent_id": context.agent_id,
-                    "owner_agent_id": recipient_agent_id,
+                    "assigner_agent_id": context.agent_id,
+                    "assignee_agent_id": recipient_agent_id,
                     "parent_task_id": None,
                 },
                 group_id=group_id,
@@ -1828,7 +1828,7 @@ class Simulation:
                 },
                 "parent_map": self._task_tree._parent_map,
                 "children_map": self._task_tree._children_map,
-                "owner_map": self._task_tree._owner_map,
+                "assignee_map": self._task_tree._assignee_map,
             },
             "emails": {
                 "all": {
@@ -1969,8 +1969,8 @@ class Simulation:
         self._task_tree._children_map = {
             k: list(v) for k, v in task_state["children_map"].items()
         }
-        self._task_tree._owner_map = {
-            k: list(v) for k, v in task_state["owner_map"].items()
+        self._task_tree._assignee_map = {
+            k: list(v) for k, v in task_state["assignee_map"].items()
         }
 
         # Emails
@@ -2657,7 +2657,7 @@ class Simulation:
             key=lambda cid: (
                 sum(
                     1
-                    for t in self._task_tree.get_owner_tasks(cid)
+                    for t in self._task_tree.get_assignee_tasks(cid)
                     if t.is_active
                 ),
                 cid,
@@ -2672,7 +2672,7 @@ class Simulation:
     def _dispatch_deferred_pools(self, tick: int) -> None:
         """Deferred-mode pool dispatch (T11 决策 3).
 
-        Pending work is derived statelessly — owner == manager ∧
+        Pending work is derived statelessly — assignee == manager ∧
         ASSIGNED ∧ no copy derived from it — so no extra queue entity
         exists. Each tick, Ingest pairs pending tasks with idle
         children (no active tasks) and stages each dispatch as an
@@ -2688,7 +2688,7 @@ class Simulation:
             if config.pool.mode != PoolMode.DEFERRED:
                 continue
             manager_id = config.agent_id
-            owned = self._task_tree.get_owner_tasks(manager_id)
+            owned = self._task_tree.get_assignee_tasks(manager_id)
             dispatched = {
                 t.derived_from for t in self._task_tree
                 if t.derived_from is not None
@@ -2702,7 +2702,7 @@ class Simulation:
                 cid for cid in sorted(self._agent_tree.child_ids(manager_id))
                 if not any(
                     t.is_active
-                    for t in self._task_tree.get_owner_tasks(cid)
+                    for t in self._task_tree.get_assignee_tasks(cid)
                 )
             ]
             for task, child in zip(pending, idle_children):
@@ -2717,8 +2717,8 @@ class Simulation:
                         "task_id": copy_id,
                         "title": task.title,
                         "description": task.description,
-                        "creator_agent_id": manager_id,
-                        "owner_agent_id": child,
+                        "assigner_agent_id": manager_id,
+                        "assignee_agent_id": child,
                         "parent_task_id": task.task_id,
                         "derived_from": task.task_id,
                         "priority": task.priority.value,
@@ -2822,8 +2822,8 @@ class Simulation:
                         "task_id": task_id,
                         "title": template.title,
                         "description": template.description,
-                        "creator_agent_id": "system:calendar",
-                        "owner_agent_id": rule.target_agent_id,
+                        "assigner_agent_id": "system:calendar",
+                        "assignee_agent_id": rule.target_agent_id,
                         "priority": template.priority.value,
                         "deadline": deadline,
                     },
@@ -2836,9 +2836,9 @@ class Simulation:
         """Scan active tasks against the business wall clock.
 
         For each non-terminal task with a real-time ``deadline``:
-        - ``now >= deadline`` → TIMER_EXPIRY to the owner;
+        - ``now >= deadline`` → TIMER_EXPIRY to the assignee;
         - ``deadline - threshold <= now < deadline`` →
-          DEADLINE_APPROACHING to the owner.
+          DEADLINE_APPROACHING to the assignee.
         Each kind fires once per task; a rolled-back tick un-marks its
         fires so nothing is lost on re-execution.
         """
@@ -2860,8 +2860,8 @@ class Simulation:
                 continue
             fired.add(kind)
             self._deadline_fired_this_tick.append((task.task_id, kind))
-            owner = task.owner_agent_id
-            runtime_state = self._agent_runtime_states.get(owner)
+            assignee = task.assignee_agent_id
+            runtime_state = self._agent_runtime_states.get(assignee)
             if runtime_state is None:
                 continue  # human/service targets without runtime state
             self._scheduler.enqueue_event(WakeupEvent(
@@ -2870,7 +2870,7 @@ class Simulation:
                     if kind == "expired"
                     else WakeEventType.DEADLINE_APPROACHING
                 ),
-                target_agent_id=owner,
+                target_agent_id=assignee,
                 tick=tick,
                 visible_at_tick=tick,  # Ingest→Schedule same tick
                 source_agent_id="system",
@@ -2883,7 +2883,7 @@ class Simulation:
             ))
             self._audit_log.record(
                 AuditEventType.AGENT_WOKEN,
-                agent_id=owner,
+                agent_id=assignee,
                 tick=tick,
                 details={
                     "task_id": task.task_id,
@@ -2972,7 +2972,7 @@ class Simulation:
         deadline. Returns (rank, deadline); (-1, None) if none."""
         best_rank = -1
         best_deadline: Any = None
-        for t in self._task_tree.get_owner_tasks(agent_id):
+        for t in self._task_tree.get_assignee_tasks(agent_id):
             if t.is_terminal:
                 continue
             rank = _TASK_PRIORITY_RANK[t.priority]
@@ -3049,7 +3049,7 @@ class Simulation:
         for agent_config in self._agent_tree:
             agent_id = agent_config.agent_id
             mailbox = self._mail_system.get_mailbox(agent_id)
-            owner_tasks = self._task_tree.get_owner_tasks(agent_id)
+            assignee_tasks = self._task_tree.get_assignee_tasks(agent_id)
 
             agent_states[agent_id] = {
                 "config": agent_config.model_dump(),
@@ -3058,9 +3058,9 @@ class Simulation:
                     t.task_id: {
                         "status": t.status.value,
                         "title": t.title,
-                        "owner": t.owner_agent_id,
+                        "assignee": t.assignee_agent_id,
                     }
-                    for t in owner_tasks
+                    for t in assignee_tasks
                 },
             }
 
@@ -3154,8 +3154,8 @@ class Simulation:
                 t.task_id: {
                     "status": t.status.value,
                     "title": t.title,
-                    "owner": t.owner_agent_id,
-                    "creator": t.creator_agent_id,
+                    "assignee": t.assignee_agent_id,
+                    "assigner": t.assigner_agent_id,
                 }
                 for t in self._task_tree
             },
@@ -3600,8 +3600,8 @@ class Simulation:
                             "task_id": task_id,
                             "title": intent.task_title,
                             "description": intent.task_description,
-                            "creator_agent_id": agent_id,
-                            "owner_agent_id": intent.recipient_agent_id,
+                            "assigner_agent_id": agent_id,
+                            "assignee_agent_id": intent.recipient_agent_id,
                             "parent_task_id": intent.parent_task_id or None,
                             "deadline": intent.deadline,
                         },
@@ -3618,10 +3618,10 @@ class Simulation:
                                 "task_id": pool_copy_id,
                                 "title": intent.task_title,
                                 "description": intent.task_description,
-                                "creator_agent_id": (
+                                "assigner_agent_id": (
                                     intent.recipient_agent_id
                                 ),
-                                "owner_agent_id": pool_child,
+                                "assignee_agent_id": pool_child,
                                 "parent_task_id": task_id,
                                 "derived_from": task_id,
                                 "priority": "normal",
@@ -4126,7 +4126,7 @@ class Simulation:
         # T11: calendar EMIT_EVENT wakes — enqueued here (post-commit)
         # so a rolled-back tick never dispatches (SPEC §3.1: 回滚 tick
         # 不产生 dispatch). CREATE_TASK rules need no wake: the task's
-        # owner sees it via normal task visibility next tick.
+        # assignee sees it via normal task visibility next tick.
         if not self._last_tick_rolled_back:
             for fire in self._calendar_fires_this_tick:
                 rule = self._calendar_store.get(fire["rule_id"])
@@ -4475,7 +4475,7 @@ class Simulation:
                     self._task_tree._parent_map.pop(task_id, None)
                     self._task_tree._children_map.pop(task_id, None)
                     for owner, ids in list(
-                        self._task_tree._owner_map.items()
+                        self._task_tree._assignee_map.items()
                     ):
                         if task_id in ids:
                             ids.remove(task_id)
@@ -4763,10 +4763,10 @@ class Simulation:
                         task_id=task_id,
                         title=data.get("title", ""),
                         description=data.get("description", ""),
-                        creator_agent_id=data.get(
-                            "creator_agent_id", effect.agent_id,
+                        assigner_agent_id=data.get(
+                            "assigner_agent_id", effect.agent_id,
                         ),
-                        owner_agent_id=data.get("owner_agent_id", ""),
+                        assignee_agent_id=data.get("assignee_agent_id", ""),
                         parent_task_id=parent_task_id,
                         priority=priority,
                         deadline=data.get("deadline"),
