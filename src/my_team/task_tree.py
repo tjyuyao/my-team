@@ -49,8 +49,8 @@ class TaskTree:
 
     def __init__(self) -> None:
         self._tasks: dict[str, Task] = {}
-        self._children_map: dict[str, list[str]] = {}  # parent_task_id → [child_ids]
-        self._parent_map: dict[str, str | None] = {}   # task_id → parent_task_id
+        self._children_map: dict[str, list[str]] = {}  # derived_from → [child_ids]
+        self._parent_map: dict[str, str | None] = {}   # task_id → derived_from
         self._assignee_map: dict[str, list[str]] = {}      # agent_id → [task_ids]
 
     def create(
@@ -60,7 +60,7 @@ class TaskTree:
         assigner_agent_id: str,
         assignee_agent_id: str,
         description: str = "",
-        parent_task_id: str | None = None,
+        derived_from: str | None = None,
         priority: TaskPriority = TaskPriority.NORMAL,
         deadline: datetime | None = None,
         required_outputs: list[str] | None = None,
@@ -74,7 +74,7 @@ class TaskTree:
             title: Task title.
             assigner_agent_id: Agent that created the task.
             assignee_agent_id: Agent responsible for execution.
-            parent_task_id: Parent task (None for root tasks).
+            derived_from: Task this copy derives from (None for root tasks).
             priority: Task priority.
             deadline: Real-calendar completion deadline (SPEC §9.1).
             required_outputs: Expected output descriptions.
@@ -86,8 +86,8 @@ class TaskTree:
         if task_id in self._tasks:
             raise TaskTreeError(f"Task '{task_id}' already exists")
 
-        if parent_task_id is not None and parent_task_id not in self._tasks:
-            raise TaskNotFoundError(parent_task_id)
+        if derived_from is not None and derived_from not in self._tasks:
+            raise TaskNotFoundError(derived_from)
 
         task = Task(
             task_id=task_id,
@@ -95,7 +95,7 @@ class TaskTree:
             description=description,
             assigner_agent_id=assigner_agent_id,
             assignee_agent_id=assignee_agent_id,
-            parent_task_id=parent_task_id,
+            derived_from=derived_from,
             priority=priority,
             deadline=deadline,
             required_outputs=required_outputs or [],
@@ -105,13 +105,13 @@ class TaskTree:
         )
 
         self._tasks[task_id] = task
-        self._parent_map[task_id] = parent_task_id
+        self._parent_map[task_id] = derived_from
 
         # Update parent's children list
-        if parent_task_id is not None:
-            if parent_task_id not in self._children_map:
-                self._children_map[parent_task_id] = []
-            self._children_map[parent_task_id].append(task_id)
+        if derived_from is not None:
+            if derived_from not in self._children_map:
+                self._children_map[derived_from] = []
+            self._children_map[derived_from].append(task_id)
 
         # Update owner map
         if assignee_agent_id not in self._assignee_map:
@@ -173,18 +173,18 @@ class TaskTree:
 
         raise InvalidTransitionError(task_id, task.status, target_status)
 
-    def add_child(self, parent_task_id: str, child_task_id: str) -> None:
+    def add_child(self, derived_from: str, child_task_id: str) -> None:
         """Register a parent-child relationship."""
-        if parent_task_id not in self._tasks:
-            raise TaskNotFoundError(parent_task_id)
+        if derived_from not in self._tasks:
+            raise TaskNotFoundError(derived_from)
         if child_task_id not in self._tasks:
             raise TaskNotFoundError(child_task_id)
 
-        if parent_task_id not in self._children_map:
-            self._children_map[parent_task_id] = []
-        if child_task_id not in self._children_map[parent_task_id]:
-            self._children_map[parent_task_id].append(child_task_id)
-        self._parent_map[child_task_id] = parent_task_id
+        if derived_from not in self._children_map:
+            self._children_map[derived_from] = []
+        if child_task_id not in self._children_map[derived_from]:
+            self._children_map[derived_from].append(child_task_id)
+        self._parent_map[child_task_id] = derived_from
 
     def children(self, task_id: str) -> list[Task]:
         """Get direct child tasks."""

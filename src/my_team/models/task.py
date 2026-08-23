@@ -97,11 +97,15 @@ class Task(BaseModel):
     task_id: str = Field(description="Unique identifier, e.g. 'task.2026.001'")
     title: str = Field(description="Task title")
     description: str = Field(default="", description="Detailed task description")
-    assigner_agent_id: str = Field(description="Agent that created the task")
+    assigner_agent_id: str = Field(description="Agent that delegated the task")
     assignee_agent_id: str = Field(description="Agent currently responsible")
-    parent_task_id: str | None = Field(
+    derived_from: str | None = Field(
         default=None,
-        description="Parent task ID (None for root tasks)",
+        description=(
+            "Task this copy was derived from (delegation creates a copy; "
+            "SPEC §4.2 委派=建副本). The task tree view follows these "
+            "references along the delegation chain. None for root tasks."
+        ),
     )
     child_task_ids: list[str] = Field(
         default_factory=list,
@@ -114,14 +118,6 @@ class Task(BaseModel):
         description=(
             "Real-calendar completion deadline (SPEC §9.1 时间模型 — "
             "business layer is always wall-clock; no tick fields)"
-        ),
-    )
-    derived_from: str | None = Field(
-        default=None,
-        description=(
-            "Task this copy was derived from (delegation creates a copy; "
-            "SPEC §4.2 委派=建副本). The task tree view follows these "
-            "references along the delegation chain."
         ),
     )
     required_outputs: list[str] = Field(

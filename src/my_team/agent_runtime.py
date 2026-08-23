@@ -473,7 +473,7 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
                 recipient_agent_id=payload.get("recipient_agent_id", ""),
                 task_title=payload.get("task_title", ""),
                 task_description=payload.get("task_description", ""),
-                parent_task_id=payload.get("parent_task_id", ""),
+                derived_from=payload.get("derived_from", ""),
                 deadline=payload.get("deadline"),
             ))
         elif action.action_type == "send_email":

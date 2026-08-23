@@ -990,7 +990,7 @@ class Simulation:
                     "description": task_description,
                     "assigner_agent_id": context.agent_id,
                     "assignee_agent_id": recipient_agent_id,
-                    "parent_task_id": None,
+                    "derived_from": None,
                 },
                 group_id=group_id,
                 atomicity="group",
@@ -2719,7 +2719,6 @@ class Simulation:
                         "description": task.description,
                         "assigner_agent_id": manager_id,
                         "assignee_agent_id": child,
-                        "parent_task_id": task.task_id,
                         "derived_from": task.task_id,
                         "priority": task.priority.value,
                         "deadline": task.deadline,
@@ -3602,7 +3601,7 @@ class Simulation:
                             "description": intent.task_description,
                             "assigner_agent_id": agent_id,
                             "assignee_agent_id": intent.recipient_agent_id,
-                            "parent_task_id": intent.parent_task_id or None,
+                            "derived_from": intent.derived_from or None,
                             "deadline": intent.deadline,
                         },
                         group_id=intent.intent_id,
@@ -3622,7 +3621,6 @@ class Simulation:
                                     intent.recipient_agent_id
                                 ),
                                 "assignee_agent_id": pool_child,
-                                "parent_task_id": task_id,
                                 "derived_from": task_id,
                                 "priority": "normal",
                                 "deadline": intent.deadline,
@@ -4742,14 +4740,14 @@ class Simulation:
                             effect, f"Task '{task_id}' already exists",
                         )
                         continue
-                    parent_task_id = data.get("parent_task_id")
+                    derived_from = data.get("derived_from")
                     if (
-                        parent_task_id is not None
-                        and not self._task_tree.exists(parent_task_id)
+                        derived_from is not None
+                        and not self._task_tree.exists(derived_from)
                     ):
                         _fail_locally(
                             effect,
-                            f"Parent task '{parent_task_id}' not found",
+                            f"Derived-from task '{derived_from}' not found",
                         )
                         continue
                     effect.invert_data["task_id"] = task_id
@@ -4767,10 +4765,9 @@ class Simulation:
                             "assigner_agent_id", effect.agent_id,
                         ),
                         assignee_agent_id=data.get("assignee_agent_id", ""),
-                        parent_task_id=parent_task_id,
+                        derived_from=derived_from,
                         priority=priority,
                         deadline=data.get("deadline"),
-                        derived_from=data.get("derived_from"),
                         status=TaskStatus.ASSIGNED,
                         tick=tick,
                     )

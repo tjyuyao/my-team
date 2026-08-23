@@ -156,7 +156,7 @@ class DelegateIntent(Intent):
     recipient_agent_id: str = Field(description="Target child agent")
     task_title: str = Field(description="Task title")
     task_description: str = Field(default="", description="Task description")
-    parent_task_id: str = Field(default="", description="Parent task ID")
+    derived_from: str = Field(default="", description="Task this delegation derives from")
     deadline: datetime | None = Field(
         default=None,
         description=(

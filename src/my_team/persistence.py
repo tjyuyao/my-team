@@ -24,7 +24,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# v2 (2026-08-23): Task 引用字段统一 — parent_task_id 并入 derived_from。
+# 无跨版本存档兼容（v0.10 未发布；本存储定位为部署内崩溃恢复）：
+# 版本不匹配由 Simulation.load_from 的门禁显式拒绝，不做旧键迁移。
 
 
 class SimulationStore:

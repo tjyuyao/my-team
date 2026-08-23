@@ -39,7 +39,7 @@ class TestTaskCancellation:
             title="Child",
             assigner_agent_id="agent.research",
             assignee_agent_id="agent.web_research",
-            parent_task_id=parent.task_id,
+            derived_from=parent.task_id,
             deadline=_BASE + timedelta(minutes=15),
         )
         grandchild = tt.create(
@@ -47,7 +47,7 @@ class TestTaskCancellation:
             title="Grandchild",
             assigner_agent_id="agent.web_research",
             assignee_agent_id="agent.web_research",
-            parent_task_id=child.task_id,
+            derived_from=child.task_id,
             deadline=_BASE + timedelta(minutes=10),
         )
         return tt, parent, child, grandchild

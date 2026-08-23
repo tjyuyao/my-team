@@ -141,7 +141,7 @@ class TestImmediateMode:
         copy = copies[0]
         assert copy.assignee_agent_id in _WORKERS
         assert copy.derived_from == originals[0]
-        assert copy.parent_task_id == originals[0]
+        assert copy.derived_from == originals[0]
         assert copy.deadline == _BASE + timedelta(hours=2)
 
     def test_least_busy_picks_idle_child(self):

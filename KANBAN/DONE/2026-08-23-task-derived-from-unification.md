@@ -1,11 +1,15 @@
 ---
 kind: task
+status: completed
 phase: v0.10 任务模型
 source: SPEC §4.2；KANBAN/DONE/task-assigner-assignee-rename 遗留项
 priority: medium
 ---
 
 # Task 引用字段统一：parent_task_id 并入 derived_from
+
+**Status:** DONE
+**Completed:** 2026-08-23
 
 ## 背景（2026-08-23 独立立卡）
 责任字段改名（creator/owner→assigner/assignee）已由并行工作完成。
@@ -46,8 +50,23 @@ derived_from。
   TaskTree 索引换键 + 持久化 schema 处理 + SPEC §4.2 注记补全
   （"责任字段已落地"旁补引用字段已统一）。
 
+## 完成注记（2026-08-23）
+- 持久化决策：**bump SCHEMA_VERSION 1→2 + 显式声明无跨版本存档兼容**。
+  理由：既有门禁本就硬拒版本不匹配；若不 bump，v1 存档会被 pydantic
+  静默丢弃父链接（extra 字段默认忽略），树结构无痕损坏；项目 0.9.0、
+  v0.10 未发布，存储定位为部署内崩溃恢复而非归档。声明写在
+  `persistence.py` SCHEMA_VERSION 处。
+- 双写收敛：pool 副本（立即/延迟两路）原 parent/derived 同值双写，
+  统一后仅留 `derived_from`；effect data 键全路径统一为
+  `"derived_from"`（含 None）。
+- `_parent_map`/`_children_map` 结构与 cancel 级联/subtree/
+  ancestors 行为不变（验收测试全绿佐证）；`Task.child_task_ids`
+  字段不在本卡范围，未动。
+- 验收 grep 中 `persistence.py` 注释一处提及 `parent_task_id`，
+  为 schema 变更记录本身，非任务域代码引用。
+
 ## 验收标准
-- [ ] 任务域不再出现 `parent_task_id`（grep 可验证）
-- [ ] Task 仅保留单一引用字段 `derived_from`；全部委派路径填充
-- [ ] 持久化 schema 处理已决策并实现（bump+迁移 或 显式声明）
-- [ ] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过
+- [x] 任务域不再出现 `parent_task_id`（grep 可验证）
+- [x] Task 仅保留单一引用字段 `derived_from`；全部委派路径填充
+- [x] 持久化 schema 处理已决策并实现（bump+迁移 或 显式声明）
+- [x] `uv run pytest -q` 全绿；`ruff`/`mypy` 通过（905 passed）

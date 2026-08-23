@@ -263,9 +263,11 @@ assigner/assignee 与（可选）deadline/验收；原任务书不变。责任�
 
 > 术语对齐（实现迁移）：责任字段已落地为
 > `assigner_agent_id`/`assignee_agent_id`（2026-08-21，原
-> `creator_agent_id`/`owner_agent_id`）；shared_kb 锁域的
-> `LockInfo.owner_agent_id` 是锁持有者概念，不属责任链，保留不改。
-> `parent_task_id` 并入 `derived_from` 引用链仍未迁移。
+> `creator_agent_id`/`owner_agent_id`）；引用字段已统一——
+> `parent_task_id` 并入 `derived_from`（2026-08-23；持久化
+> SCHEMA_VERSION 1→2，v0.10 未发布，声明无跨版本存档兼容）。
+> shared_kb 锁域的 `LockInfo.owner_agent_id` 是锁持有者概念，
+> 不属责任链，保留不改。
 
 ### 4.3 消息 / Email
 
