@@ -31,7 +31,7 @@ v0.10-11，欠实现不欠决策）／**❓ 未定**（真正设计空白，需�
 | 概念 | 状态 | 工作方式 | 缺口 |
 |---|---|---|---|
 | 任务书（不可变）+ 状态机 | ✅ | `task.py`：任务状态机（DRAFT→…→COMPLETED）+ 生命周期状态（IN_PROGRESS 等） | — |
-| 委派 = 副本 (task materialization) | ◐ | §4.2：Task 已有 `derived_from`，pool 副本已落地；assigner/assignee 改名未做（字段名仍 creator/owner） | 改名已立卡：`KANBAN/TODO/task-assigner-assignee-rename` |
+| 委派 = 副本 (task materialization) | ◐ | §4.2：责任字段 assigner/assignee 已落地（2026-08-23）；`derived_from` 仅 pool 副本填充，普通委派仍用 parent_task_id | 引用统一已立卡：`KANBAN/TODO/task-derived-from-unification` |
 | 任务树 = 引用视图 | ◐ | §4.2：derived_from 已落 Task/pool 副本；树视图仍用 parent/child 索引 | 视图查询待 v0.11 E1 |
 | 任务依赖 depends_on | ⏳ | §4.2 执行前置（B 阻塞于 A），与"分解建树"正交 | 代码 Task 无此字段 |
 | SLA | ✅ | §9.2 = deadline(真实时间)+priority；就绪集排序+容量已实现 | — |
