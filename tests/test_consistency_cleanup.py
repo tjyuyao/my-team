@@ -34,7 +34,10 @@ class TestVersionConsistency:
     """__version__ must match pyproject.toml version."""
 
     def test_version_matches_pyproject(self) -> None:
-        from tomllib import loads
+        try:
+            from tomllib import loads  # Python >= 3.11
+        except ModuleNotFoundError:
+            from tomli import loads  # Python 3.10 (dev dependency)
 
         import my_team
         pyproject = Path("pyproject.toml").read_text()
