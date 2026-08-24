@@ -6,6 +6,13 @@ uuid4 + kind + position_ref + 运行模式字段；岗人分离，占据即继�
 **保留**以兼容存量代码与测试（字符串 agent_id、parent/children/role
 字段），标注弃用；实际拆除留给 N1b/N3 联调。``PoolConfig`` 保留
 （kind=service 兼 WorkerPool manager，§7.3）。
+
+v0.11（N1b，§5.1）：``AgentConfig.tools`` **字段已删除**（白名单载体
+废除，SPEC §5.1「废除独立工具白名单」）——权限一律走两层 Grant
+（§3.5），config 不再声明"可用工具"。为兼容存量读取（``control_plane``
+展示、``Simulation._initialize`` 初始授予集来源、存量测试），保留只读
+``tools`` 属性桥接 ``model_extra``（``extra="allow"`` 透传）；该值
+**不是权限依据**，仅作引导布线的初始授予集来源（N3 场景包可替换）。
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     field_validator,
     model_validator,
@@ -193,17 +201,30 @@ class AgentConfig(BaseModel):
     **DEPRECATED（v0.11，N2）**：旧模型（role/tools 白名单/
     parent-children 字段）。迁移目标为 ``Agent``（SPEC §4.1）。本类
     **保留**以兼容存量代码与测试（字符串 agent_id 如 "agent.root"、
-    ``parent_id``/``children``/``role``/``tools`` 字段）；实际拆除
-    留给 N1b/N3 联调。``PoolConfig`` 保留（kind=service 兼 WorkerPool
-    manager，§7.3）。
+    ``parent_id``/``children``/``role`` 字段）；实际拆除留给 N1b/N3
+    联调。``PoolConfig`` 保留（kind=service 兼 WorkerPool manager，§7.3）。
+
+    N1b（§5.1）：``tools`` 字段已删除（白名单载体废除）；``role`` 标注
+    弃用（ACL 主体 = position，§1.8）。``tools`` 仅经 ``model_extra``
+    透传保留（``extra="allow"``），只读属性读取——不是权限依据。
 
     This is the *static* definition of an agent. Runtime state
     (status, current task, memory) is managed separately.
     """
 
+    # extra="allow"：tools 等白名单时代字段经 model_extra 透传保留
+    # （N1b：字段已删，仅兼容读取）。
+    model_config = ConfigDict(extra="allow")
+
     agent_id: str = Field(description="Unique identifier, e.g. 'agent.research'")
     display_name: str = Field(description="Human-readable name")
-    role: str = Field(description="Agent role identifier")
+    role: str = Field(
+        description=(
+            "**DEPRECATED（N1b）**：role 不是权限依据（ACL 主体 = "
+            "position，§1.8/§3.5）；保留仅供 context_compiler/N4 等兼容"
+            "读取，实际拆除留给 N3/N4 联调。"
+        ),
+    )
     kind: Literal["llm", "human", "service"] = Field(
         default="llm",
         description=(
@@ -227,10 +248,6 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Child agent IDs",
     )
-    tools: list[str] = Field(
-        default_factory=list,
-        description="Available tools for this agent",
-    )
     can_delegate: bool = Field(
         default=False,
         description="Whether this agent can delegate to children",
@@ -243,6 +260,18 @@ class AgentConfig(BaseModel):
         default_factory=dict,
         description="Additional role-specific configuration",
     )
+
+    @property
+    def tools(self) -> list[str]:
+        """**DEPRECATED（N1b，§5.1）**：白名单载体字段已删除。
+
+        仅经 ``model_extra`` 透传保留，供存量代码/测试兼容读取
+        （``control_plane`` 展示、``Simulation._initialize`` 初始授予集
+        来源）。**不是权限依据**——有效权限 = 两层 Grant（§3.5）。
+        """
+        extra = self.model_extra or {}
+        raw = extra.get("tools", [])
+        return list(raw) if isinstance(raw, list) else []
 
     @model_validator(mode="after")
     def _validate_pool(self) -> AgentConfig:

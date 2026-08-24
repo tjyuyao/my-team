@@ -1,16 +1,18 @@
-"""HTTP Control Plane — minimal API for runtime management.
+"""HTTP Control Plane — 内核通用操作台 + 设备 UI 插件注册（SPEC §3.7/§10）。
 
-Provides a REST-like HTTP interface to control the simulation:
-- GET  /status         — runtime status
-- POST /start          — start the runtime
-- POST /pause          — pause tick execution
-- POST /resume         — resume tick execution
-- POST /step?n=1       — execute n ticks synchronously
-- POST /email          — send a human message to an agent
-- GET  /agents         — agent tree and status
-- GET  /tasks          — task tree
+Control Plane 是 Owner/人类的**通用操作台**（启停/消息/审批/审计/看板），
+**属内核**：纯逻辑 + 框架，不持有业务数据（业务数据在各设备）。设备可
+经设备接口（``DeviceUIPlugin``）把自己的 UI 模块（前端模块名 + 后端
+handler）插件化注册到 Control Plane（§3.7/§5.1 设备协议）；注册表在
+本模块（``UIRegistry``），``GET /ui/modules`` 输出渲染清单。
 
-Uses stdlib http.server (no external dependencies).
+REST-like HTTP 接口（§10 草案子集）：
+- GET  /status | /agents | /tasks | /ui/modules
+- POST /start | /pause | /resume | /step | /email
+
+存量业务端点（/agents、/tasks、/email）仍直连 simulation 层内部——旧版
+操作台的迁移过渡；本卡内核化增量（UI 插件注册/渲染、/ui/modules、
+设备声明模块）不持有业务数据。Uses stdlib http.server.
 
 Usage:
     from my_team.runtime import SimulationRuntime
@@ -18,6 +20,7 @@ Usage:
 
     runtime = SimulationRuntime(sim, tick_duration_seconds=0.5)
     plane = ControlPlane(runtime, port=8080)
+    plane.register_device_ui(org_device)   # 设备 UI 插件注册（§3.7）
     plane.start()
     # API available at http://localhost:8080
     plane.stop()
@@ -28,20 +31,98 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from typing import Any, Protocol
 
 from my_team.runtime import SimulationRuntime
 
 logger = logging.getLogger(__name__)
 
 
-class _RuntimeHTTPServer(HTTPServer):
-    """HTTPServer subclass that carries a SimulationRuntime reference."""
+@dataclass(frozen=True)
+class UIModule:
+    """设备 UI 插件声明（SPEC §3.7：前端模块名 + 后端 handler）。
 
-    def __init__(self, server_address: Any, handler: Any, runtime: SimulationRuntime) -> None:
+    - ``module_name``：注册表键（如 ``"org.positions"``）；
+    - ``frontend_module``：前端模块名（如 ``"org/positions-panel"``）；
+    - ``backend_handler``：渲染时调用的后端逻辑（无则纯前端模块）；
+    - ``description``：模块说明。
+    """
+
+    module_name: str
+    frontend_module: str
+    backend_handler: Callable[[], dict[str, Any]] | None = None
+    description: str = ""
+
+
+class DeviceUIPlugin(Protocol):
+    """设备 UI 插件接口（§3.7「经设备接口声明」）。
+
+    设备实现该结构即声明自己的 UI 模块（如组织架构设备的岗位管理页、
+    KB 设备的知识编辑页）；Control Plane 经 ``register_device_ui``
+    插件化挂载。
+    """
+
+    device_id: str
+    ui_modules: list[UIModule]
+
+
+class UIRegistry:
+    """设备 UI 插件注册表（注册表在 Control Plane，§3.7）。
+
+    设备经插件接口注册（``register_device``）；Control Plane 渲染时
+    输出前端模块名 + 后端 handler 结果。本类不持有业务数据——模块
+    内容由设备在 handler 中自绘。
+    """
+
+    def __init__(self) -> None:
+        self._modules: dict[str, tuple[str, UIModule]] = {}
+
+    def register(self, device_id: str, module: UIModule) -> None:
+        if module.module_name in self._modules:
+            existing = self._modules[module.module_name][0]
+            raise ValueError(
+                f"UI 模块 {module.module_name!r} 已注册（设备 {existing}）"
+            )
+        self._modules[module.module_name] = (device_id, module)
+
+    def register_device(self, device: DeviceUIPlugin) -> None:
+        """注册设备声明的全部 UI 模块（经设备接口声明，§3.7）。"""
+        for module in device.ui_modules:
+            self.register(device.device_id, module)
+
+    def modules(self) -> dict[str, tuple[str, UIModule]]:
+        """已注册模块（只读副本）：module_name -> (device_id, module)。"""
+        return dict(self._modules)
+
+    def manifest(self) -> list[dict[str, Any]]:
+        """前端渲染清单（GET /ui/modules 的数据）。"""
+        return [
+            {
+                "module_name": name,
+                "frontend_module": module.frontend_module,
+                "device_id": device_id,
+                "description": module.description,
+            }
+            for name, (device_id, module) in self._modules.items()
+        ]
+
+
+class _RuntimeHTTPServer(HTTPServer):
+    """HTTPServer subclass that carries a SimulationRuntime + UI registry."""
+
+    def __init__(
+        self,
+        server_address: Any,
+        handler: Any,
+        runtime: SimulationRuntime,
+        ui_registry: UIRegistry,
+    ) -> None:
         super().__init__(server_address, handler)
         self.runtime = runtime
+        self.ui_registry = ui_registry
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
@@ -61,6 +142,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._handle_agents()
         elif path == "/tasks":
             self._handle_tasks()
+        elif path == "/ui/modules":
+            # 设备 UI 插件清单（§3.7：注册表在 Control Plane，渲染输出）。
+            self._json_response({"modules": self.server.ui_registry.manifest()})
         else:
             self._json_response({"error": "not found"}, status=404)
 
@@ -178,14 +262,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
 
 class ControlPlane:
-    """HTTP control plane for the simulation runtime.
+    """内核通用操作台（启停/消息/审批/审计/看板）+ 设备 UI 插件注册。
 
-    Provides a minimal REST API for external control and monitoring.
+    纯逻辑 + 框架，不持有业务数据；设备经 ``register_device_ui`` 注册
+    UI 模块（§3.7），``render_ui_modules`` 渲染插件模块。
     """
 
     def __init__(
         self,
-        runtime: SimulationRuntime,
+        runtime: SimulationRuntime | None = None,
         host: str = "127.0.0.1",
         port: int = 8080,
     ) -> None:
@@ -194,6 +279,7 @@ class ControlPlane:
         self._port = port
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self.ui_registry = UIRegistry()
 
     @property
     def port(self) -> int:
@@ -203,10 +289,38 @@ class ControlPlane:
     def url(self) -> str:
         return f"http://{self._host}:{self._port}"
 
+    def register_device_ui(self, device: DeviceUIPlugin) -> None:
+        """设备经插件接口注册 UI 模块（§3.7/§5.1 设备协议）。"""
+        self.ui_registry.register_device(device)
+
+    def ui_manifest(self) -> list[dict[str, Any]]:
+        """UI 插件清单（前端渲染数据）：模块名 → 前端模块 + 归属设备。"""
+        return self.ui_registry.manifest()
+
+    def render_ui_modules(self) -> dict[str, dict[str, Any]]:
+        """渲染全部已注册 UI 模块（§3.7：Control Plane 渲染对应模块）。
+
+        前端模块名 + 后端 handler 输出；无 handler 的模块只给前端声明。
+        """
+        rendered: dict[str, dict[str, Any]] = {}
+        for module_name, (device_id, module) in self.ui_registry.modules().items():
+            entry: dict[str, Any] = {
+                "frontend_module": module.frontend_module,
+                "device_id": device_id,
+                "description": module.description,
+            }
+            if module.backend_handler is not None:
+                entry["data"] = module.backend_handler()
+            rendered[module_name] = entry
+        return rendered
+
     def start(self) -> None:
         """Start the HTTP server in a background thread."""
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("Control Plane 需要 SimulationRuntime 才能启动")
         self._server = _RuntimeHTTPServer(
-            (self._host, self._port), _RequestHandler, self._runtime,
+            (self._host, self._port), _RequestHandler, runtime, self.ui_registry,
         )
         self._server.allow_reuse_address = True
         self._thread = threading.Thread(

@@ -3,8 +3,14 @@
 Per SPEC §8.2 (Phases 3-5), §10, §15.1:
 - ToolContext binds agent identity to every tool call
 - AgentRuntime defines observe/decide/act protocol
-- Tool registry enforces per-agent tool permissions
-- Root Agent restricted to read/write/ls/delegate only
+
+v0.11（N1b，SPEC §5.1）：独立工具白名单已废除——按 role 的工具
+常量与按名字的 ``agent.tools`` 不再存在；
+权限求值一律经 Authority 两层 Grant（∃position：Grant(agent,
+position) ∧ Grant(position, entity_id)，§3.5）。``ToolRegistry`` 保留
+为 manifest/handler 注册表与授权求值桥：接入 Simulation 的注册表带
+``Authority`` 引用，求值走两层 Grant；``ToolContext.allowed_tools``
+字段保留仅作兼容（决策路径不再读取）。
 
 v0.6.0: decide() produces list[Intent] — finite, non-blocking steps in
 the agent's ReAct continuation. ActionPlan remains as the internal
@@ -20,6 +26,8 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from my_team.devices.authority import Authority
+from my_team.devices.base import Device, EntityKind, RegisteredEntity
 from my_team.models.intent import (
     AcceptTaskIntent,
     CompleteTaskIntent,
@@ -52,6 +60,9 @@ class ToolContext:
     agent_id: str
     simulation_id: str = ""
     tick: int = 0
+    # DEPRECATED（N1b，§5.1）：白名单载体已废除，权限求值一律经
+    # Authority 两层 Grant（§3.5）；本字段保留仅为兼容存量构造/读取
+    # （Simulation 构造的 context 不再携带）。
     allowed_tools: frozenset[str] = field(default_factory=frozenset)
     # Frozen per-agent file view captured at Freeze (v0.6.0 hardening):
     # {"files": {relpath: content}, "dirs": [relpaths]}. Read-only tools
@@ -100,11 +111,16 @@ class ToolResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Tool registry — enforces per-agent tool permissions
+# Tool registry — manifest/handler registry + Authority authorization bridge
 # ---------------------------------------------------------------------------
 
 class ToolCategory(str, Enum):
-    """Categories of tools for permission grouping."""
+    """Categories of tools for permission grouping.
+
+    DEPRECATED（N1b）：权限分组不再按名字类别——有效权限 = 两层 Grant
+    （∃position：Grant(agent, position) ∧ Grant(position, entity_id)，
+    §3.5/§5.1）。保留枚举值仅防存量字符串引用断裂。
+    """
 
     FILE_OPS = "file_ops"           # read, write, ls on private space
     SHARED_KB = "shared_kb"         # read, write on shared knowledge base
@@ -113,37 +129,144 @@ class ToolCategory(str, Enum):
     SYSTEM = "system"               # system-level operations
 
 
-# Default tool sets per SPEC §4.2, §4.3
-ROOT_TOOLS = frozenset({"read", "write", "ls", "delegate"})
-MANAGER_TOOLS = frozenset({"read", "write", "ls", "delegate", "send_email"})
-WORKER_TOOLS = frozenset({"read", "write", "ls", "send_email"})
+class _ToolEntityDevice(Device):
+    """工具受控实体载体（N1b，§5.1）：每个注册工具 = 一个 TOOL uuid。
+
+    manifest 的 ``capability`` 即受控 uuid；经 ``accept_device`` 提交到
+    Authority 注册中心（设备注册 = 向 Authority 注册工具 uuid）。
+    """
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+
+    def declare(self, entity: RegisteredEntity) -> None:
+        self._entities[entity.entity_id] = entity
 
 
 class ToolRegistry:
-    """Central registry that validates tool calls against agent permissions.
+    """工具注册表：manifest + handler 注册 + 授权求值桥（N1b）。
 
-    Every tool call must go through this registry. The system provides
-    the ToolContext (with agent_id), and the registry verifies the agent
-    has permission to use the requested tool.
+    v0.11（N1b，§5.1）起**废除独立白名单**（按 role 的工具常量与按名字
+    的 ``agent.tools`` 已删除）：权限求值一律经 Authority 两层 Grant
+    （§3.5），本注册表只维护 manifest/handler 与「工具名 → capability
+    uuid」映射。
 
-    v0.7.0: tools are registered with a ToolManifest (declarative
-    contract — see tool_manifest.py). Registration validates the
-    manifest. An OperationPolicy (deny-by-default) may be attached:
-    execution then requires (a) the agent's tool permission AND (b) a
-    policy decision allowing the tool. Bare handler registration
-    (without manifest) remains supported for legacy callers; policy
-    enforcement requires manifests for all policy-checked tools.
+    - ``authority`` 为 None 的**裸注册表**（存量测试/独立使用）：退回
+      旧式 ``_agent_tools`` 记录，仅作兼容；
+    - 接入 Simulation 的注册表**必带 authority**：``register_agent`` /
+      ``get_allowed_tools`` 仅为弃用桥（Add 语义授予/读回授权集），
+      ``execute`` 的授权判定走 Authority（deny-by-default）。
+
+    初始授予集（引导布线）：``declare_tools`` 记录 agent 声明的工具集
+    合并即时授予已注册实体；**迟到注册补授**——manifest 在布线之后注册
+    （如集成/插件工具）时，对声明过该工具的 agent 自动授予（保持存量
+    e2e 行为；未声明者永不自动授予）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, authority: Authority | None = None) -> None:
+        self._authority = authority
+        # 兼容回退（无 authority 的裸注册表）：agent_id → 工具名集合。
         self._agent_tools: dict[str, frozenset[str]] = {}
         self._tool_handlers: dict[str, Any] = {}
         self._manifests: dict[str, ToolManifest] = {}
         self._policy: OperationPolicy | None = None
+        # 工具名 → capability uuid（manifest 注册时填充，§5.1 受控 uuid）。
+        self._tool_entities: dict[str, str] = {}
+        # 初始授予集声明（agent_id → 声明的工具名集合，N1b 引导布线）。
+        self._declared_tools: dict[str, set[str]] = {}
+
+    # ------------------------------------------------------------------
+    # 初始授予集（N1b 引导布线：org 初始化 + 初始授予集，§5.1）
+    # ------------------------------------------------------------------
+
+    def declare_tools(self, agent_id: str, tools: frozenset[str]) -> None:
+        """声明 agent 的初始授予集（Add 语义，永不撤销）。
+
+        立即授予已注册实体的工具；未注册实体（如集成/插件工具）在
+        manifest 注册时补授（``_grant_deferred``）。deny-by-default：
+        未注册 uuid 的工具不可授予（§3.5）。
+        """
+        self._declared_tools.setdefault(agent_id, set()).update(tools)
+        if self._authority is None:
+            # 裸注册表兼容回退：记录旧式白名单集合。
+            self._agent_tools[agent_id] = frozenset(tools)
+            return
+        for tool in tools:
+            entity_id = self._tool_entities.get(tool)
+            if entity_id is not None:
+                self._authority.grant_membership(agent_id, agent_id)
+                self._authority.grant_capability(agent_id, entity_id)
 
     def register_agent(self, agent_id: str, tools: frozenset[str]) -> None:
-        """Register the allowed tools for an agent."""
-        self._agent_tools[agent_id] = tools
+        """DEPRECATED（N1b，§5.1）：白名单载体已废除。
+
+        仅为兼容存量调用：等价于把 ``tools`` 并入该 agent 的初始授予集
+        （Add 语义——授予永不因重复声明撤销）。
+        """
+        self.declare_tools(agent_id, tools)
+
+    def get_allowed_tools(self, agent_id: str) -> frozenset[str]:
+        """DEPRECATED（N1b）：白名单 API 兼容桥，等价 ``authorized_tools``。"""
+        return self.authorized_tools(agent_id)
+
+    def authorized_tools(self, agent_id: str) -> frozenset[str]:
+        """agent 当前被授权（两层 Grant，§3.5）的工具名集合。
+
+        deny-by-default：未注册实体 / 无授予的工具不出现。
+        """
+        if self._authority is not None:
+            return frozenset(
+                name
+                for name, entity_id in self._tool_entities.items()
+                if self._authority.authorize(agent_id, entity_id).allowed
+            )
+        return self._agent_tools.get(agent_id, frozenset())
+
+    def capability_for(self, tool_name: str) -> str | None:
+        """工具名 → 受控 capability uuid（未注册返回 None，§5.1）。"""
+        return self._tool_entities.get(tool_name)
+
+    # ------------------------------------------------------------------
+    # 注册：manifest / handler / 工具（含 Authority 注册中心提交）
+    # ------------------------------------------------------------------
+
+    def _register_entity(self, manifest: ToolManifest) -> None:
+        """把 manifest 的 capability 作为受控 uuid 注册进 Authority（§5.1）。
+
+        设备注册 = 向 Authority 注册工具 uuid；注册后对声明过该工具的
+        agent 补授（迟到注册补授）。
+        """
+        if manifest.name in self._tool_entities:
+            return  # 已声明（防重复注册实体）
+        self._tool_entities[manifest.name] = manifest.capability
+        if self._authority is not None:
+            device = _ToolEntityDevice(
+                manifest.device_id or f"tool:{manifest.name}"
+            )
+            device.declare(RegisteredEntity(
+                entity_id=manifest.capability,
+                device_id=device.device_id,
+                kind=EntityKind.TOOL,
+                label=manifest.name,
+            ))
+            self._authority.accept_device(device)
+        self._grant_deferred(manifest.name)
+
+    def _grant_deferred(self, tool_name: str) -> None:
+        """迟到注册补授：布线后注册的 manifest，对声明过它的 agent 授予。
+
+        保持存量 e2e 行为（配置声明 = 初始授予集的来源）；未声明的
+        agent 永不自动授予（deny-by-default，§3.5）。
+        """
+        if self._authority is None:
+            return
+        entity_id = self._tool_entities.get(tool_name)
+        if entity_id is None:
+            return
+        for agent_id, tools in self._declared_tools.items():
+            if tool_name in tools:
+                self._authority.grant_membership(agent_id, agent_id)
+                self._authority.grant_capability(agent_id, entity_id)
 
     def register_manifest(self, manifest: ToolManifest) -> None:
         """Register a tool manifest (registration-time validation).
@@ -151,6 +274,7 @@ class ToolRegistry:
         Raises ToolManifestError if the manifest is invalid.
         """
         self._manifests[manifest.name] = manifest
+        self._register_entity(manifest)
 
     def register_tool(
         self,
@@ -162,6 +286,10 @@ class ToolRegistry:
         Registration enforces (v0.10 T7):
         - manifest validity (ToolManifestError on invalid contract)
         - name uniqueness (ToolManifestError on duplicate registration)
+
+        N1b（§5.1）：注册即把工具 capability 作为受控 uuid 提交 Authority
+        注册中心；授权判定（能不能用）由 Authority 布线中心的两层 Grant
+        求值，设备/注册表不自行判权。
 
         Policy is NOT touched: deny-by-default applies — a tool is only
         usable while the deployment policy (if any) allowlists it.
@@ -226,23 +354,43 @@ class ToolRegistry:
             )
         return self._policy.decide(manifest)
 
+    # ------------------------------------------------------------------
+    # 授权求值：两层 Grant（∃position：Grant ∧ Grant ∧ 锁，§3.5/§5.1）
+    # ------------------------------------------------------------------
+
+    def _authorized(self, context: ToolContext, tool_name: str) -> bool:
+        """两层 Grant 求值（锁约束由内核 handler 路径叠加，见 handler 实现）。
+
+        带 authority：工具有受控 uuid → ``authorize(agent_id, uuid)``；
+        无 uuid（manifest 缺失）→ 兼容回退 context.allowed_tools
+        （Simulation 构造的 context 不含该字段 → 生产路径 deny-by-default）。
+        裸注册表：旧式 ``_agent_tools`` 记录。
+        """
+        if self._authority is not None:
+            entity_id = self._tool_entities.get(tool_name)
+            if entity_id is not None:
+                return self._authority.authorize(
+                    context.agent_id, entity_id
+                ).allowed
+            return tool_name in context.allowed_tools
+        return tool_name in self._agent_tools.get(context.agent_id, frozenset())
+
     def authorize(self, context: ToolContext, tool_name: str) -> None:
         """Verify the agent has permission to use the tool.
 
         Raises ToolPermissionError if not authorized.
         """
-        allowed = self._agent_tools.get(context.agent_id, frozenset())
-        if tool_name not in allowed:
+        if not self._authorized(context, tool_name):
             raise ToolPermissionError(context.agent_id, tool_name)
 
     def can_use(self, agent_id: str, tool_name: str) -> bool:
         """Check if an agent can use a tool (non-raising)."""
-        allowed = self._agent_tools.get(agent_id, frozenset())
-        return tool_name in allowed
-
-    def get_allowed_tools(self, agent_id: str) -> frozenset[str]:
-        """Get the set of tools an agent is allowed to use."""
-        return self._agent_tools.get(agent_id, frozenset())
+        if self._authority is not None:
+            entity_id = self._tool_entities.get(tool_name)
+            if entity_id is None:
+                return False
+            return self._authority.authorize(agent_id, entity_id).allowed
+        return tool_name in self._agent_tools.get(agent_id, frozenset())
 
     def execute(
         self,
@@ -252,7 +400,7 @@ class ToolRegistry:
     ) -> ToolResult:
         """Authorize and execute a tool call.
 
-        1. Verify agent has permission
+        1. Verify agent has permission (two-layer Grant via Authority)
         2. Look up handler
         3. Execute with context
         """
@@ -637,10 +785,9 @@ class BaseAgent:
     ) -> None:
         self._agent_id = agent_id
         self._tool_registry = tool_registry or ToolRegistry()
-        self._tool_context = ToolContext(
-            agent_id=agent_id,
-            allowed_tools=self._tool_registry.get_allowed_tools(agent_id),
-        )
+        # N1b（§5.1）：权限求值一律经 Authority 两层 Grant，context 不再
+        # 携带 allowed_tools（字段保留仅作兼容，默认空集）。
+        self._tool_context = ToolContext(agent_id=agent_id)
 
     @property
     def agent_id(self) -> str:
@@ -701,7 +848,6 @@ class BaseAgent:
                 tool_context = ToolContext(
                     agent_id=self._agent_id,
                     tick=context.tick,
-                    allowed_tools=self._tool_context.allowed_tools,
                 )
                 result = self._tool_registry.execute(
                     context=tool_context,
@@ -726,65 +872,29 @@ class BaseAgent:
 class RootAgent(BaseAgent):
     """Root decision agent (SPEC §4.2).
 
-    Constraints:
-    - Tools: read, write, ls, delegate ONLY
-    - Cannot execute business tools
-    - Cannot directly modify sub-agent state
-    - Cannot bypass email to modify sub-agents
+    N1b（§5.1）：工具权限不再按 role 内置（旧工具常量已废除）——有效
+    权限 = 两层 Grant（§3.5），由 Simulation 初始布线/场景包授予决定；
+    本类仅保留角色语义（决策入口/调度），不再携带任何工具集合。
     """
 
     def __init__(self, agent_id: str = "agent.root", **kwargs: Any) -> None:
         super().__init__(agent_id=agent_id, **kwargs)
-        # Enforce Root Agent tool restriction
-        self._tool_context = ToolContext(
-            agent_id=agent_id,
-            allowed_tools=ROOT_TOOLS,
-        )
 
 
 class SubAgent(BaseAgent):
-    """Sub-agent with role-specific tools (SPEC §4.3).
+    """Sub-agent (SPEC §4.3) with role semantics only.
 
-    Sub-agents can have business-specific tools (web_search, etc.)
-    in addition to base tools.
+    N1b（§5.1）：业务工具的可用性由两层 Grant 决定（§3.5），不再按
+    role/extra_tools 内置白名单（旧工具常量已废除）。
     """
-
-    def __init__(
-        self,
-        agent_id: str,
-        extra_tools: frozenset[str] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        tools = WORKER_TOOLS
-        if extra_tools:
-            tools = tools | extra_tools
-        super().__init__(agent_id=agent_id, **kwargs)
-        self._tool_context = ToolContext(
-            agent_id=agent_id,
-            allowed_tools=tools,
-        )
 
 
 class ManagerAgent(BaseAgent):
     """Manager agent that can delegate (e.g., Research Agent).
 
-    Has delegate + send_email in addition to base tools.
+    N1b（§5.1）：delegate/send_email 等能力经 Authority 授予（§3.5），
+    不再按 role 内置（旧工具常量已废除）；本类仅保留角色语义。
     """
-
-    def __init__(
-        self,
-        agent_id: str,
-        extra_tools: frozenset[str] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        tools = MANAGER_TOOLS
-        if extra_tools:
-            tools = tools | extra_tools
-        super().__init__(agent_id=agent_id, **kwargs)
-        self._tool_context = ToolContext(
-            agent_id=agent_id,
-            allowed_tools=tools,
-        )
 
 
 class HumanWorkerRuntime(BaseAgent):

@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.11 扩展表面
 source: SPEC §3.5/§5.1；三态收敛（2026-08-24）；拆分自原 device-model（N1 → N1a/N1b/N1c）
 priority: high
@@ -42,8 +43,21 @@ ToolManifest 扩展新契约字段。**依赖 N1a**（接线要 Authority 求值
 
 ## 验收标准
 
-- [ ] 白名单路径零残留（grep ROOT_TOOLS / MANAGER_TOOLS /
+- [x] 白名单路径零残留（grep ROOT_TOOLS / MANAGER_TOOLS /
       WORKER_TOOLS 为空）
-- [ ] 任一调用 = 两层 Grant ∧ 锁（与 N1a 求值接线有测试）
-- [ ] 未注册 uuid / 未授权工具调用被拒绝（deny-by-default）
-- [ ] `uv run pytest -q` 全绿；ruff/mypy 通过
+- [x] 任一调用 = 两层 Grant ∧ 锁（与 N1a 求值接线有测试）
+- [x] 未注册 uuid / 未授权工具调用被拒绝（deny-by-default）
+- [x] `uv run pytest -q` 全绿；ruff/mypy 通过
+## 完成注记（2026-08-25）
+
+- 交付：删白名单常量（ROOT_TOOLS/MANAGER_TOOLS/WORKER_TOOLS 零残留）；
+  ToolRegistry 改 manifest/handler 注册表 + Authority 授权桥；simulation
+  4 接线点全改两层 Grant（authority.authorize(agent_id, manifest.capability)）；
+  ToolManifest 新契约 6 字段（capability 按契约 uuid5 确定性派生）；
+  TickPhase 十阶段；AgentConfig.tools 字段删除（model_extra 兼容读取）。
+- 过渡决策：register_agent/get_allowed_tools/allowed_tools 字段保留为
+  弃用兼容桥（12 个存量测试依赖；生产决策路径 100% 走 Authority，彻底
+  删除需另开迁移卡）；默认初始布线 = 基础工具 ∪ config 声明工具
+  （引导形态，N3 可替换）；Validate 检查顺序调整（request_id 去重提前）。
+- 遗留：tick_engine.py 旧 TickPhase/TickSnapshot 零使用者未删（建议
+  后续清理）；Authority 不落库，load_from 从 config 重建布线。

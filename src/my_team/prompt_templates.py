@@ -26,9 +26,13 @@ class PromptTemplates:
         """Render system prompt + context for the LLM.
 
         Returns a list of ChatMessages ready for the LLM API.
+
+        N1b（§5.1）：``role`` 参数保留仅作兼容（``AgentConfig.role``
+        已标注弃用）；提示文案不再注入 role——权限 = 两层 Grant
+        （§3.5），role 不是权限依据（§1.8/§4.1）。
         """
         system_content = (
-            f"You are agent '{agent_id}' with role '{role}'.\n"
+            f"You are agent '{agent_id}'.\n"
             f"You operate in a discrete-time multi-agent simulation.\n"
             f"Current tick: {observation.tick}\n\n"
             f"Rules:\n"
@@ -63,22 +67,26 @@ class PromptTemplates:
 
     def render_tool_definitions(
         self,
-        allowed_tools: frozenset[str],
+        authorized_tools: frozenset[str],
         manifests: Mapping[str, ToolManifest] | None = None,
     ) -> list[ToolDefinition]:
         """Render tool definitions for LLM function calling.
 
         Definitions are GENERATED from ToolManifests via
         manifest_to_tool_definition (v0.10 T7) — no hand-written tool
-        table. Only tools the agent is authorized to use AND that have
-        a registered manifest are included. Unknown / manifest-less
-        tools yield no definition (they cannot be invoked safely).
+        table. Only tools the agent is AUTHORIZED to use (two-layer
+        Grant, §3.5/§5.1) AND that have a registered manifest are
+        included. Unknown / manifest-less tools yield no definition
+        (they cannot be invoked safely).
+
+        N1b：参数 ``authorized_tools``（原 ``allowed_tools``）——白名单
+        语义废除，调用方传两层 Grant 求值后的授权工具集。
         """
         if manifests is None:
             manifests = {}
         return [
             manifest_to_tool_definition(manifests[name])
-            for name in sorted(allowed_tools)
+            for name in sorted(authorized_tools)
             if name in manifests
         ]
 

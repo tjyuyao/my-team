@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property
@@ -95,7 +96,23 @@ FILESYSTEM_SCOPES = frozenset({
 
 @dataclass(frozen=True)
 class ToolManifest:
-    """Declarative contract of a tool. Registration validates it."""
+    """Declarative contract of a tool. Registration validates it.
+
+    v0.11（N1b，SPEC §5.1 工具面）新契约字段：
+
+    - ``device_id``：声明该工具的设备标识（空 = 内核直接声明）；
+    - ``capability``：受控 uuid（§5.1 设备动态向 Authority 注册）。
+      缺省时按契约内容确定性派生（uuid5）——同一契约稳定同 uuid，
+      契约任何字段变化即换 uuid（与 ``manifest_hash`` 一致）；显式
+      提供时必须可解析为 uuid；
+    - ``approval_policy``：何时需要人工审批的声明（自由文本，
+      N 后续卡片解释执行；本卡仅承载）；
+    - ``ingress_event_types``：该工具消费的 Ingress 事件类型声明
+      （§5.11，本卡仅承载）；
+    - ``egress``：出站通道/契约声明（如 "http"/"smtp"，§5.11）；
+    - ``compensation_tool``：不可逆操作的补偿工具名（§6.4 补偿/
+      对账路径，本卡仅承载）。
+    """
 
     name: str
     version: str
@@ -133,6 +150,14 @@ class ToolManifest:
     #   sanitisation. Required for SANDBOXED_PROCESS, forbidden
     #   otherwise — the declaration is the contract the backend
     #   enforces (OI-001).
+    # N1b 新契约（§5.1 工具面）：设备归属 + 受控 capability + 审批 /
+    # Ingress / Egress / 补偿声明。
+    device_id: str = ""
+    capability: str = ""
+    approval_policy: str = ""
+    ingress_event_types: tuple[str, ...] = ()
+    egress: str = ""
+    compensation_tool: str = ""
 
     def __post_init__(self) -> None:
         errors: list[str] = []
@@ -168,6 +193,24 @@ class ToolManifest:
             errors.append("max_runtime_ms must be >= 0")
         if self.max_output_bytes is not None and self.max_output_bytes < 0:
             errors.append("max_output_bytes must be >= 0")
+
+        # N1b 新契约字段校验：ingress_event_types 必须为 str 元组；
+        # capability 缺省按契约内容确定性派生（uuid5），显式给出必须
+        # 可解析为 uuid（§5.1 受控 uuid）。
+        if not isinstance(self.ingress_event_types, tuple):
+            errors.append("ingress_event_types must be a tuple of str")
+        for evt in self.ingress_event_types:
+            if not isinstance(evt, str):
+                errors.append(f"ingress_event_types contains non-str: {evt!r}")
+        if self.capability:
+            try:
+                uuid.UUID(str(self.capability))
+            except (ValueError, AttributeError, TypeError):
+                errors.append(
+                    f"capability must be a uuid, got {self.capability!r}"
+                )
+        else:
+            object.__setattr__(self, "capability", self._derive_capability())
 
         # Execution-class coherence.
         if self.execution_class in {ExecutionClass.PURE, ExecutionClass.READ_ONLY}:
@@ -214,6 +257,26 @@ class ToolManifest:
             raise ToolManifestError(
                 f"Invalid manifest '{self.name}': " + "; ".join(errors)
             )
+
+    def _derive_capability(self) -> str:
+        """按契约内容（除 capability 自身）确定性派生受控 uuid（uuid5）。
+
+        同一契约稳定同 capability；任何契约字段变化即换 uuid——与
+        ``manifest_hash`` 同构，保证 ``manifest_hash`` 跨实例稳定
+        （test_tool_protocol：同内容同哈希）。
+        """
+        basis = {
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
+            if name != "capability"
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                basis, sort_keys=True, ensure_ascii=False,
+                separators=(",", ":"), default=str,
+            ).encode("utf-8")
+        ).digest()
+        return str(uuid.UUID(bytes=digest[:16], version=5))
 
     def declares_effect(self, effect_type: EffectType) -> bool:
         """Whether this manifest declares a given effect type."""

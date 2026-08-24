@@ -98,8 +98,10 @@ class LLMAgent(BaseAgent):
             role=role,
             observation=observation,
         )
+        # N1b（§5.1）：LLM 只见被两层 Grant 授权的工具（deny-by-default，
+        # §3.5）；定义仍从 manifest 自动生成（manifest_to_tool_definition）。
         tools = self._templates.render_tool_definitions(
-            allowed_tools=self._tool_context.allowed_tools,
+            self._tool_registry.authorized_tools(self._agent_id),
             manifests={m.name: m for m in self._tool_registry.manifests()},
         )
 

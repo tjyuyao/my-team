@@ -1,6 +1,9 @@
 """Tests for LLMAgent and PromptTemplates.
 
 Uses mock LLM responses — no real API calls.
+
+v0.11（N1b，§5.1）：工具权限断言迁移为两层 Grant 求值（Authority →
+注册工具 uuid → grant_membership + grant_capability，§3.5）。
 """
 
 import json
@@ -8,11 +11,11 @@ import json
 import pytest
 
 from my_team.agent_runtime import (
-    WORKER_TOOLS,
     AgentObservation,
     AgentSnapshot,
     ToolRegistry,
 )
+from my_team.devices.authority import Authority, new_team_id
 from my_team.llm_agent import LLMAgent
 from my_team.llm_gateway import LLMGateway
 from my_team.models.llm import LLMProviderConfig
@@ -34,8 +37,15 @@ def mock_gateway():
 
 @pytest.fixture
 def tool_registry():
-    reg = ToolRegistry()
-    reg.register_agent("agent.test", WORKER_TOOLS)
+    """N1b 两层 Grant 布线：Authority → 注册工具 uuid → 授予。"""
+    authority = Authority(team_id=new_team_id(), owner_agent_id="agent.test")
+    reg = ToolRegistry(authority=authority)
+    for manifest in builtin_manifests().values():
+        reg.register_manifest(manifest)
+    reg.declare_tools(
+        "agent.test",
+        frozenset({"read", "write", "ls", "send_email"}),
+    )
     return reg
 
 

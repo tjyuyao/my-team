@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.11 扩展表面
 source: SPEC §3.7/§5.1/§5.8/§10；三态收敛（2026-08-24）
 priority: high
@@ -40,10 +41,21 @@ memory entry；边语义 = 它注册的工具能力 + 生效条件。组织调�
 - mount（岗人分离）接口。
 
 ## 验收标准
-- [ ] 持权限的 agent 可读改写岗位/边/授权；无权限者 POLICY_DENIED
-- [ ] 上下级关系与 JD 作为 memory entry 注入占据者（priority<10）
-- [ ] 组织调整入 Journal 可审计；违反不变量被拒
-- [ ] 设备注册 UI 插件后 Control Plane 渲染对应模块（有测试）
-- [ ] mount 接口可用（静态版本；动态评估接口预留）
-- [ ] 直派 Authority 可替换组织架构（同一接口，有测试）
-- [ ] `uv run pytest -q` 全绿；ruff/mypy 通过
+- [x] 持权限的 agent 可读改写岗位/边/授权；无权限者 POLICY_DENIED
+- [x] 上下级关系与 JD 作为 memory entry 注入占据者（priority<10）
+- [x] 组织调整入 Journal 可审计；违反不变量被拒
+- [x] 设备注册 UI 插件后 Control Plane 渲染对应模块（有测试）
+- [x] mount 接口可用（静态版本；动态评估接口预留）
+- [x] 直派 Authority 可替换组织架构（同一接口，有测试）
+- [x] `uv run pytest -q` 全绿；ruff/mypy 通过
+## 完成注记（2026-08-25）
+
+- 交付：devices/org.py OrgStructure(Authority) 子类（岗位/边/授权读改写
+  经 org_manage 授予鉴权；JD 与关系 memory entry priority=1 注入；
+  改边走四条治理不变量校验；mount 岗人分离 + project_mount 预留；
+  register=False + replace 可替换；ui_modules 声明）+ control_plane.py
+  UI 插件注册机制（UIRegistry/register_device_ui/GET /ui/modules）+
+  16 测试。
+- 遗留：Journal 实接留 N1c（journal_sink 接口预留，OrgChange 载荷有测试）；
+  collaborator 边按 N2 schema 单向声明（双向互列判环，N8 求值确认）；
+  存量 /agents//tasks//email 端点迁移需动 simulation（边界外，未动）。

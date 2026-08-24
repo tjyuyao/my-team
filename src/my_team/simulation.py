@@ -3,7 +3,7 @@
 Per SPEC §3, §8, §10:
 - Combines AgentTree, MailSystem, TaskTree, SharedKB, TickEngine
 - Manages AgentRuntime instances per agent
-- Drives the 9-phase tick cycle (kernel model) with real agent execution
+- Drives the 10-phase tick cycle (kernel model) with real agent execution
 - Handles email delivery, tool execution, and state commit
 
 Architecture (v0.6.0):
@@ -11,6 +11,15 @@ Architecture (v0.6.0):
 - Agent uses AgentContinuation for resumable ReAct state
 - External operations (LLM, tool) go through PendingOperationRegistry
 - Phase 5 (Decide) produces Intents, never blocks on external calls
+
+v0.11（N1b，§5.1）：工具权限不再按 role/白名单分配——Simulation 持有
+每 Team 唯一的 Authority（注册中心 + 布线中心）；``_initialize`` 建立
+**默认初始授予集**（引导 = org 初始化 + 初始授予集：每 agent 以自身为
+position，基础工具 + config 声明的工具授予该 position），4 处白名单点
+（Act ToolContext 构造 / Validate 按名检查 / dispatch 工具上下文）全部
+改为 Authority 两层 Grant 求值（§3.5：∃position：Grant(agent, position)
+∧ Grant(position, entity_id) ∧ 锁）；锁约束由工具 handler 路径叠加
+（T20 写即自动锁 / kb_write 显式锁，见各 handler）。
 """
 
 from __future__ import annotations
@@ -57,6 +66,7 @@ from my_team.budget import (
 from my_team.calendar import CalendarStore, ScheduleAction, ScheduleRule
 from my_team.context_compiler import ContextCompiler
 from my_team.credential_store import CredentialStore
+from my_team.devices.authority import Authority, new_team_id
 from my_team.executor_registry import (
     ExecutorRegistry,
     ExecutorTier,
@@ -292,6 +302,14 @@ _TASK_PRIORITY_RANK = {
     TaskPriority.URGENT: 3,
 }
 
+# N1b（§5.1）：默认初始布线的**基础工具**——旧按 role 白名单三集合
+# （root/manager/worker）的交集（read/write/ls），对所有
+# agent 的自身 position 授予（直派形态）。业务工具（send_email /
+# delegate / 集成工具等）经 config 声明的初始授予集或 register_tool /
+# register_integration 的迟到注册补授获得；N3 组织架构/场景包可整体
+# 替换本初始授予集。
+_BASE_GRANT_TOOLS = frozenset({"read", "write", "ls"})
+
 
 class Simulation:
     """Complete simulation that integrates all components.
@@ -340,8 +358,21 @@ class Simulation:
         self._record_store = RecordStore()
         self._asset_store = AssetStore()
 
-        # Tool registry
-        self._tool_registry = ToolRegistry()
+        # N1b（§5.1）：Authority（注册中心 + 布线中心，每 Team 仅一个）。
+        # 一人公司 = 一实例一 Team（new_team_id）；Owner = 树根 agent。
+        # 引导 = org 初始化 + 初始授予集（_initialize 布线，N3 可替换）。
+        try:
+            _owner = self._agent_tree.root_id
+        except Exception:
+            _owner = "agent.root"
+        self._authority = Authority(
+            team_id=new_team_id(),
+            owner_agent_id=_owner,
+        )
+
+        # Tool registry (N1b: attached to the Authority — authorization
+        # goes through two-layer Grants, §3.5/§5.1)
+        self._tool_registry = ToolRegistry(authority=self._authority)
 
         # Transaction buffer for staged-effect commit
         self._transaction_buffer = TransactionBuffer()
@@ -485,7 +516,14 @@ class Simulation:
         self._initialize()
 
     def _initialize(self) -> None:
-        """Set up all agents: mailboxes, private spaces, runtimes, tool registry, scheduler."""
+        """Set up all agents: mailboxes, private spaces, runtimes, scheduler.
+
+        N1b（§5.1）引导布线：每个 agent 以自身为 position（直派形态，
+        grant_membership(agent_id, agent_id)），基础工具（read/write/ls，
+        旧按 role 白名单交集）+ config 声明的工具授予该 position（初始授予集，deny-by-
+        default：未注册 uuid 的工具不授予）。授权求值本身一律走
+        Authority（§3.5），本处只建初始授予集。
+        """
         for agent_config in self._agent_tree:
             agent_id = agent_config.agent_id
 
@@ -495,9 +533,11 @@ class Simulation:
             # Create private workspace
             self._private_store.initialize_agent(agent_id)
 
-            # Register tools based on agent role
-            tools = frozenset(agent_config.tools)
-            self._tool_registry.register_agent(agent_id, tools)
+            # N1b 初始授予集 = 基础工具 ∪ config 声明的工具（白名单载体
+            # 已废除，config.tools 仅作初始授予集来源；N3 场景包可替换）。
+            declared = frozenset(agent_config.tools or [])
+            grant_tools = _BASE_GRANT_TOOLS | declared
+            self._tool_registry.declare_tools(agent_id, grant_tools)
 
             # Create agent runtime
             runtime = self._create_runtime(agent_config)
@@ -535,7 +575,7 @@ class Simulation:
             self._audit_log.record(
                 AuditEventType.AGENT_CREATED,
                 agent_id=agent_id,
-                details={"role": agent_config.role, "tools": list(tools)},
+                details={"role": agent_config.role, "tools": list(grant_tools)},
             )
 
     @staticmethod
@@ -1557,6 +1597,11 @@ class Simulation:
           deployment policy (deny-by-default: only allowlisted tools
           are usable). If None, this tool is NOT implicitly allowlisted;
           while a policy is active it stays denied until listed.
+
+        N1b（§5.1）：注册时把工具 capability 作为受控 uuid 注册进
+        Authority（注册中心），并对声明过该工具的 agent 补授（迟到注册
+        补授，见 ``ToolRegistry._register_entity``）——注册本身不判权，
+        授权判定由 Authority 两层 Grant 求值（§3.5）。
         """
         wrapped = self._wrap_plugin_handler(handler)
         self._tool_registry.register_tool(manifest, wrapped)
@@ -3637,10 +3682,11 @@ class Simulation:
                         # — no frozen view (SPEC §3.1 按需化).
                         runtime = self._runtimes.get(agent_id)
                         if runtime:
+                            # N1b（§5.1）：context 不再携带 allowed_tools；
+                            # 授权求值在 execute 内走 Authority 两层 Grant。
                             tool_context = ToolContext(
                                 agent_id=agent_id,
                                 tick=tick,
-                                allowed_tools=self._tool_context_allowed(agent_id),
                             )
                             tr = self._tool_registry.execute(
                                 context=tool_context,
@@ -3965,10 +4011,6 @@ class Simulation:
 
         return all_results
 
-    def _tool_context_allowed(self, agent_id: str) -> frozenset[str]:
-        """Get allowed tools for an agent (helper for intent execution)."""
-        return self._tool_registry.get_allowed_tools(agent_id)
-
     def _phase_validate(
         self,
         tick: int,
@@ -3978,9 +4020,10 @@ class Simulation:
         """Phase 6: PreValidate Intents before execution.
 
         Principle: PreValidate checks "is this attempt ALLOWED TO TRY?" —
-        capability, policy, manifest, task validity. CommitValidate
-        (Phase 8) separately checks "is it still COMMITTABLE now?" —
-        locks, versions, task liveness, deadlines. PreValidate is
+        capability（两层 Grant，§3.5/§5.1）、policy、manifest、task
+        validity。CommitValidate (Phase 8) separately checks "is it still
+        COMMITTABLE now?" — locks, versions, task liveness, deadlines.
+        PreValidate is
         side-effect-free: invalid intents become failed Results, valid
         intents pass through to Act for staging.
 
@@ -3990,7 +4033,8 @@ class Simulation:
            cost / wall_time) and concurrency vs in-flight. Over-limit
            rejects the WHOLE activation round (no partial execution).
         1b. Duplicate request_id — within plan + cross-tick (registry)
-        1c. Tool manifest + operation policy (v0.7.0)
+        1c. Tool capability（两层 Grant，§3.5/§5.1）+ deployment
+            operation policy (v0.7.0)
         2. Delegation target — DelegateIntent targets direct children
         3. Payload fields — WritePrivateFileIntent has path,
            SendEmailIntent has to, DelegateIntent has recipient/title
@@ -4004,7 +4048,6 @@ class Simulation:
             if intent_list is None:
                 continue
 
-            allowed_tools = self._tool_registry.get_allowed_tools(agent_id)
             results: list[ActionResult] = []
 
             # Budget pre-scan (T16c): if this round contains any LLM
@@ -4048,37 +4091,13 @@ class Simulation:
                     payload=dict(intent.payload),
                 )
 
-                # Check 1: tool capability (SubmitToolRequest)
-                if isinstance(intent, SubmitToolRequest):
-                    if intent.tool_name not in allowed_tools:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"Tool '{intent.tool_name}' not authorized "
-                                f"for '{agent_id}'"
-                            ),
-                            error_code="CAPABILITY_DENIED",
-                        ))
-                        self._audit_log.record(
-                            AuditEventType.PERMISSION_DENIED,
-                            agent_id=agent_id,
-                            tick=tick,
-                            details={
-                                "tool": intent.tool_name,
-                                "intent": intent.intent_type.value,
-                                "error_code": "CAPABILITY_DENIED",
-                            },
-                            success=False,
-                            error="Tool not authorized",
-                        )
-                        continue
-
-                # Check 1c: duplicate request_id — an agent cannot reuse
-                # a request_id that is already in flight (registry),
+                # Check 1c (first): duplicate request_id — an agent cannot
+                # reuse a request_id that is already in flight (registry),
                 # appears twice in the same plan (seen_request_ids), or
                 # was EVER submitted before (persisted history — replay
-                # protection across restart, v0.8.0 P1-6).
+                # protection across restart, v0.8.0 P1-6). 置于能力检查
+                # 之前：重放的 request_id 无论当前 manifest/能力状态如何
+                # 一律拒绝（身份去重优先于能力，§3.1 Ingest 去重语义）。
                 if isinstance(intent, (SubmitLLMRequest, SubmitToolRequest)):
                     if (
                         intent.request_id
@@ -4117,10 +4136,11 @@ class Simulation:
                         continue
                     seen_request_ids.add(intent.request_id)
 
-                # Check 1d: tool manifest + operation policy (v0.7.0).
-                # PreValidate principle: "is this attempt allowed to try?"
-                # — the manifest must exist (tools are declarative
-                # objects), and the deployment policy must allow it.
+                # Check 1: tool capability (SubmitToolRequest) — N1b 两层
+                # Grant 求值（∃position：Grant(agent, position) ∧
+                # Grant(position, entity_id)，§3.5/§5.1）。manifest 缺失 →
+                # TOOL_MANIFEST_MISSING；manifest 存在但未授权 → 拒绝
+                # （deny-by-default：未注册 uuid / 未授权工具调用被拒绝）。
                 if isinstance(intent, SubmitToolRequest):
                     manifest = self._tool_registry.get_manifest(
                         intent.tool_name,
@@ -4148,6 +4168,39 @@ class Simulation:
                             error="Tool has no manifest",
                         )
                         continue
+                    capability = self._authority.authorize(
+                        agent_id, manifest.capability,
+                    )
+                    if not capability.allowed:
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=(
+                                f"Tool '{intent.tool_name}' not authorized "
+                                f"for '{agent_id}'"
+                            ),
+                            error_code="CAPABILITY_DENIED",
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.PERMISSION_DENIED,
+                            agent_id=agent_id,
+                            tick=tick,
+                            details={
+                                "tool": intent.tool_name,
+                                "intent": intent.intent_type.value,
+                                "error_code": "CAPABILITY_DENIED",
+                            },
+                            success=False,
+                            error="Tool not authorized",
+                        )
+                        continue
+
+                # Check 1d: deployment operation policy (v0.7.0).
+                # PreValidate principle: "is this attempt allowed to try?"
+                # — manifest 存在性已在 Check 1（两层 Grant）验证；此处
+                # 只剩部署期 OperationPolicy（deny-by-default allowlist /
+                # 审批）门禁（§3.5：allowlist/审批配置是数据）。
+                if isinstance(intent, SubmitToolRequest):
                     decision = self._tool_registry.policy_decision(
                         intent.tool_name,
                     )
@@ -4763,7 +4816,6 @@ class Simulation:
                 context = ToolContext(
                     agent_id=op.agent_id,
                     tick=tick,
-                    allowed_tools=self._tool_context_allowed(op.agent_id),
                     request_id=op.request_id,
                 )
                 tr = self._tool_registry.execute(

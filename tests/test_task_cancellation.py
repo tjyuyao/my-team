@@ -3,6 +3,11 @@
 Covers review gaps:
 - Task cancellation propagation (parent → child cascade)
 - Root agent capability restrictions
+
+v0.11（N1b，§5.1）：root 能力边界断言迁移为两层 Grant 求值——测试内
+显式布线：建 Authority → 注册工具 uuid → grant_membership +
+grant_capability（§3.5）；未注册 uuid / 未授予工具一律拒绝
+（deny-by-default）。
 """
 
 from datetime import datetime, timedelta, timezone
@@ -10,13 +15,14 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from my_team.agent_runtime import (
-    ROOT_TOOLS,
     RootAgent,
     ToolPermissionError,
     ToolRegistry,
 )
+from my_team.devices.authority import Authority, new_team_id
 from my_team.models.task import TaskStatus
 from my_team.task_tree import TaskTree
+from my_team.tool_manifest import builtin_manifests
 
 # ---------------------------------------------------------------------------
 # Task Cancellation Cascade
@@ -108,43 +114,48 @@ class TestTaskCancellation:
 class TestRootAgentIsolation:
     @pytest.fixture
     def root_agent(self):
-        tr = ToolRegistry()
-        tr.register_agent("agent.root", ROOT_TOOLS)
-        return RootAgent(agent_id="agent.root", tool_registry=tr)
+        """N1b 两层 Grant 布线：root 以自身为 position，仅授予
+        read/write/ls/delegate（直派形态，§3.5/§5.1）。"""
+        authority = Authority(team_id=new_team_id(), owner_agent_id="agent.root")
+        reg = ToolRegistry(authority=authority)
+        for manifest in builtin_manifests().values():
+            reg.register_manifest(manifest)
+        reg.declare_tools(
+            "agent.root",
+            frozenset({"read", "write", "ls", "delegate"}),
+        )
+        return RootAgent(agent_id="agent.root", tool_registry=reg)
 
     def test_root_cannot_send_email(self, root_agent):
         ctx = root_agent.tool_context
-        assert "send_email" not in ctx.allowed_tools
+        assert not root_agent._tool_registry.can_use("agent.root", "send_email")
         with pytest.raises(ToolPermissionError):
             root_agent._tool_registry.authorize(ctx, "send_email")
 
     def test_root_cannot_use_web_search(self, root_agent):
         ctx = root_agent.tool_context
-        assert "web_search" not in ctx.allowed_tools
+        # web_search 无 manifest（未注册 uuid）→ deny-by-default（§3.5）
+        assert not root_agent._tool_registry.can_use("agent.root", "web_search")
         with pytest.raises(ToolPermissionError):
             root_agent._tool_registry.authorize(ctx, "web_search")
 
     def test_root_can_read(self, root_agent):
-        ctx = root_agent.tool_context
-        assert "read" in ctx.allowed_tools
+        assert root_agent._tool_registry.can_use("agent.root", "read")
 
     def test_root_can_write(self, root_agent):
-        ctx = root_agent.tool_context
-        assert "write" in ctx.allowed_tools
+        assert root_agent._tool_registry.can_use("agent.root", "write")
 
     def test_root_can_delegate(self, root_agent):
-        ctx = root_agent.tool_context
-        assert "delegate" in ctx.allowed_tools
+        assert root_agent._tool_registry.can_use("agent.root", "delegate")
 
     def test_root_cannot_directly_write_shared_kb(self, root_agent):
-        """Root has no 'write_shared' tool — can only write via delegate."""
-        ctx = root_agent.tool_context
-        assert "write_shared" not in ctx.allowed_tools
+        """Root 未获 kb 写能力（'write_shared' 无 manifest/未授予）——
+        只能经 delegate 间接写（§3.5 两层 Grant）。"""
+        assert not root_agent._tool_registry.can_use("agent.root", "write_shared")
 
     def test_root_cannot_directly_commit_effects(self, root_agent):
-        """Root cannot directly commit transaction effects."""
-        ctx = root_agent.tool_context
-        assert "commit_effect" not in ctx.allowed_tools
+        """'commit_effect' 无 manifest/未授予 → 拒绝（deny-by-default）。"""
+        assert not root_agent._tool_registry.can_use("agent.root", "commit_effect")
 
 
 _BASE = datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc)

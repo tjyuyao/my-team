@@ -2,6 +2,12 @@
 
 Defines the event-driven activation system: wake conditions, wakeup events,
 activation records, and execution configuration.
+
+v0.11（N1b，§3.1）：``TickPhase`` 对齐十阶段 tick 模型（Ingest / Freeze /
+Schedule / Observe / Decide / Validate / Act / Commit / Publish / Audit），
+值与 Simulation 实际执行的阶段名一致（``last_tick_phases``）。旧
+``TickSnapshot``（全量快照）零外部使用者（grep 验证：仅 tick_engine.py
+定义、无任何导入），冻结视图已按需化（§3.1）——模型层不保留快照模型。
 """
 
 from __future__ import annotations
@@ -11,6 +17,30 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+class TickPhase(str, Enum):
+    """十阶段 tick 模型（SPEC §3.1）。
+
+    每 tick 顺序执行：Ingest（外部结果/事件入口）→ Freeze（提交态引用 +
+    按需基准）→ Schedule（就绪集）→ Observe（角色化观察）→ Decide
+    （Intent 列表，非阻塞）→ Validate（PreValidate：允许尝试吗）→ Act
+    （staged effects + pending op 注册，绝不应用）→ Commit（提交或整 tick
+    回滚）→ Publish（dispatch + 下一 tick 可见事件）→ Audit（Journal 视图）。
+
+    ``value`` 与 Simulation.last_tick_phases 记录的字符串一致。
+    """
+
+    INGEST = "ingest"
+    FREEZE = "freeze"
+    SCHEDULE = "schedule"
+    OBSERVE = "observe"
+    DECIDE = "decide"
+    VALIDATE = "validate"
+    ACT = "act"
+    COMMIT = "commit"
+    PUBLISH = "publish"
+    AUDIT = "audit"
 
 
 class WakeEventType(str, Enum):
