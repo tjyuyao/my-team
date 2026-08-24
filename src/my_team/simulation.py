@@ -45,6 +45,14 @@ from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
 from my_team.asset_store import AssetStore, AttachmentRef
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
+from my_team.budget import (
+    BudgetCheckResult,
+    BudgetConfig,
+    BudgetTracker,
+    BudgetUsage,
+    InFlightCounts,
+    estimate_llm_usage,
+)
 from my_team.calendar import CalendarStore, ScheduleAction, ScheduleRule
 from my_team.context_compiler import ContextCompiler
 from my_team.credential_store import CredentialStore
@@ -174,6 +182,16 @@ class SimulationConfig(BaseModel):
                     "(defense-in-depth; agents naturally wait while one is pending)",
     )
     private_storage_limit_mb: int = Field(default=512)
+    # T16c: LLM usage budget (SPEC §14) — pricing table + per-agent /
+    # per-task / per-simulation caps on request_count / token / cost /
+    # wall_time / concurrency. Over-limit → PreValidate rejects the
+    # WHOLE activation round (non-retryable; no state change). The
+    # per-agent concurrency cap falls back to
+    # max_concurrent_llm_requests when budget.agent.concurrency == 0.
+    budget: BudgetConfig = Field(
+        default_factory=BudgetConfig,
+        description="LLM usage budget (pricing + limits per scope)",
+    )
     # Crash guard (T19): sliding window of kernel-level crashes; crossing
     # the threshold auto-pauses the system (reason=crash_guard) after
     # notifying Provider/Owner callbacks.
@@ -296,6 +314,10 @@ class Simulation:
         self._journal = TickJournal()
         self._audit_log = AuditLog(journal=self._journal)
         self._file_ops_audit = FileOpsAuditLog()
+        # T16c: LLM usage budget accounting (per agent/task/simulation).
+        # Persisted with the rest of the state — restart keeps the
+        # accumulated counts (模拟重启不丢累计).
+        self._budget = BudgetTracker(config=self._config.budget)
         self._private_store = PrivateStore(PrivateStoreConfig(
             base_path="private",
             max_storage_bytes=self._config.private_storage_limit_mb * 1024 * 1024,
@@ -1480,6 +1502,11 @@ class Simulation:
     def audit_log(self) -> AuditLog:
         return self._audit_log
 
+    @property
+    def budget(self) -> BudgetTracker:
+        """LLM usage budget tracker (T16c)."""
+        return self._budget
+
     # -- Tool plugin API (v0.10 T7) -----------------------------------------
 
     def register_tool(
@@ -1991,6 +2018,10 @@ class Simulation:
                 aid: [dict(a) for a in actions]
                 for aid, actions in self._pending_human_actions.items()
             },
+            # T16c: LLM usage budget accumulators — restart keeps the
+            # cumulative counts (模拟重启不丢累计), so budget rejections
+            # stay consistent across restarts.
+            "budget": self._budget.snapshot(),
         }
 
     def _restore_state(self, state: dict[str, Any]) -> None:
@@ -2097,6 +2128,11 @@ class Simulation:
             for aid, actions in state.get("human_pending_actions", {}).items()
         }
         self._human_actions_consumed_this_tick = []
+
+        # T16c: budget accumulators — restore cumulative usage so the
+        # budget judgment stays consistent across a restart. Saves from
+        # before this feature have no "budget" key → fresh accumulator.
+        self._budget.restore(state.get("budget") or {})
 
         # Shared KB (resources + versions + permissions)
         kb = state["kb"]
@@ -2527,6 +2563,9 @@ class Simulation:
             # Deliver the result to the agent's continuation
             if op.op_type == OpType.LLM_REQUEST:
                 runtime_state.receive_llm_result(op.result, tick)
+                # T16c: charge the completed invocation to the budget
+                # tracker (agent/task/simulation accumulators).
+                self._record_llm_usage(op, tick)
             elif op.op_type == OpType.TOOL_REQUEST:
                 if op.metadata.get("external_tool"):
                     runtime_state.receive_external_result(op.result, tick)
@@ -3921,10 +3960,12 @@ class Simulation:
         intents pass through to Act for staging.
 
         Checks performed:
-        1. Tool capability — SubmitToolRequest tool in agent's allowed tools
-        1b. LLM budget — per-agent in-flight cap
-        1c. Duplicate request_id — within plan + cross-tick (registry)
-        1d. Tool manifest + operation policy (v0.7.0)
+        1. LLM usage budget (T16c) — cumulative + this round's estimate
+           vs per-agent/task/simulation caps (request_count / token /
+           cost / wall_time) and concurrency vs in-flight. Over-limit
+           rejects the WHOLE activation round (no partial execution).
+        1b. Duplicate request_id — within plan + cross-tick (registry)
+        1c. Tool manifest + operation policy (v0.7.0)
         2. Delegation target — DelegateIntent targets direct children
         3. Payload fields — WritePrivateFileIntent has path,
            SendEmailIntent has to, DelegateIntent has recipient/title
@@ -3940,6 +3981,36 @@ class Simulation:
 
             allowed_tools = self._tool_registry.get_allowed_tools(agent_id)
             results: list[ActionResult] = []
+
+            # Budget pre-scan (T16c): if this round contains any LLM
+            # request, verify the whole round stays within budget BEFORE
+            # validating individual intents. Rejection is whole-round:
+            # PreValidate failure == the round's validation failed ==
+            # nothing executes, nothing commits (事务原子性 — no partial
+            # LLM call happens). Judgment: 累计 + 本次请求估算.
+            llm_intents = [
+                i for i in intent_list
+                if isinstance(i, SubmitLLMRequest)
+            ]
+            if llm_intents:
+                rejection = self._budget_rejection(agent_id, llm_intents)
+                if rejection is not None:
+                    for intent in intent_list:
+                        action = AgentAction(
+                            action_type=intent.intent_type.value,
+                            tool_name=getattr(intent, "tool_name", ""),
+                            payload=dict(intent.payload),
+                        )
+                        results.append(ActionResult(
+                            action=action,
+                            success=False,
+                            error=rejection.reason,
+                            error_code="BUDGET_EXCEEDED",
+                        ))
+                    validated[agent_id] = results
+                    self._audit_budget_rejection(agent_id, rejection)
+                    continue
+
             # request_ids seen in THIS plan — catches duplicates within
             # a single decide() (registry catches cross-tick duplicates)
             seen_request_ids: set[str] = set()
@@ -3975,38 +4046,6 @@ class Simulation:
                             },
                             success=False,
                             error="Tool not authorized",
-                        )
-                        continue
-
-                # Check 1b: LLM request budget — per-agent cap on
-                # in-flight LLM requests (defense in depth; the agent
-                # state machine already serializes activations).
-                if isinstance(intent, SubmitLLMRequest):
-                    in_flight_llm = self._pending_ops.count_in_flight(
-                        agent_id, op_type=OpType.LLM_REQUEST,
-                    )
-                    if in_flight_llm >= self._config.max_concurrent_llm_requests:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"LLM budget exceeded for '{agent_id}': "
-                                f"{in_flight_llm} in flight, max "
-                                f"{self._config.max_concurrent_llm_requests}"
-                            ),
-                            error_code="BUDGET_EXCEEDED",
-                        ))
-                        self._audit_log.record(
-                            AuditEventType.PERMISSION_DENIED,
-                            agent_id=agent_id,
-                            tick=tick,
-                            details={
-                                "intent": intent.intent_type.value,
-                                "reason": "llm_budget_exceeded",
-                                "error_code": "BUDGET_EXCEEDED",
-                            },
-                            success=False,
-                            error="LLM request budget exceeded",
                         )
                         continue
 
@@ -4237,6 +4276,165 @@ class Simulation:
             validated[agent_id] = results
 
         return validated
+
+    # -- T16c: LLM usage budget helpers -------------------------------------
+
+    def _llm_in_flight_counts(self, agent_id: str, task_id: str) -> InFlightCounts:
+        """Count in-flight (SUBMITTED/PENDING) LLM ops at each scope.
+
+        PreValidate's concurrency gate: the pending-op registry does not
+        yet include this round's submissions, so the round's own LLM
+        requests are added by the caller via the estimate's
+        ``request_count``.
+        """
+        agent_c = task_c = total_c = 0
+        for op in self._pending_ops._operations.values():
+            if op.op_type != OpType.LLM_REQUEST:
+                continue
+            if op.status not in {
+                OpStatus.SUBMITTED, OpStatus.PENDING,
+            }:
+                continue
+            total_c += 1
+            if op.agent_id == agent_id:
+                agent_c += 1
+            if task_id and op.task_id == task_id:
+                task_c += 1
+        return InFlightCounts(agent=agent_c, task=task_c, simulation=total_c)
+
+    def _budget_rejection(
+        self,
+        agent_id: str,
+        llm_intents: list[SubmitLLMRequest],
+    ) -> BudgetCheckResult | None:
+        """Budget gate for one round: cumulative + estimate vs caps.
+
+        Returns the first exceeded limit, or None if the round's LLM
+        requests may proceed. Concurrency uses in-flight + this round's
+        request count; the per-agent concurrency cap falls back to
+        ``max_concurrent_llm_requests`` when the budget config leaves it
+        at 0.
+        """
+        tick_duration_seconds = (
+            self._tick_engine.config.tick_duration_timedelta.total_seconds()
+        )
+        task_id = next(
+            (i.task_id for i in llm_intents if i.task_id), "",
+        )
+        estimate = BudgetUsage()
+        for intent in llm_intents:
+            estimate = estimate.add(estimate_llm_usage(
+                model=intent.model,
+                messages=intent.messages,
+                max_tokens=intent.max_tokens,
+                timeout_ticks=intent.timeout_ticks,
+                tick_duration_seconds=tick_duration_seconds,
+                pricing=self._config.budget.pricing,
+            ))
+        in_flight = self._llm_in_flight_counts(agent_id, task_id)
+        return self._budget.check(
+            agent_id=agent_id,
+            task_id=task_id,
+            estimate=estimate,
+            in_flight=in_flight,
+            agent_concurrency_limit=self._config.max_concurrent_llm_requests,
+            # SimulationConfig.budget is the single source of truth for
+            # limits (the tracker may hold a stale copy across restores).
+            limits=self._config.budget,
+        )
+
+    def _audit_budget_rejection(
+        self,
+        agent_id: str,
+        rejection: BudgetCheckResult,
+    ) -> None:
+        """Audit a whole-round budget rejection (T16c).
+
+        Concurrency keeps the legacy ``permission.denied`` /
+        ``llm_budget_exceeded`` shape (back-compat with pre-budget
+        tests); cumulative token/cost limits record a dedicated
+        ``budget.rejected`` event.
+        """
+        tick = self._tick_engine.current_tick
+        error = f"LLM {rejection.reason}"
+        if rejection.dimension == "concurrency":
+            self._audit_log.record(
+                AuditEventType.PERMISSION_DENIED,
+                agent_id=agent_id,
+                tick=tick,
+                details={
+                    "intent": "submit_llm_request",
+                    "reason": "llm_budget_exceeded",
+                    "error_code": "BUDGET_EXCEEDED",
+                    "scope": rejection.scope,
+                    "dimension": rejection.dimension,
+                    "in_flight": rejection.current,
+                    "limit": rejection.limit,
+                },
+                success=False,
+                error=error,
+            )
+            return
+        self._audit_log.record(
+            AuditEventType.BUDGET_REJECTED,
+            agent_id=agent_id,
+            tick=tick,
+            details={
+                "intent": "submit_llm_request",
+                "reason": "budget_exceeded",
+                "error_code": "BUDGET_EXCEEDED",
+                "scope": rejection.scope,
+                "dimension": rejection.dimension,
+                "cumulative": rejection.current,
+                "estimate": rejection.estimate,
+                "limit": rejection.limit,
+            },
+            success=False,
+            error=error,
+        )
+
+    def _record_llm_usage(self, op: PendingOperation, tick: int) -> None:
+        """Charge one completed LLM invocation to the budget tracker.
+
+        Called when the result is delivered (Phase 1 Ingest). Token
+        counts come from the provider's usage report when present;
+        otherwise the conservative request estimate is charged so the
+        accumulated total never silently under-counts. Wall time is the
+        request's in-flight window in simulation time (elapsed ticks ×
+        tick duration).
+        """
+        model = op.metadata.get("model", "") or ""
+        tick_duration_seconds = (
+            self._tick_engine.config.tick_duration_timedelta.total_seconds()
+        )
+        wall_time_seconds = max(0, tick - op.created_tick) * tick_duration_seconds
+        usage = op.result if isinstance(op.result, dict) else {}
+        usage_dict = usage.get("usage") if isinstance(usage, dict) else None
+        if isinstance(usage_dict, dict):
+            input_tokens = int(usage_dict.get("prompt_tokens", 0) or 0)
+            output_tokens = int(usage_dict.get("completion_tokens", 0) or 0)
+        else:
+            deadline = op.deadline_tick if op.deadline_tick is not None else op.created_tick + 1
+            timeout_ticks = max(1, deadline - op.created_tick)
+            est = estimate_llm_usage(
+                model=model,
+                messages=op.metadata.get("messages", []),
+                max_tokens=op.metadata.get("max_tokens", 4096),
+                timeout_ticks=timeout_ticks,
+                tick_duration_seconds=tick_duration_seconds,
+                pricing=self._config.budget.pricing,
+            )
+            input_tokens = est.input_tokens
+            output_tokens = est.output_tokens
+        self._budget.record_llm(
+            agent_id=op.agent_id,
+            task_id=op.task_id or "",
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            wall_time_seconds=wall_time_seconds,
+            pricing=self._config.budget.pricing,
+        )
 
     # -- T4: Journal capture helpers ----------------------------------------
 

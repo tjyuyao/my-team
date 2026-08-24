@@ -60,6 +60,9 @@ class AuditEventType(str, Enum):
 
     # Permissions
     PERMISSION_DENIED = "permission.denied"
+    # Budget (T16c, SPEC §14.2 拒绝类): cumulative token/cost budget
+    # exceeded — PreValidate rejects the whole round, no state change.
+    BUDGET_REJECTED = "budget.rejected"
 
     # Human operations
     HUMAN_PAUSE = "human.pause"

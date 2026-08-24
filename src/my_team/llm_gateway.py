@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from my_team.budget import estimate_cost
 from my_team.models.llm import (
     LLMInvocation,
     LLMProviderConfig,
@@ -116,6 +117,13 @@ class LLMGateway:
                 provider=profile.provider,
                 input_tokens=result.usage.get("prompt_tokens", 0),
                 output_tokens=result.usage.get("completion_tokens", 0),
+                # T16c: cost derived from the pricing table (models/llm.py
+                # declares the field; the budget judgment is cost-first).
+                cost=estimate_cost(
+                    profile.model,
+                    result.usage.get("prompt_tokens", 0),
+                    result.usage.get("completion_tokens", 0),
+                ),
                 success=True,
                 finish_reason=result.finish_reason,
             )
