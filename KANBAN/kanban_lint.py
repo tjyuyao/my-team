@@ -136,6 +136,32 @@ def last_commit_date(path: Path) -> str | None:
     return None
 
 
+_SHALLOW: bool | None = None
+
+
+def _repo_is_shallow(root: Path) -> bool:
+    """True when the repo is a shallow clone (R2 cannot be verified).
+
+    In a shallow clone ``git log -1 -- <path>`` degrades to the tip commit
+    for every path, so commit-date checks would produce mass false
+    violations. Callers should skip per-file R2 and report this instead.
+    """
+    global _SHALLOW
+    if _SHALLOW is None:
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            _SHALLOW = proc.returncode == 0 and proc.stdout.strip() == "true"
+        except (OSError, subprocess.SubprocessError):
+            _SHALLOW = False
+    return _SHALLOW
+
+
 def topic_of(name: str) -> str:
     """Canonical topic: strip ``.md``, ``.archived`` and the date prefix.
 
@@ -235,6 +261,15 @@ def check_board(root: Path) -> list[str]:
     topics = {topic_of(p.name) for p in files}
     fms: dict[Path, dict[str, str]] = {}
 
+    # R2 needs full git history; a shallow clone cannot verify date
+    # invariants (git log -1 -- <path> degrades to the tip commit).
+    shallow = _repo_is_shallow(root)
+    if shallow:
+        violations.append(
+            "R2: 仓库为浅克隆(shallow), 无完整历史, 无法校验日期不变量 —— "
+            "git fetch --unshallow (CI: actions/checkout 需 fetch-depth: 0)"
+        )
+
     for p in files:
         rel = str(p.relative_to(root))
 
@@ -246,12 +281,13 @@ def check_board(root: Path) -> list[str]:
             continue
 
         # R2 date prefix == last commit date (mtime fallback for untracked)
-        date = p.name[:10]
-        actual = last_commit_date(p)
-        if actual is None:
-            actual = mtime_date(p)
-        if date != actual:
-            violations.append(f"{rel}: R2 date {date} != {actual}")
+        if not shallow:
+            date = p.name[:10]
+            actual = last_commit_date(p)
+            if actual is None:
+                actual = mtime_date(p)
+            if date != actual:
+                violations.append(f"{rel}: R2 date {date} != {actual}")
 
         # R3 frontmatter present + kind valid & matches column
         fm = parse_frontmatter(p)

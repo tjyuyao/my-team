@@ -128,7 +128,7 @@ violations = kanban_lint.check_board(Path("KANBAN"))  # -> list[str]；空 = 合
 | 规则 | 含义 | 触发示例 → 修复 |
 |---|---|---|
 | R1 | 文件名 `YYYY-MM-DD-{小写短横主题}.md`（归档计划为 `….archived.md`） | 日期缺前导零、含大写 → 改名 |
-| R2 | 文件名日期前缀 == 该文件最近一次提交日期（`git log`；未提交的新文件回退 mtime） | 编辑/移动后没同步日期 → 运行 `enforce_filename_dates.py` |
+| R2 | 文件名日期前缀 == 该文件最近一次提交日期（`git log`；未提交的新文件回退 mtime；浅克隆无法校验） | 编辑/移动后没同步日期 → 运行 `enforce_filename_dates.py` |
 | R3 | frontmatter 存在；`kind` 合法且等于所在列要求（PLAN=plan，OPEN_ISSUE/CLOSED_ISSUE=issue，TODO/IN_PROGRESS/DONE=task，MILESTONE=report） | 无 frontmatter；`kind: task` 放进 PLAN → 补/改 frontmatter |
 | R4 | PLAN 中版本号 `vX.Y.Z` 唯一 | 两个计划同是 v0.10 → 合并或改版本 |
 | R5 | 列与 kind 对应（由 R3 蕴含）：DONE 只放任务、CLOSED_ISSUE 只放议题、MILESTONE 只放报告 | 议题文件进了 DONE → 移列 |
