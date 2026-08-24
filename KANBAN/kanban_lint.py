@@ -92,7 +92,9 @@ TERMINAL_STATUS = {
 PRIORITIES = {"high", "medium", "low"}
 
 # References that legitimately point outside the board.
-REF_EXEMPT = {"README", "SPEC", "SPEC.v0.8.legacy"}
+# SPEC 双版制（2026-08-24）：SPEC.md = 设计权威（新编号）；
+# SPEC.v0.11.legacy.md = 旧骨架备份（v0.11 及更早 KANBAN 文件引旧编号）。
+REF_EXEMPT = {"README", "SPEC", "SPEC.v0.8.legacy", "SPEC.v0.11.legacy"}
 
 
 def iter_board_files(root: Path):

@@ -77,6 +77,26 @@ priority: high
 
 校验器按 topic 匹配引用，因此日期改名与计划归档不会切断引用。
 
+## SPEC 引用规则（双版制，2026-08-24）
+
+`SPEC.md` 自 v0.11 起为**设计权威**（三态重构，新编号 §0–§13）；
+旧骨架备份在 `SPEC.v0.11.legacy.md`（内容冻结，旧编号 §0–§17）。
+SPEC 引用按**文件代际**分流，不因重构批量改引用：
+
+- **旧文件引旧**：v0.11 及更早创建的 KANBAN 文件（v0.11 plan、
+  TODO 卡、OPEN_ISSUE、MILESTONE、归档计划）中的 `SPEC §X.Y`
+  （frontmatter `source` 与正文）一律指 `SPEC.v0.11.legacy.md` 的
+  编号，**保持原样**；
+- **新文件引新**：v0.12 及以后新建的 KANBAN 文件引用 `SPEC.md` 的
+  新编号；
+- **旧文件小修不改编号**（仍指 legacy）；**整卡重写**（语义重构）
+  时随重写迁移到新 SPEC 编号，并在 source 注明；
+- **代际判定以版本语境为准，不看文件日期**：同一日期创建的卡，
+  属 v0.11 工作（如 N1–N9 卡）算旧文件引 legacy；属 v0.12+ 工作
+  引新 SPEC；
+- R7 豁免：`SPEC.v0.11.legacy` 与 `SPEC`/`SPEC.v0.8.legacy` 一样
+  固定豁免，无需声明（见「R7 悬空引用」）。
+
 ## 状态流转
 
 ```text
@@ -165,7 +185,8 @@ report.md"）、通配符（`*.md`）、shell 示例（`git diff … SPEC.md`）
   `.archived`）。校验器按 topic 匹配，因此日期改名与计划归档都不切断引用。
 - 写死的日期路径（`KANBAN/PLAN/2026-08-18-v0.8.0-plan.md`）当前也能通过，
   但归档/改名后会变断链——**新写引用一律用 topic 形式**。
-- 固定豁免、无需声明：`README`、`SPEC`、`SPEC.v0.8.legacy`。
+- 固定豁免、无需声明：`README`、`SPEC`、`SPEC.v0.8.legacy`、
+  `SPEC.v0.11.legacy`（双版制见「SPEC 引用规则」）。
 - 真正回不去的引用（如历史记录引用迁移前的旧路径）用 `r7_exempt` 显式豁免；
   豁免只对声明它的那个文件生效：
 
