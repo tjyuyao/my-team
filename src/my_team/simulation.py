@@ -4965,8 +4965,15 @@ class Simulation:
                 elif kind == InvertKind.REMOVE_CREATED:  # TASK_CREATE
                     task_id = data.get("task_id", effect.resource)
                     self._task_tree._tasks.pop(task_id, None)
-                    self._task_tree._parent_map.pop(task_id, None)
+                    parent = self._task_tree._parent_map.pop(task_id, None)
                     self._task_tree._children_map.pop(task_id, None)
+                    if parent is not None:
+                        # Remove the dangling child edge from the parent's
+                        # children list (T16b 矩阵发现：悬空子边随持久化
+                        # 留存, 图不一致)。
+                        siblings = self._task_tree._children_map.get(parent)
+                        if siblings and task_id in siblings:
+                            siblings.remove(task_id)
                     for owner, ids in list(
                         self._task_tree._assignee_map.items()
                     ):

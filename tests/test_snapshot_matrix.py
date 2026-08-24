@@ -607,15 +607,16 @@ def _rollback_task_tree() -> None:
     assert sim.task_tree.get("t.prior").model_dump() == before["prior"]
     assert sim.task_tree.get("t.parent").model_dump() == before["parent"]
     assert not sim.task_tree.exists("t.created")
-    # 引用边/assignee 映射：子任务的 parent 边与 assignee 边已撤销
+    # 引用边/assignee 映射：子任务的 parent 边与 assignee 边已撤销，
+    # 父任务的 children 列表亦无悬空子边（T16b 矩阵发现缺陷，
+    # 主 agent 已修复 —— REMOVE_CREATED 逆操作补清父 children 值列表）
     assert sim.task_tree._parent_map.get("t.created") is None
     assert "t.created" not in sim.task_tree._assignee_map.get(
         "agent.research", [],
     )
-    # 缺陷注记（见卡实现注记）：REMOVE_CREATED 逆操作未从父任务
-    # _children_map 的值列表移除子 id —— `_children_map["t.parent"]`
-    # 仍含 't.created'（悬空子边，持久化后留存）。此处只断言已正确的
-    # 部分；该缺陷由主 agent 修复后补回严格断言。
+    assert "t.created" not in sim.task_tree._children_map.get(
+        "t.parent", [],
+    )
 
 
 def _rollback_scheduler_claims() -> None:

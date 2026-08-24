@@ -43,7 +43,17 @@ class TestControlPlane:
         plane = ControlPlane(runtime, port=port)
         plane.start()
         time.sleep(0.1)  # let server start
+        self._plane = plane
         return sim, runtime, plane, port
+
+    def teardown_method(self, method):
+        # Stop the HTTP server so its port is released — without this,
+        # parallel pytest sessions fight over the 18101-18106 range
+        # (T16a 收尾发现的端口泄漏: 6×EADDRINUSE 环境冲突).
+        plane = getattr(self, "_plane", None)
+        if plane is not None:
+            plane.stop()
+            self._plane = None
 
     def _get(self, path: str, port: int) -> dict:
         url = f"http://127.0.0.1:{port}{path}"

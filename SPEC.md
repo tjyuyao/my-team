@@ -389,6 +389,22 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
 
 - 出站工具（EXTERNAL_IRREVERSIBLE）必须提供幂等键与状态回查；
 - 平台级 Admission：按 Integration 的 rate_limit 与健康状态背压。
+- **已实现注记（2026-08-24，T16a/T16c）**：
+  - T16a：`ExecutionClass.SANDBOXED_PROCESS` 落地——`run_tests` 升
+    SANDBOXED_PROCESS，执行器 tier 为 SANDBOXED_OUT_OF_PROCESS；
+    工具 manifest 声明 `SandboxConstraints`（rlimit CPU/内存/进程数/
+    文件大小、环境净化 sitecustomize/PYTHON*/PATH/secret 剥离、
+    GIT_* 固定、deny_network、只读挂载），隔离后端可插拔
+    （`SandboxBackend`，决策 4），真实后端 = 可信 shim 子进程
+    （rlimit → unprivileged userns 下 netns/mountns → execvpe），
+    每约束实际应用与否进 `sandbox_report`，deny-by-default 不静默；
+    `run_tests` cwd 为临时工作区副本（T17 by-product 宿主目录问题
+    并入）。
+  - T16c：token/cost 预算——定价表 + BudgetTracker 三作用域
+    （agent/task/simulation）累计 request_count/token/cost/wall_time，
+    跨 tick 持久化；PreValidate 预扫描超限（累计 + 本次估算）拒整个
+    回合（与事务原子性一致），concurrency 同路径；审计
+    `budget.rejected`。
 
 ### 6.4 Integration（外部平台适配器）
 
@@ -778,6 +794,17 @@ GET  /audit?tick=...          审计查询
 - [ ] 审批通过前，高风险工具不得执行。
 - [ ] 连续内核级崩溃（滑动窗口内达阈值）自动暂停（reason=crash_guard）
       且仅人工 resume；业务失败（局部 FAILED，T18 分级）不计为崩溃。
+
+- **已落地注记（2026-08-24，T16a/b/c）**：
+  - `run_tests` 在真实沙箱（只读挂载 + 网络拒绝 + 资源限制 + 环境
+    净化）下执行，非自证测试实证（网络真拒 / 环境真净化 / 资源
+    限制真生效 / 只读挂载 EROFS）；
+  - 超 token/cost 预算的 LLM 请求在 PreValidate 拒绝（拒整个回合）；
+  - Snapshot 覆盖矩阵（tests/test_snapshot_matrix.py）：10 类状态面
+    × 3 性质（Freeze 可见性 / Commit 可回滚性 / 持久化）= 30 行
+    逐行断言 + 完整性自检，覆盖本清单各不变量（回滚一致性、
+    pending op 生命周期、去重、状态持久化）；矩阵发现并修复
+    REMOVE_CREATED 逆操作悬空子边缺陷。
 
 ---
 
