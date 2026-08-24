@@ -286,7 +286,8 @@ class TestPythonToolsInSimulation:
         assert "not in frozen workspace view" in op.result["error"]
 
     def test_manifests_honest_classification(self) -> None:
-        """LOCAL_PROCESS + no SANDBOXED_PROCESS claim + cancel support."""
+        """L0/L1 stay LOCAL_PROCESS; run_tests is the ONE builtin tool
+        that upgraded to SANDBOXED_PROCESS (T16a, real isolation)."""
         sim = Simulation(agent_tree=_make_tree([]))
         for name in ("python_compute", "python_transform"):
             manifest = sim._tool_registry.get_manifest(name)
@@ -298,9 +299,15 @@ class TestPythonToolsInSimulation:
             .filesystem_scopes == ("none",)
         assert sim._tool_registry.get_manifest("python_transform") \
             .filesystem_scopes == ("workspace",)
-        # No builtin tool claims SANDBOXED_PROCESS (honesty gate)
-        for m in sim._tool_registry.manifests():
-            assert m.execution_class is not ExecutionClass.SANDBOXED_PROCESS
+        # Honesty gate (T16a): exactly ONE builtin tool claims
+        # SANDBOXED_PROCESS — run_tests — and it must carry the
+        # declarative constraint spec; every other builtin must NOT.
+        sandboxed = [
+            m for m in sim._tool_registry.manifests()
+            if m.execution_class is ExecutionClass.SANDBOXED_PROCESS
+        ]
+        assert [m.name for m in sandboxed] == ["run_tests"]
+        assert sandboxed[0].sandbox_constraints is not None
 
 
 class TestPhysicalCancel:

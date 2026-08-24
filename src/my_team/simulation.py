@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import signal
+import sys
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -130,7 +131,7 @@ from my_team.python_worker import (
 )
 from my_team.record_store import RecordInvariantError, RecordStore
 from my_team.reliability import CrashGuard, CrashReport, TimeoutChecker
-from my_team.sandbox_tools import run_sandboxed_process
+from my_team.sandbox_tools import make_workspace_copy, run_sandboxed_process
 from my_team.scheduler import AgentScheduler, QueuedEvent
 from my_team.shared_kb import (
     LockConflictError,
@@ -1148,36 +1149,51 @@ class Simulation:
         def handle_run_tests(
             context: ToolContext, test_path: str = "", **_kw: Any,
         ) -> Any:
-            """Run pytest in the sandbox (timeout + output truncation).
+            """Run pytest in a real sandbox (T16a, SANDBOXED_PROCESS).
 
-            The sandbox protocol beyond this (read-only mount, network
-            deny-by-default, resource limits) is OI-001's scope. The
-            run sees the COMMITTED state (Act runs before Commit applies
-            this tick's staged writes).
+            The run happens in a TEMP WORKSPACE COPY (never the host
+            cwd — T17 by-product: pytest's .pytest_cache/__pycache__/
+            tmp writes land in the copy and die with it), under the
+            manifest's declared SandboxConstraints: resource limits
+            (CPU/memory/processes/file size), network deny-by-default
+            (netns), environment sanitisation (sitecustomize/
+            PYTHONPATH/PATH/secret stripped, GIT_* pinned). The backend
+            reports per-constraint in ``sandbox_report``. The run sees
+            the COMMITTED state (Act runs before Commit applies this
+            tick's staged writes).
             """
             manifest = self._tool_registry.get_manifest("run_tests")
             assert manifest is not None  # builtin, registered at startup
             timeout_ms = manifest.max_runtime_ms or 60_000
             max_output = manifest.max_output_bytes or 200_000
-            cmd = ["uv", "run", "pytest", "-q"]
-            if test_path:
-                cmd.append(test_path)
-            res = run_sandboxed_process(
-                cmd,
-                timeout_ms=timeout_ms,
-                max_output_bytes=max_output,
-                cwd=str(Path.cwd()),
-                on_start=(
-                    lambda proc: self._active_processes.__setitem__(
-                        context.request_id, proc,
-                    ) if context.request_id else None
-                ),
-                on_end=(
-                    lambda proc: self._active_processes.pop(
-                        context.request_id, None,
-                    ) if context.request_id else None
-                ),
-            )
+            constraints = manifest.sandbox_constraints
+            with make_workspace_copy() as copy:
+                target = test_path
+                if target and not os.path.isabs(target):
+                    # Relative test paths resolve inside the sandbox
+                    # copy, never against the host directory.
+                    target = str(copy / target)
+                cmd = [sys.executable, "-I", "-m", "pytest", "-q"]
+                if target:
+                    cmd.append(target)
+                res = run_sandboxed_process(
+                    cmd,
+                    timeout_ms=timeout_ms,
+                    max_output_bytes=max_output,
+                    cwd=str(copy),
+                    constraints=constraints,
+                    home=str(copy),
+                    on_start=(
+                        lambda proc: self._active_processes.__setitem__(
+                            context.request_id, proc,
+                        ) if context.request_id else None
+                    ),
+                    on_end=(
+                        lambda proc: self._active_processes.pop(
+                            context.request_id, None,
+                        ) if context.request_id else None
+                    ),
+                )
             if res["timed_out"]:
                 self._audit_log.record(
                     AuditEventType.TOOL_TIMEOUT,
@@ -1421,13 +1437,22 @@ class Simulation:
         # dispatched to a TRUSTED_IN_PROCESS executor (host subprocess
         # with timeout/truncation — sandbox_tools). Remote tools are
         # admitted by UNTRUSTED_OUT_OF_PROCESS executors registered by
-        # the harness (tests/tool_helpers.py).
-        for tool in ("run_tests", "python_compute", "python_transform"):
+        # the harness (tests/tool_helpers.py). T16a: run_tests is now
+        # SANDBOXED_PROCESS — its kernel handler executes the tool in a
+        # sandboxed OS process, so its executor tier is
+        # SANDBOXED_OUT_OF_PROCESS (the only tier compatible with the
+        # class; the dispatch loop still runs the handler in-process).
+        for tool in ("python_compute", "python_transform"):
             self._executors.register(
                 tool,
                 tier=ExecutorTier.TRUSTED_IN_PROCESS,
                 max_concurrent=2,
             )
+        self._executors.register(
+            "run_tests",
+            tier=ExecutorTier.SANDBOXED_OUT_OF_PROCESS,
+            max_concurrent=2,
+        )
 
     def _create_runtime(self, config: AgentConfig) -> AgentRuntime:
         """Create an appropriate runtime for an agent based on config."""
@@ -4722,12 +4747,19 @@ class Simulation:
                 continue
 
             tier = self._executors.tier(tool_name)
-            if tier == ExecutorTier.TRUSTED_IN_PROCESS:
+            if tier in (
+                ExecutorTier.TRUSTED_IN_PROCESS,
+                ExecutorTier.SANDBOXED_OUT_OF_PROCESS,
+            ):
                 # In-process executor: run now (manifest-bounded).
-                # request_id lets the handler register its live
-                # subprocess for physical cancel (P2-10). File tools
-                # read on demand at dispatch (committed state + own
-                # staged) — no frozen view is bound (SPEC §3.1 按需化).
+                # SANDBOXED_OUT_OF_PROCESS (T16a, run_tests) means the
+                # TOOL executes in a sandboxed OS process (rlimits /
+                # netns / env sanitisation / temp workspace copy); the
+                # kernel-side handler still runs here. request_id lets
+                # the handler register its live subprocess for physical
+                # cancel (P2-10). File tools read on demand at dispatch
+                # (committed state + own staged) — no frozen view is
+                # bound (SPEC §3.1 按需化).
                 context = ToolContext(
                     agent_id=op.agent_id,
                     tick=tick,

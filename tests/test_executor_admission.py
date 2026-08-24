@@ -2,10 +2,11 @@
 
 - Act routes by execution class: PURE/READ_ONLY/STAGED_MUTATION tools
   are kernel-executed (apply_patch stages FILE_PATCH via the intent
-  path); LOCAL_PROCESS tools become pending ops.
+  path); LOCAL_PROCESS / SANDBOXED_PROCESS tools become pending ops.
 - Phase 9 dispatch: SUBMITTED → Admission (executor registered, tier
-  compatible, capacity) → TRUSTED_IN_PROCESS runs the tool in-process /
-  out-of-process executors claim the op.
+  compatible, capacity) → TRUSTED_IN_PROCESS / SANDBOXED_OUT_OF_PROCESS
+  (T16a: run_tests) run the tool in-process / out-of-process executors
+  claim the op.
 - Admission denial completes the op with a structured error so Ingest
   wakes the agent.
 - request_id history persists across restart: a replayed id is
@@ -27,6 +28,7 @@ from my_team.models.intent import (
     SubmitToolRequest,
 )
 from my_team.pending_ops import OpStatus, OpType
+from my_team.sandbox_spec import SandboxConstraints
 from my_team.simulation import Simulation
 from my_team.tool_manifest import ExecutionClass, ToolManifest
 from tests.tool_helpers import register_remote_tool
@@ -168,8 +170,9 @@ class TestManifestRoutingAtAct:
         # patched and the buffer was cleared at tick end.
         assert target.read_text(encoding="utf-8") == "goodbye"
 
-    def test_run_tests_intent_dispatches_to_trusted_executor(self) -> None:
-        """LOCAL_PROCESS tools: pending op → dispatch executes for real."""
+    def test_run_tests_intent_dispatches_to_sandboxed_executor(self) -> None:
+        """SANDBOXED_PROCESS tools: pending op → dispatched to the
+        SANDBOXED_OUT_OF_PROCESS executor → real sandboxed pytest run."""
         sim = Simulation(agent_tree=_make_tree(["run_tests"]))
         agent = ScriptedToolAgent("agent.research")
         agent.tool_name = "run_tests"
@@ -186,7 +189,7 @@ class TestManifestRoutingAtAct:
         assert op.status == OpStatus.COMPLETED
         assert op.result.get("exit_code") == 0
         assert op.result.get("success") is True
-        # Dispatched audit records the tier
+        # Dispatched audit records the sandboxed tier
         dispatched = [
             e for e in sim.audit_log.entries
             if e.event_type == AuditEventType.TOOL_DISPATCHED
@@ -194,7 +197,7 @@ class TestManifestRoutingAtAct:
         ]
         assert len(dispatched) == 1
         assert dispatched[0].details["status"] == "executed"
-        assert dispatched[0].details["executor_tier"] == "trusted_in_process"
+        assert dispatched[0].details["executor_tier"] == "sandboxed_out_of_process"
 
         # Result delivered next tick (agent reports via email)
         sim.run_tick()
@@ -247,6 +250,7 @@ class TestExecutorAdmission:
         sim._tool_registry.register_manifest(ToolManifest(
             name="sandbox_tool", version="1.0.0",
             execution_class=ExecutionClass.SANDBOXED_PROCESS,
+            sandbox_constraints=SandboxConstraints(deny_network=True),
         ))
         sim._executors.register(
             "sandbox_tool", tier=ExecutorTier.TRUSTED_IN_PROCESS,

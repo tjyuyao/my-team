@@ -31,6 +31,7 @@ from functools import cached_property
 from typing import Any
 
 from my_team.models.llm import ToolDefinition
+from my_team.sandbox_spec import DEFAULT_SECRET_KEYWORDS, SandboxConstraints
 from my_team.transaction import EffectType
 
 
@@ -63,10 +64,12 @@ class ExecutionClass(str, Enum):
     #   env/PATH, no read-only mount, no network deny, no resource
     #   limits. The manifest's possible_side_effects must be declared.
     SANDBOXED_PROCESS = "sandboxed_process"
-    # ^ External process in an isolated sandbox (read-only mount,
-    #   network deny-by-default, resource limits, approval policy).
-    #   NOT granted to any builtin tool until the sandbox protocol
-    #   exists (OI-001).
+    # ^ External process in an isolated sandbox (read-only mount /
+    #   temp workspace copy, network deny-by-default, resource limits,
+    #   environment sanitisation — OI-001). The manifest MUST declare
+    #   sandbox_constraints (the declarative spec); the execution
+    #   backend enforces it and reports per-constraint (T16a). run_tests
+    #   is the first builtin tool that qualifies.
     EXTERNAL_IRREVERSIBLE = "external_irreversible"
     # ^ External call that cannot be undone; must be declared
     #   irreversible and (typically) requires approval.
@@ -124,6 +127,12 @@ class ToolManifest:
     supports_cancel: bool = False
     requires_approval: bool = False
     retry_policy: RetryPolicy = RetryPolicy.NONE
+    sandbox_constraints: SandboxConstraints | None = None
+    # ^ Declarative isolation spec for SANDBOXED_PROCESS tools (T16a):
+    #   resource limits / network deny / read-only binds / environment
+    #   sanitisation. Required for SANDBOXED_PROCESS, forbidden
+    #   otherwise — the declaration is the contract the backend
+    #   enforces (OI-001).
 
     def __post_init__(self) -> None:
         errors: list[str] = []
@@ -179,6 +188,27 @@ class ToolManifest:
                 errors.append(
                     "EXTERNAL_IRREVERSIBLE tools must declare reversible=False"
                 )
+        if self.execution_class is ExecutionClass.SANDBOXED_PROCESS:
+            # T16a: a sandboxed tool MUST declare its isolation spec —
+            # declaration is the contract the backend enforces; a
+            # SANDBOXED_PROCESS without constraints is an unsupported
+            # claim. Network is denied by the sandbox itself, so the
+            # tool must not require it (deny-by-default).
+            if self.sandbox_constraints is None:
+                errors.append(
+                    "SANDBOXED_PROCESS tools must declare "
+                    "sandbox_constraints"
+                )
+            if self.requires_network:
+                errors.append(
+                    "SANDBOXED_PROCESS tools deny network by default "
+                    "(requires_network must be False)"
+                )
+        elif self.sandbox_constraints is not None:
+            errors.append(
+                "sandbox_constraints is only valid for SANDBOXED_PROCESS "
+                "tools"
+            )
 
         if errors:
             raise ToolManifestError(
@@ -472,15 +502,19 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         reversible=True,    # rolled back via file_previous like FILE_WRITE
         max_output_bytes=1_000_000,
     )
-    # LOCAL_PROCESS, NOT SANDBOXED_PROCESS: running tests executes
-    # untrusted code (conftest, plugins, imports, subprocesses, possible
-    # network). We enforce timeout + output truncation + process-group
-    # kill only; there is no read-only mount / network deny / resource
-    # limit. The declared side effects are honest disclosure.
+    # T16a: SANDBOXED_PROCESS — real isolation (was LOCAL_PROCESS
+    # since v0.7.0). Running tests executes untrusted code (conftest,
+    # plugins, imports, subprocesses, possible network), so the sandbox
+    # is: temp workspace COPY as cwd (host tree untouched — T17
+    # by-product), network deny-by-default (netns), resource limits
+    # (CPU/memory/processes/file size), environment sanitisation
+    # (sitecustomize/PYTHONPATH/PATH/secret stripped, GIT_* pinned).
+    # sandbox_constraints is the DECLARED spec; the backend enforces
+    # it and reports per-constraint in sandbox_report.
     run_tests = ToolManifest(
         name="run_tests",
-        version="1.0.0",
-        execution_class=ExecutionClass.LOCAL_PROCESS,
+        version="2.0.0",
+        execution_class=ExecutionClass.SANDBOXED_PROCESS,
         description="Run tests in the workspace and report results",
         input_schema={
             "test_path": {"type": "string",
@@ -495,20 +529,29 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         },
         capabilities=("test:run",),
         effect_types=(),
-        possible_side_effects=(
-            "file_write_local",
-            "process_spawn",
-            "possible_network",
-        ),
+        possible_side_effects=(),
         filesystem_scopes=("workspace",),
         deterministic=False,    # depends on test results
         idempotent=True,
         reversible=True,
-        requires_network=True,  # test code MAY use the network — declare
+        requires_network=False,  # sandbox denies network (deny-by-default)
         max_runtime_ms=60_000,
         max_output_bytes=200_000,
         supports_cancel=True,   # physical kill of the process group
                                 # (v0.8.0 P2-10)
+        sandbox_constraints=SandboxConstraints(
+            cpu_seconds=60,
+            memory_bytes=512 * 1024 * 1024,
+            max_processes=64,
+            max_file_bytes=16 * 1024 * 1024,
+            strip_env=("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+                       "PYTHONUSERBASE"),
+            strip_env_keywords=DEFAULT_SECRET_KEYWORDS,
+            minimal_path=True,
+            pin_git_env=True,
+            deny_network=True,
+            isolated_mount=True,
+        ),
     )
     git_diff = ToolManifest(
         name="git_diff",

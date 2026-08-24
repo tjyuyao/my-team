@@ -11,11 +11,11 @@ submission (Act) and execution (Publish dispatch):
 Executors are registered per tool with a trusted_level tier:
 
   TRUSTED_IN_PROCESS         — builtin kernel-side executors (host
-                               subprocess tools like run_tests)
+                               subprocess tools like python_compute)
   UNTRUSTED_OUT_OF_PROCESS   — third-party / remote executors
-  SANDBOXED_OUT_OF_PROCESS   — real OS-level isolation (no builtin
-                               tool qualifies yet — run_tests real
-                               isolation is v0.8 P2-7)
+  SANDBOXED_OUT_OF_PROCESS   — real OS-level isolation (T16a: run_tests
+                               qualifies — rlimits / netns / env
+                               sanitisation / temp workspace copy)
 
 Tier compatibility is derived from the tool manifest's
 execution_class: only tools whose class requires an executor go
