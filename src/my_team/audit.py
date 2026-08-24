@@ -66,6 +66,7 @@ class AuditEventType(str, Enum):
     HUMAN_RESUME = "human.resume"
     HUMAN_EMAIL = "human.email"
     HUMAN_CONFIG_CHANGE = "human.config_change"
+    HUMAN_ACTION = "human.action"  # T12a: human worker UI action ingressed
 
     # Tick
     TICK_ADVANCE = "tick.advance"

@@ -37,6 +37,7 @@ class IntentType(str, Enum):
     DELEGATE = "delegate"
     WRITE_PRIVATE_FILE = "write_private_file"
     WAIT_FOR_EVENT = "wait_for_event"
+    ACCEPT_TASK = "accept_task"      # T12a: human worker accepts an assignment
     COMPLETE_TASK = "complete_task"
     FAIL_TASK = "fail_task"
 
@@ -206,6 +207,21 @@ class WaitForEventIntent(Intent):
         default_factory=list,
         description="Specific task IDs to match",
     )
+
+
+class AcceptTaskIntent(Intent):
+    """Intent: a human worker accepts an assigned task (T12a).
+
+    The human worker's UI action is translated to this Intent and goes
+    through the SAME transaction path as an AI worker's intents
+    (Validate → Act → Commit) — no separate channel.
+    """
+
+    intent_type: IntentType = Field(
+        default=IntentType.ACCEPT_TASK,
+        init=False,
+    )
+    task_id: str = Field(description="Task to accept")
 
 
 class CompleteTaskIntent(Intent):

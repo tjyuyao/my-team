@@ -27,6 +27,7 @@ class WakeEventType(str, Enum):
     BOOTSTRAP = "bootstrap"
     EXTERNAL_RESULT = "external_result"  # T9: outbound external op completed
     SCHEDULE_TRIGGER = "schedule_trigger"  # T11: calendar rule fired (emit_event)
+    HUMAN_ACTION = "human_action"  # T12a: human worker UI action ingressed
 
 
 class WaitingState(str, Enum):

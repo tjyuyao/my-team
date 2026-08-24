@@ -6,6 +6,10 @@ Per SPEC §12:
 - View system status
 - Adjust tick duration
 - All operations audit-logged
+
+T12a (SPEC §10.1): human WORKER actions — accept/complete/fail —
+ingress as ``human``-source IngressEvents and go through the same
+transaction path as AI worker intents (no separate channel).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType, AuditLog
+from my_team.ingress import IngressBuffer, IngressEvent
 from my_team.mailbox import MailSystem
 from my_team.models.email import EmailPriority, EmailType
 from my_team.shared_kb import SharedKB
@@ -55,6 +60,7 @@ class HumanControl:
         mail_system: MailSystem,
         shared_kb: SharedKB,
         audit_log: AuditLog,
+        ingress: IngressBuffer | None = None,  # T12a: human UI action ingress
     ) -> None:
         self._engine = tick_engine
         self._agent_tree = agent_tree
@@ -62,6 +68,7 @@ class HumanControl:
         self._mail = mail_system
         self._kb = shared_kb
         self._audit = audit_log
+        self._ingress = ingress
         self._pending_duration_changes: list[dict[str, Any]] = []
 
     # -- Pause / Resume (§12.1, §12.2) --------------------------------------
@@ -295,6 +302,122 @@ class HumanControl:
             "completed_tasks": len([t for t in assignee_tasks if t.is_terminal]),
         }
 
+    # -- Human Worker actions (T12a, SPEC §10.1) -----------------------------
+
+    def submit_task_action(
+        self,
+        task_id: str,
+        action: str,
+        human_id: str = "human.user_001",
+        **payload: Any,
+    ) -> CommandResult:
+        """A human worker's UI action: accept / complete / fail a task.
+
+        The action is NOT applied directly — it is ingressed as an
+        IngressEvent (source="human") and, on the next Ingest, routed to
+        the task's kind=human assignee; HumanWorkerRuntime translates it
+        to the corresponding Intent through the SAME transaction path as
+        AI workers (Validate → Act → Commit). No separate channel.
+
+        Returns a CommandResult (acceptance of the action for the
+        ingress buffer; the task transition itself is async via the
+        kernel tick).
+        """
+        if self._ingress is None:
+            return CommandResult(
+                success=False, command=f"task_{action}",
+                message="No ingress buffer wired (human actions disabled)",
+            )
+        if action not in {"accept", "complete", "fail"}:
+            return CommandResult(
+                success=False, command="task_action",
+                message=f"Unknown human action: {action!r}",
+            )
+        if not self._task_tree.exists(task_id):
+            return CommandResult(
+                success=False, command=f"task_{action}",
+                message=f"Task '{task_id}' not found",
+            )
+        task = self._task_tree.get(task_id)
+        cfg = self._agent_tree.get(task.assignee_agent_id)
+        if cfg is None or cfg.kind != "human":
+            return CommandResult(
+                success=False, command=f"task_{action}",
+                message=(
+                    f"Task '{task_id}' assignee '{task.assignee_agent_id}' "
+                    "is not a kind=human worker"
+                ),
+            )
+        if task.is_terminal:
+            return CommandResult(
+                success=False, command=f"task_{action}",
+                message=(
+                    f"Task '{task_id}' is already terminal "
+                    f"({task.status.value}) — cannot act on it"
+                ),
+            )
+        event = IngressEvent(
+            source="human",
+            external_id=f"{task_id}:{action}",
+            event_type="human_action",
+            occurred_at=self._engine.wall_now().isoformat(),
+            payload={
+                "action": action,
+                "task_id": task_id,
+                "human_id": human_id,
+                **payload,
+            },
+        )
+        self._ingress.receive(event)
+        self._audit.record(
+            AuditEventType.HUMAN_ACTION,
+            details={
+                "human_id": human_id,
+                "action": action,
+                "task_id": task_id,
+                "assignee": task.assignee_agent_id,
+                "source": "human",
+            },
+        )
+        return CommandResult(
+            success=True, command=f"task_{action}",
+            message=f"Human action '{action}' accepted for task '{task_id}'",
+        )
+
+    def accept_task(
+        self,
+        task_id: str,
+        human_id: str = "human.user_001",
+    ) -> CommandResult:
+        """Human worker accepts an assigned task."""
+        return self.submit_task_action(
+            task_id, "accept", human_id=human_id,
+        )
+
+    def complete_task(
+        self,
+        task_id: str,
+        summary: str = "",
+        human_id: str = "human.user_001",
+    ) -> CommandResult:
+        """Human worker completes a task."""
+        return self.submit_task_action(
+            task_id, "complete", human_id=human_id, summary=summary,
+        )
+
+    def fail_task(
+        self,
+        task_id: str,
+        reason: str = "",
+        retryable: bool = False,
+        human_id: str = "human.user_001",
+    ) -> CommandResult:
+        """Human worker fails a task."""
+        return self.submit_task_action(
+            task_id, "fail", human_id=human_id,
+            reason=reason, retryable=retryable,
+        )
+
     # -- Command router -----------------------------------------------------
 
     def execute(self, command: HumanCommand) -> CommandResult:
@@ -316,6 +439,21 @@ class HumanControl:
                 value=command.params["value"],
                 unit=command.params.get("unit", "seconds"),
                 effective_tick=command.params.get("effective_tick"),
+                human_id=command.human_id,
+            ),
+            "accept_task": lambda: self.accept_task(
+                task_id=command.params["task_id"],
+                human_id=command.human_id,
+            ),
+            "complete_task": lambda: self.complete_task(
+                task_id=command.params["task_id"],
+                summary=command.params.get("summary", ""),
+                human_id=command.human_id,
+            ),
+            "fail_task": lambda: self.fail_task(
+                task_id=command.params["task_id"],
+                reason=command.params.get("reason", ""),
+                retryable=bool(command.params.get("retryable", False)),
                 human_id=command.human_id,
             ),
             "view_status": lambda: CommandResult(

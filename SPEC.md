@@ -585,6 +585,11 @@ IngressEvent:
 - 人类通过 UI accept/complete/fail；动作翻译为 Intent，走相同
   事务路径；
 - 人类任务有 deadline 与升级策略（超时提醒 Manager）。
+- **已实现注记（2026-08-23，T12a）**：HumanWorkerRuntime（UI 队列
+  驱动、空工具面）；UI 动作经 IngressEvent（source="human"）注入 →
+  `_consume_ingress` 定向路由到 assignee → 翻译为 Intent 走标准事务
+  路径；结构化 escalation（on/mode/target，post-commit 升级邮件 +
+  审计；完整 escalation 机制归 v0.11 E1）。
 
 ### 10.2 ApprovalGate（统一为 HumanTask）
 

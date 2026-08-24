@@ -33,6 +33,7 @@ from my_team.agent_runtime import (
     AgentAction,
     AgentObservation,
     AgentRuntime,
+    HumanWorkerRuntime,
     ManagerAgent,
     RootAgent,
     SubAgent,
@@ -87,6 +88,7 @@ from my_team.models.agent import AgentConfig, PoolMode
 from my_team.models.continuation import AgentContinuation, ContinuationPhase
 from my_team.models.email import Email
 from my_team.models.intent import (
+    AcceptTaskIntent,
     CompleteTaskIntent,
     DelegateIntent,
     FailTaskIntent,
@@ -401,6 +403,7 @@ class Simulation:
             mail_system=self._mail_system,
             shared_kb=self._shared_kb,
             audit_log=self._audit_log,
+            ingress=self._ingress,  # T12a: human UI actions ingress
         )
 
         # Timeout checker (between Phase 8 Commit and Phase 9 Publish)
@@ -436,6 +439,17 @@ class Simulation:
         # they fired so events re-fire after rollback (no loss).
         self._deadline_fired: dict[str, set[str]] = {}
         self._deadline_fired_this_tick: list[tuple[str, str]] = []
+
+        # T12a: pending human UI actions per kind=human agent. Ingressed
+        # human-action events are routed here (assignee → [action dicts]);
+        # the Observe phase injects them into the human worker's
+        # observation and HumanWorkerRuntime translates them to Intents
+        # through the normal transaction path. Consumed actions are
+        # recorded so a rolled-back tick restores them (no lost action).
+        self._pending_human_actions: dict[str, list[dict[str, Any]]] = {}
+        self._human_actions_consumed_this_tick: list[
+            tuple[str, dict[str, Any]]
+        ] = []
 
         # Agent runtimes
         self._runtimes: dict[str, AgentRuntime] = {}
@@ -484,6 +498,10 @@ class Simulation:
                 WakeEventType.CHILD_TASK_CHANGE,
                 WakeEventType.DEADLINE_APPROACHING,
             })
+            # T12a: kind=human workers wake on their own UI actions
+            # (accept/complete/fail) — routed by _consume_ingress.
+            if agent_config.kind == "human":
+                wake_types.add(WakeEventType.HUMAN_ACTION)
             initial_condition = WakeCondition(
                 event_types=wake_types,
                 wake_at_tick=0,
@@ -1391,6 +1409,13 @@ class Simulation:
 
     def _create_runtime(self, config: AgentConfig) -> AgentRuntime:
         """Create an appropriate runtime for an agent based on config."""
+        # T12a: kind=human agents are UI-queue driven — dedicated
+        # runtime that only translates human UI actions to Intents.
+        if config.kind == "human":
+            return HumanWorkerRuntime(
+                agent_id=config.agent_id,
+                tool_registry=self._tool_registry,
+            )
         if config.role == "root_decision_agent":
             return RootAgent(
                 agent_id=config.agent_id,
@@ -1960,6 +1985,12 @@ class Simulation:
                 }
                 for aid, rs in self._agent_runtime_states.items()
             },
+            # T12a: pending human UI actions — must survive crash between
+            # Ingest (ingress drained, seen-key recorded) and Decide.
+            "human_pending_actions": {
+                aid: [dict(a) for a in actions]
+                for aid, actions in self._pending_human_actions.items()
+            },
         }
 
     def _restore_state(self, state: dict[str, Any]) -> None:
@@ -2058,6 +2089,14 @@ class Simulation:
 
         # T9: IngressBuffer — cross-restart dedup of (source, external_id)
         self._ingress = restore_ingress_buffer(state.get("ingress"))
+
+        # T12a: pending human UI actions (survive crash between Ingest
+        # drain and Decide translation).
+        self._pending_human_actions = {
+            aid: [dict(a) for a in actions]
+            for aid, actions in state.get("human_pending_actions", {}).items()
+        }
+        self._human_actions_consumed_this_tick = []
 
         # Shared KB (resources + versions + permissions)
         kb = state["kb"]
@@ -2283,6 +2322,11 @@ class Simulation:
             # deadline fires so TIMER_EXPIRY / DEADLINE_APPROACHING
             # re-fire after re-execution (no lost wake).
             self._unmark_deadline_fires()
+            # T12a: restore consumed human UI actions so they re-observe
+            # and re-translate after re-execution (no lost action).
+            for agent_id, act in self._human_actions_consumed_this_tick:
+                self._pending_human_actions.setdefault(agent_id, []).append(act)
+        self._human_actions_consumed_this_tick = []
         for candidate in ready:
             activation = self._scheduler._activations_this_tick.get(candidate.agent_id)
             if activation:
@@ -2577,6 +2621,79 @@ class Simulation:
                             # also wake immediately via collect_completed
                             # path below.
                         continue
+            # T12a: human UI action (accept/complete/fail) — route to the
+            # task's assignee when it is a kind=human worker. The action
+            # is parked in the pending queue; Observe injects it into the
+            # worker's observation and HumanWorkerRuntime translates it
+            # to an Intent through the normal transaction path (same
+            # channel as AI workers — SPEC §10.1). Dedup key
+            # (source, external_id) = ("human", task_id:action) makes a
+            # repeated click idempotent. Unroutable human actions are
+            # DROPPED (audited), never broadcast as advisory wakes.
+            if ev.source == "human":
+                action = ev.payload.get("action", "")
+                task_id = ev.payload.get("task_id", "")
+                if (
+                    action in {"accept", "complete", "fail"}
+                    and task_id
+                    and self._task_tree.exists(task_id)
+                ):
+                    task = self._task_tree.get(task_id)
+                    assignee = task.assignee_agent_id
+                    cfg = (
+                        self._agent_tree.get(assignee)
+                        if assignee in self._agent_tree else None
+                    )
+                    if cfg is not None and cfg.kind == "human":
+                        self._pending_human_actions.setdefault(
+                            assignee, [],
+                        ).append({
+                            "action": action,
+                            "task_id": task_id,
+                            **{
+                                k: v for k, v in ev.payload.items()
+                                if k not in ("action", "task_id")
+                            },
+                        })
+                        self._scheduler.enqueue_event(WakeupEvent(
+                            event_type=WakeEventType.HUMAN_ACTION,
+                            target_agent_id=assignee,
+                            tick=tick,
+                            visible_at_tick=tick,  # Ingest→Schedule same tick
+                            source_agent_id="human",
+                            task_id=task_id,
+                            details={
+                                "action": action,
+                                "external_id": ev.external_id,
+                            },
+                        ))
+                        self._audit_log.record(
+                            AuditEventType.HUMAN_ACTION,
+                            agent_id=assignee,
+                            tick=tick,
+                            details={
+                                "action": action,
+                                "task_id": task_id,
+                                "external_id": ev.external_id,
+                            },
+                        )
+                        continue
+                # Unroutable human action (bad action, missing task, or
+                # non-human assignee) — audit and drop.
+                self._audit_log.record(
+                    AuditEventType.HUMAN_ACTION,
+                    tick=tick,
+                    details={
+                        "source": ev.source,
+                        "event_type": ev.event_type,
+                        "external_id": ev.external_id,
+                        "status": "dropped_unroutable",
+                        "payload": ev.payload,
+                    },
+                    success=False,
+                    error="Unroutable human action",
+                )
+                continue
             # Standalone external event — advisory wake to subscribed agents
             self._audit_log.record(
                 AuditEventType.TOOL_RESULT,
@@ -3247,6 +3364,8 @@ class Simulation:
             )
 
             # Wrap in AgentObservation (backward compatible)
+            # T12a: inject pending human UI actions (kind=human only —
+            # empty for everyone else).
             observations[agent_id] = AgentObservation(
                 agent_id=compiled["agent_id"],
                 tick=compiled["tick"],
@@ -3255,6 +3374,9 @@ class Simulation:
                 shared_kb_snapshot=compiled.get("shared_kb_snapshot", {}),
                 lock_states=compiled.get("lock_states", {}),
                 private_workspace_path=compiled.get("private_workspace_path", ""),
+                pending_human_actions=list(
+                    self._pending_human_actions.get(agent_id, [])
+                ),
             )
         return observations
 
@@ -3288,6 +3410,15 @@ class Simulation:
                 # If the agent just processed a pending result, finalize
                 if continuation.phase == ContinuationPhase.PROCESSING_RESULT:
                     continuation.finalize_result_processing(tick)
+                # T12a: consumed human UI actions — moved out of the
+                # pending queue (observed above) so they translate once.
+                # Recorded for rollback restore (no lost action).
+                consumed = self._pending_human_actions.pop(agent_id, None)
+                if consumed:
+                    for act in consumed:
+                        self._human_actions_consumed_this_tick.append(
+                            (agent_id, act),
+                        )
         return intents
 
     def _phase_act(
@@ -3704,6 +3835,22 @@ class Simulation:
                     results.append(ActionResult(
                         action=action, success=True,
                         result_data={"waiting": intent.waiting_state},
+                    ))
+                    continue
+
+                # AcceptTaskIntent → stage TASK_UPDATE (accepted).
+                # T12a: human worker accepts an assigned task — same
+                # transaction path as any task-status update.
+                if isinstance(intent, AcceptTaskIntent):
+                    self._transaction_buffer.stage(
+                        effect_type=EffectType.TASK_UPDATE,
+                        agent_id=agent_id,
+                        resource=intent.task_id,
+                        data={"status": "accepted"},
+                    )
+                    results.append(ActionResult(
+                        action=action, success=True,
+                        result_data={"task_id": intent.task_id, "staged": True},
                     ))
                     continue
 
@@ -4172,10 +4319,64 @@ class Simulation:
         self._calendar_fires_this_tick = []
 
         # Timeout checks
-        self._timeout_checker.check_task_timeouts(
+        expired_ids = self._timeout_checker.check_task_timeouts(
             self._tick_engine.wall_now(), tick,
         )
         self._timeout_checker.check_lock_timeouts(tick)
+
+        # T12a: structured escalation for expired HUMAN tasks (SPEC
+        # §10.1 — 不硬编码「通知 Manager → 转人工 → 关闭」阶梯; escalation
+        # 结构化 on/mode/target, 一次升级通知 assigner). Post-commit
+        # only: a rolled-back tick never escalates.
+        if not self._last_tick_rolled_back:
+            for tid in expired_ids:
+                task = self._task_tree.get(tid)
+                assignee_cfg = (
+                    self._agent_tree.get(task.assignee_agent_id)
+                    if task.assignee_agent_id in self._agent_tree else None
+                )
+                if assignee_cfg is None or assignee_cfg.kind != "human":
+                    continue
+                entry = self._outbox.stage(
+                    from_agent="system",
+                    to=[task.assigner_agent_id],
+                    subject=(
+                        f"[ESCALATION] Task '{tid}' overdue — human worker "
+                        f"'{task.assignee_agent_id}' did not complete on time"
+                    ),
+                    body=(
+                        f"escalation: on=unresolved mode=advise "
+                        f"target={task.assigner_agent_id}\n"
+                        f"task_id={tid}\n"
+                        f"assignee={task.assignee_agent_id}\n"
+                        f"deadline={task.deadline.isoformat() if task.deadline else 'none'}"
+                    ),
+                    email_type="system_notice",
+                    task_id=tid,
+                    effect_id=f"escalation.{tick}.{tid}",
+                    idempotency_key=f"escalation:{tid}:{tick}",
+                )
+                self._outbox.commit(entry.entry_id)
+                self._audit_log.record(
+                    AuditEventType.AGENT_FAILED,
+                    agent_id=task.assignee_agent_id,
+                    tick=tick,
+                    details={
+                        "task_id": tid,
+                        "failure_type": "timeout",
+                        "escalation": {
+                            "on": "unresolved",
+                            "mode": "advise",
+                            "target": task.assigner_agent_id,
+                        },
+                        "assignee": task.assignee_agent_id,
+                    },
+                    success=False,
+                    error=(
+                        f"Human task '{tid}' expired — escalated to "
+                        f"'{task.assigner_agent_id}'"
+                    ),
+                )
 
     def _phase_dispatch(self, tick: int) -> None:
         """Executor Admission + dispatch of SUBMITTED tool ops.
@@ -4893,6 +5094,8 @@ class Simulation:
                         task.metadata["summary"] = data["summary"]
                     if data.get("artifacts"):
                         task.metadata["artifacts"] = data["artifacts"]
+                    if data.get("reason"):
+                        task.metadata["reason"] = data["reason"]
 
                 elif effect.effect_type in {
                     EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,

@@ -21,6 +21,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from my_team.models.intent import (
+    AcceptTaskIntent,
     CompleteTaskIntent,
     DelegateIntent,
     FailTaskIntent,
@@ -354,6 +355,13 @@ class AgentObservation(BaseModel):
     private_workspace_path: str = Field(
         default="",
         description="Path to agent's private workspace",
+    )
+    pending_human_actions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "T12a: pending human UI actions (accept/complete/fail) routed "
+            "to this kind=human agent, awaiting translation to Intents"
+        ),
     )
 
 
@@ -777,3 +785,67 @@ class ManagerAgent(BaseAgent):
             agent_id=agent_id,
             allowed_tools=tools,
         )
+
+
+class HumanWorkerRuntime(BaseAgent):
+    """Runtime for a ``kind=human`` agent (T12a, SPEC §10.1).
+
+    A human worker is UI-queue driven — NOT LLM driven. It never emits
+    LLM/tool requests; it only translates pending human UI actions
+    (accept / complete / fail) into the SAME transaction-path Intents
+    an AI worker would produce (Validate → Act → Commit), so human and
+    AI workers share one channel.
+
+    The pending actions arrive via the observation
+    (``pending_human_actions``), which the simulation fills from the
+    IngressBuffer's ``human``-source events (human-action ingress →
+    wait/wake path, T9 决策 3).
+    """
+
+    def __init__(self, agent_id: str, **kwargs: Any) -> None:
+        super().__init__(agent_id=agent_id, **kwargs)
+        # Humans act through the UI command surface, not tools. Give
+        # them an empty tool context so no tool path is usable.
+        self._tool_context = ToolContext(
+            agent_id=agent_id,
+            allowed_tools=frozenset(),
+        )
+
+    def decide_intents(
+        self,
+        observation: AgentObservation,
+        continuation: Any = None,
+    ) -> list[Intent]:
+        """Translate pending human UI actions into task Intents.
+
+        Each pending action is a dict shaped like::
+
+            {"action": "accept"|"complete"|"fail",
+             "task_id": "...", "summary": "...", "reason": "..."}
+
+        One action → one Intent; all go through the standard transaction
+        path. No pending actions → no Intents (the human queue just sits).
+        """
+        intents: list[Intent] = []
+        for action in observation.pending_human_actions:
+            task_id = action.get("task_id", "")
+            act = action.get("action", "")
+            if act == "accept":
+                intents.append(AcceptTaskIntent(
+                    agent_id=self._agent_id, task_id=task_id,
+                ))
+            elif act == "complete":
+                intents.append(CompleteTaskIntent(
+                    agent_id=self._agent_id,
+                    task_id=task_id,
+                    summary=action.get("summary", ""),
+                    artifacts=list(action.get("artifacts", [])),
+                ))
+            elif act == "fail":
+                intents.append(FailTaskIntent(
+                    agent_id=self._agent_id,
+                    task_id=task_id,
+                    reason=action.get("reason", "failed by human"),
+                    retryable=bool(action.get("retryable", False)),
+                ))
+        return intents
