@@ -1,0 +1,49 @@
+---
+kind: task
+phase: v0.11 扩展表面
+source: SPEC §5.2–5.11；三态收敛（2026-08-24）；拆分自原 device-model（N1 → N1a/N1b/N1c）
+priority: high
+---
+
+# N1c 设备归位（存量适配）
+
+
+## 目标
+
+现有 store 归位为设备：注册受控 uuid + 注入内容声明；simulation 的
+工具处理器（~830 行）按设备域拆出；世界记忆设备接口层。**依赖 N1a**；
+Task 设备细粒度 position 求值随 N5（依赖 N2）。
+
+## 要求 / 规则
+
+- **基础设备注册适配**：SharedKB / RecordStore / AssetStore /
+  CredentialStore / Mailbox——各自注册受控 uuid（条目/范围、工具/
+  工具包）+ 声明注入 content（§5.1 三条：不维护账本 / 身份落字段 /
+  注册即声明注入内容）；
+- **工具处理器拆域**：simulation `_register_tool_handlers`（~830 行）
+  按设备域拆出，经 ToolPlugin API 注册（§5.1：设备注册 = 向 Authority
+  注册工具 uuid）；
+- **世界记忆设备接口层**：Journal 持久化/查询接口归设备（§5.9）；
+  内核无数据直连；SQLite 落位 N6；
+- **预算拆分**：LLM API 限额归 Agent 引擎（§4.6，N4 侧）；外部资源
+  限额与 Ingress/Integration 设备一起管理（§5.11）；
+- **executor 平台级 Admission**：rate_limit / 健康背压归 Integration
+  设备（§3.4/§5.11）；
+- **日历/调度数据归设备**：CronSpec / ScheduleRule 数据面（算法留
+  内核 Schedule 阶段）；容量参数已在 N1a 配置设备；
+- **Task 设备公共数据层**：任务树归 Task 设备（细粒度按 position
+  求值随 N5，依赖 N2）。
+
+## 产出
+
+- 各设备注册适配 + 注入内容声明；
+- 工具处理器按域拆出（simulation 瘦身）；
+- 世界记忆设备接口；预算 / Admission / 日历数据归位。
+
+## 验收标准
+
+- [ ] 各设备经接口注册受控 uuid 与注入 content（有测试）
+- [ ] Journal 持久化/查询经世界记忆设备接口；内核无数据直连
+- [ ] 预算拆分生效（LLM 限额 Agent 内、外部速率 Ingress）
+- [ ] 设备依赖经接口声明（无跨设备直连）
+- [ ] `uv run pytest -q` 全绿；ruff/mypy 通过

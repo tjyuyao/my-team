@@ -329,8 +329,11 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
   容量语义见 §3.8。
 - **epoch fencing**：外部结果携带 state_epoch；旧 epoch 结果一律
   fence（§9）。
-- **身份注入**：from/to 身份字段（uuid4）由内核注入，Agent 不可
-  自指、不可伪造（§9）。
+- **身份绑定**：工具调用上下文（ToolContext/ToolRequest）由内核
+  构造，绑定调用者身份（agent_id + position_ref，§4.1）；设备工具
+  把上下文身份落为自己的数据字段（邮件 from、任务 assignee 等）是
+  设备职责（§5.1）；Agent 写作范围无身份字段——不可伪造是结构性
+  保证（§9）。
 
 ### 3.6 认知真理：注入状态空间（可重放）
 
@@ -542,6 +545,15 @@ MemoryEntry:
   LLM API 限额归 Agent 引擎（§4.6），外部资源限额归
   Ingress/Integration 设备（§5.11）。
 
+- **设备不维护账本**：设备只持当前状态（effect 应用直接改状态），
+  重放源唯一 = Journal（§3.2/§5.9）；设备构建轻便，不涉及账本维护；
+- **身份落字段是设备职责**：设备工具把调用上下文身份（agent_id +
+  position_ref，由内核构造的 ToolContext 绑定）落为自己的数据字段
+  （邮件 from、任务 assignee 等）；
+- **注册即声明注入内容**：注册受控 uuid 时，设备同时声明授予生效后
+  注入记忆的 content（引导 Agent 使用，如页面权限说明——注入记忆
+  非数据全量）；授权查 Authority，注入内容的解释权在设备内部；
+
 **Authority（特殊 Device，每 Team 仅一个）**：
 - **注册中心**：接收所有设备的受控 uuid 注册（数据条目/范围、
   工具/工具包）；
@@ -600,7 +612,9 @@ sim.register_tool(
 - 记录类型由场景包 schema 定义；注册即校验。
 - 所有变更走 effect；CommitValidate 检查记录级不变量
   （库存非负、单号唯一、金额合法、到期日合法）。
-- append-only ledger 投影当前状态；审计/对账/重放从 ledger 推导。
+- **不维护设备账本**：设备只持当前状态（effect 应用直接改状态）；
+  重放源唯一 = Journal（§3.2/§5.9）；审计/对账/重放从 Journal 推导
+  （重放一致性由重放测试把关，v0.11 N6）。
 - **外部联系人 Contact**：服务对象不是 Agent——客户、会员、粉丝、
   供应商；`contact_id`、`platform`、`external_id`、`display_name`、
   `tags`、`segments`、`metadata`；与 Ticket/Post/Order 等 Record
@@ -851,7 +865,7 @@ assigner/assignee 与（可选）deadline/验收；原任务书不变。责任�
   3. 审批态：效果所需的人类审批任务是否已决/未决（HumanTask 状态）。
   三者互不替代——`content.final` 不豁免 OperationPolicy 的 approval。
 - 人类参与身份须经认证（Identity 闭包，见 §9：`from/to` 身份字段
-  由内核注入，Agent 不可自指、不可伪造）。
+  由内核构造的调用上下文绑定，Agent 不可自指、不可伪造）。
 - 审批有 deadline；未决/超时走结构化 escalation（`on`/`mode`/
   `target`），escalation 沿 **superior 边**（§5.8）；审批任务裁决者
   由关系图解析（superior 或指定 collaborator），不按业务标签。
@@ -1055,9 +1069,11 @@ deny-by-default 约束；Skill 不能自行提升权限。Skill 与场景包可�
 
 ## 9. 安全与不变量
 
-1. **身份**：Agent 身份为全局 uuid4（§4.1）；ToolContext 只由内核
-   创建；from/to 身份字段（uuid4）由内核注入，Agent 不可自指、不可
-   伪造（Identity 闭包，P1 落地）。
+1. **身份**：Agent 身份为全局 uuid4（§4.1）；ToolContext/
+   ToolRequest 只由内核创建并绑定调用者身份（agent_id + position_ref）
+   ——身份字段不在 Agent 写作范围（结构性防伪，§3.5）；设备工具把
+   上下文身份落为数据字段（from/assignee）是设备职责（§5.1）；Agent
+   不可自指、不可伪造（Identity 闭包，v0.11 落地）。
 2. **路径**：一切写路径经 PrivateStore.resolve_path（§4.5）；拒绝
    `..`、绝对路径越界与 symlink 逃逸。
 3. **权限**：权限 = **∃position：Grant(agent, position) ∧
