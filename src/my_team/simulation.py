@@ -46,6 +46,7 @@ from my_team.asset_store import AssetStore, AttachmentRef
 from my_team.audit import AuditEntry, AuditEventType, AuditLog
 from my_team.calendar import CalendarStore, ScheduleAction, ScheduleRule
 from my_team.context_compiler import ContextCompiler
+from my_team.credential_store import CredentialStore
 from my_team.executor_registry import (
     ExecutorRegistry,
     ExecutorTier,
@@ -326,6 +327,13 @@ class Simulation:
         # T9: Integration registry (external platform adapters) + provider
         # rate-limiting, kept separate from executor admission (决策1b).
         self._integrations = IntegrationRegistry()
+        # T12b: CredentialStore (SPEC §7.5) — reference-only credential
+        # resolution. The kernel holds only credential_ref strings; secret
+        # VALUES are resolved at the executor/plugin boundary via
+        # resolve(), never recorded. has() is the value-free admission
+        # gate used at dispatch. Host installs real backends (env /
+        # encrypted file) via set_credential_store().
+        self._credential_store = CredentialStore()
         self._ingress = IngressBuffer()
         # Live subprocesses of in-process-executed ops (v0.8.0 P2-10):
         # request_id → Popen. cancel_operation kills the process group
@@ -1502,6 +1510,7 @@ class Simulation:
             "audit_log": self._audit_log,
             "integrations": self._integrations,   # T9
             "ingress": self._ingress,             # T9
+            "credential_store": self._credential_store,  # T12b §7.5
         })
 
     def _wrap_plugin_handler(self, handler: Any) -> Any:
@@ -1534,6 +1543,23 @@ class Simulation:
     def integrations(self) -> IntegrationRegistry:
         """The kernel's integration (external platform adapter) registry."""
         return self._integrations
+
+    @property
+    def credential_store(self) -> CredentialStore:
+        """Reference-only credential resolution service (SPEC §7.5).
+
+        The kernel sees only credential_ref strings; resolve() belongs
+        to the executor/plugin boundary performing the outbound call.
+        """
+        return self._credential_store
+
+    def set_credential_store(self, store: CredentialStore) -> None:
+        """Install the host's CredentialStore (replaces the empty default).
+
+        Backends (env / encrypted file) are host-side configuration;
+        the kernel only ever calls has()/resolve() on the store.
+        """
+        self._credential_store = store
 
     @property
     def ingress(self) -> IngressBuffer:
@@ -4201,6 +4227,44 @@ class Simulation:
             # stay SUBMITTED (backpressure), same as capacity pressure.
             external_tool = op.metadata.get("external_tool", False)
             if external_tool:
+                # T12b: a credential_ref declared on the owning Integration
+                # must RESOLVE before dispatch. The kernel checks existence
+                # only (has() — value-free); the secret itself is fetched
+                # at the executor/plugin boundary via resolve(), so the
+                # kernel never holds plaintext. Unresolvable ref is a
+                # permanent config error (like unknown provider), not
+                # backpressure.
+                provider = self._integrations.get_by_tool(tool_name)
+                if provider is not None and provider.credential_ref:
+                    if not self._credential_store.has(
+                        provider.credential_ref,
+                    ):
+                        reason = (
+                            f"credential_ref '{provider.credential_ref}' "
+                            "is not resolvable"
+                        )
+                        self._audit_log.record(
+                            AuditEventType.TOOL_DISPATCHED,
+                            agent_id=op.agent_id,
+                            tick=tick,
+                            details={
+                                "request_id": op.request_id,
+                                "tool_name": tool_name,
+                                "status": "credential_unresolvable",
+                                "reason": reason,
+                            },
+                            success=False,
+                            error=reason,
+                        )
+                        registry.complete(
+                            op.request_id,
+                            result={
+                                "success": False,
+                                "error": reason,
+                                "error_code": "credential_unresolvable",
+                            },
+                        )
+                        continue
                 padm, preason, pretry = self._integrations.admit(tool_name)
                 if not padm:
                     if pretry:

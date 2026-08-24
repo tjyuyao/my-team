@@ -475,6 +475,8 @@ MCP server（stdio / HTTP / SSE）
 
 - 引用式：`credential_ref` → 外部 KMS/env/加密文件解析；
 - 密钥不落 DB、不进 Journal、不进审计、不进 prompt。
+- （v0.10 T12b 已实现：env / 加密文件后端；内核只持 ref，dispatch 用
+  value-free `has()` 门禁，`resolve()` 在 executor/plugin 边界解析。）
 
 ---
 
@@ -673,7 +675,8 @@ skill/
 2. **路径**：一切写路径经 PrivateStore.resolve_path；拒绝 `..`、
    绝对路径越界与 symlink 逃逸。
 3. **权限**：工具、KB、记录、资产的访问全部显式授权。
-4. **凭证**：引用式存储，不进 Journal/审计/prompt。
+4. **凭证**：引用式存储，不进 Journal/审计/prompt（T12b 已实现，
+   可观测面有测试断言）。
 5. **事务**：一个 tick 要么完整提交，要么完整回滚；不存在孤儿
    pending op（OI-003 P0-2）。
 6. **幂等**：Ingress 按 `(source, external_id)` 去重；出站按
