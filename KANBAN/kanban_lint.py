@@ -21,8 +21,10 @@ block as its very first lines::
 Contract rules (see KANBAN/README.md):
   R1  filename == ``YYYY-MM-DD-{lowercase-hyphen-topic}.md``
       (archived plans append ``.archived`` before ``.md``)
-  R2  date prefix == file's last commit date (git log; mtime fallback
-      for untracked files / non-git contexts)
+  R2  date prefix == file's last commit date (git log %cs = committer
+      date; rebase/amend updates it; mtime fallback for untracked files /
+      non-git contexts; skipped with a clear message in shallow clones —
+      needs full history, CI checkout must use fetch-depth: 0)
   R3  frontmatter present; ``kind`` valid and matches its column
   R4  PLAN version ids (``vX.Y.Z``) unique across the column
   R5  column/kind coherence: DONE=tasks only, CLOSED_ISSUE=issues only,

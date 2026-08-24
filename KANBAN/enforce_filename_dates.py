@@ -6,6 +6,10 @@ the file's last-modified date.  This script scans the standard KANBAN
 columns and renames any ``*.md`` file whose date prefix does not match
 its filesystem last-modified date.
 
+R2 (kanban_lint) validates against the git commit date instead of mtime:
+renames must be committed the same day, otherwise the committed date
+prefix will be flagged after the commit.
+
 Usage:
   python3 KANBAN/enforce_filename_dates.py            # apply fixes
   python3 KANBAN/enforce_filename_dates.py --check    # report only

@@ -108,6 +108,11 @@ python3 KANBAN/kanban_lint.py --root <路径>  # 检查指定看板目录
 - 退出码：`0` = 无违规；`1` = 存在违规。**任何看板改动提交前必须为 0。**
 - 零依赖（仅标准库 + git 命令；R2 日期基准用 git 提交日期）；只扫描七个列
   目录下的 `*.md`（`README.md` 豁免），`__pycache__`、根目录等一律不检查。
+- **R2 只校验已提交状态**：工作区未提交的编辑对 lint 不可见（日期漂移要到
+  提交后才会被拦截）。日期同步必须在提交前完成：编辑后先运行
+  `enforce_filename_dates.py`（改名到今天）再提交；漏掉的由 CI 门禁兜底。
+- **R2 依赖完整 git 历史**：浅克隆下无法校验（R2 跳过并明确报错，见 R2 行）。
+  CI 的 checkout 必须 `fetch-depth: 0`；本地若为浅克隆请 `git fetch --unshallow`。
 
 ### 作为库调用（CI 门禁）
 
@@ -121,14 +126,16 @@ violations = kanban_lint.check_board(Path("KANBAN"))  # -> list[str]；空 = 合
 ```
 
 `tests/test_kanban_invariants.py` 正是这么用的：看板一旦违规 pytest 即失败，
-因此它是 CI 门禁，不是可选的辅助脚本。
+因此它是 CI 门禁，不是可选的辅助脚本。CI 的 checkout 必须带完整历史
+（`actions/checkout` 设 `fetch-depth: 0`），否则浅克隆下 R2 无法校验（见
+「运行」）。
 
 ### 检查规则 R1–R10（触发例 → 修复）
 
 | 规则 | 含义 | 触发示例 → 修复 |
 |---|---|---|
 | R1 | 文件名 `YYYY-MM-DD-{小写短横主题}.md`（归档计划为 `….archived.md`） | 日期缺前导零、含大写 → 改名 |
-| R2 | 文件名日期前缀 == 该文件最近一次提交日期（`git log`；未提交的新文件回退 mtime；浅克隆无法校验） | 编辑/移动后没同步日期 → 运行 `enforce_filename_dates.py` |
+| R2 | 文件名日期前缀 == 该文件最近一次提交日期（`git log -1 --format=%cs`，即 committer date，rebase/amend 会更新它；未提交的新文件回退 mtime；浅克隆无法校验） | 编辑/移动后没同步日期 → 提交前运行 `enforce_filename_dates.py`（按 mtime 改到今天，**改名后需当天提交**） |
 | R3 | frontmatter 存在；`kind` 合法且等于所在列要求（PLAN=plan，OPEN_ISSUE/CLOSED_ISSUE=issue，TODO/IN_PROGRESS/DONE=task，MILESTONE=report） | 无 frontmatter；`kind: task` 放进 PLAN → 补/改 frontmatter |
 | R4 | PLAN 中版本号 `vX.Y.Z` 唯一 | 两个计划同是 v0.10 → 合并或改版本 |
 | R5 | 列与 kind 对应（由 R3 蕴含）：DONE 只放任务、CLOSED_ISSUE 只放议题、MILESTONE 只放报告 | 议题文件进了 DONE → 移列 |
@@ -177,9 +184,12 @@ r7_exempt: v0.8.0-implementation-plan   # 逗号分隔多个 topic
 
 1. 新建/编辑/移动文件 → frontmatter 齐全、引用写 topic、终态列写 status。
 2. `python3 KANBAN/enforce_filename_dates.py` 同步日期前缀（会改名，
-   `--check` 只检查不下手）。
+   `--check` 只检查不下手）。enforce 按 mtime（编辑日）改名，R2 按提交
+   日期校验 —— **改名后必须当天提交**，跨天提交会被 R2 拦截。
 3. `python3 KANBAN/kanban_lint.py` → 必须 **0 violation(s)**；有则按上表修复。
-4. 提交前跑 `pytest tests/test_kanban_invariants.py` 确认门禁通过。
+   注意 lint 只能看到已提交状态，未提交的编辑不会在此暴露。
+4. 提交前跑 `pytest tests/test_kanban_invariants.py` 确认门禁通过（同上，
+   未提交的日期漂移提交后才会被 CI 拦截）。
 
 ## 使用原则
 
