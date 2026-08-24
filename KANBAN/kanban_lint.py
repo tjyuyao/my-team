@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KANBAN board invariant checker — shared library (zero deps).
+"""KANBAN board invariant checker — shared library (stdlib + git).
 
 Single source of truth for the board structure contract, imported by both
 the CLI tooling and the pytest regression suite so the two can never
@@ -21,7 +21,8 @@ block as its very first lines::
 Contract rules (see KANBAN/README.md):
   R1  filename == ``YYYY-MM-DD-{lowercase-hyphen-topic}.md``
       (archived plans append ``.archived`` before ``.md``)
-  R2  date prefix == file last-modified date (mtime)
+  R2  date prefix == file's last commit date (git log; mtime fallback
+      for untracked files / non-git contexts)
   R3  frontmatter present; ``kind`` valid and matches its column
   R4  PLAN version ids (``vX.Y.Z``) unique across the column
   R5  column/kind coherence: DONE=tasks only, CLOSED_ISSUE=issues only,
@@ -40,6 +41,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import re
+import subprocess
 from pathlib import Path
 
 DATE_FMT = "%Y-%m-%d"
@@ -106,6 +108,32 @@ def iter_board_files(root: Path):
 def mtime_date(path: Path) -> str:
     """File's last-modified date as ``YYYY-MM-DD`` (local time)."""
     return dt.datetime.fromtimestamp(os.path.getmtime(path)).strftime(DATE_FMT)
+
+
+def last_commit_date(path: Path) -> str | None:
+    """Date (``YYYY-MM-DD``) of the most recent commit touching ``path``.
+
+    Uses ``git log -1 --format=%cs``. Unlike mtime, the commit date is
+    versioned, so the check behaves identically on any checkout (CI, other
+    machines). Returns ``None`` when git is unavailable or the file has
+    never been committed (untracked/new).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "log", "-1", "--format=%cs", "--", path.name],
+            cwd=path.parent,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", out):
+        return out
+    return None
 
 
 def topic_of(name: str) -> str:
@@ -217,11 +245,13 @@ def check_board(root: Path) -> list[str]:
             )
             continue
 
-        # R2 date prefix == mtime
+        # R2 date prefix == last commit date (mtime fallback for untracked)
         date = p.name[:10]
-        actual = mtime_date(p)
+        actual = last_commit_date(p)
+        if actual is None:
+            actual = mtime_date(p)
         if date != actual:
-            violations.append(f"{rel}: R2 date {date} != mtime {actual}")
+            violations.append(f"{rel}: R2 date {date} != {actual}")
 
         # R3 frontmatter present + kind valid & matches column
         fm = parse_frontmatter(p)

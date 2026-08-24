@@ -106,8 +106,8 @@ python3 KANBAN/kanban_lint.py --root <路径>  # 检查指定看板目录
 
 - 输出：每条违规一行「`{相对路径}: R{n} …`」，末尾 `N violation(s).`
 - 退出码：`0` = 无违规；`1` = 存在违规。**任何看板改动提交前必须为 0。**
-- 零依赖（仅标准库）；只扫描七个列目录下的 `*.md`（`README.md` 豁免），
-  `__pycache__`、根目录等一律不检查。
+- 零依赖（仅标准库 + git 命令；R2 日期基准用 git 提交日期）；只扫描七个列
+  目录下的 `*.md`（`README.md` 豁免），`__pycache__`、根目录等一律不检查。
 
 ### 作为库调用（CI 门禁）
 
@@ -128,7 +128,7 @@ violations = kanban_lint.check_board(Path("KANBAN"))  # -> list[str]；空 = 合
 | 规则 | 含义 | 触发示例 → 修复 |
 |---|---|---|
 | R1 | 文件名 `YYYY-MM-DD-{小写短横主题}.md`（归档计划为 `….archived.md`） | 日期缺前导零、含大写 → 改名 |
-| R2 | 文件名日期前缀 == 文件最后修改日（mtime） | 编辑/移动后没同步日期 → 运行 `enforce_filename_dates.py` |
+| R2 | 文件名日期前缀 == 该文件最近一次提交日期（`git log`；未提交的新文件回退 mtime） | 编辑/移动后没同步日期 → 运行 `enforce_filename_dates.py` |
 | R3 | frontmatter 存在；`kind` 合法且等于所在列要求（PLAN=plan，OPEN_ISSUE/CLOSED_ISSUE=issue，TODO/IN_PROGRESS/DONE=task，MILESTONE=report） | 无 frontmatter；`kind: task` 放进 PLAN → 补/改 frontmatter |
 | R4 | PLAN 中版本号 `vX.Y.Z` 唯一 | 两个计划同是 v0.10 → 合并或改版本 |
 | R5 | 列与 kind 对应（由 R3 蕴含）：DONE 只放任务、CLOSED_ISSUE 只放议题、MILESTONE 只放报告 | 议题文件进了 DONE → 移列 |
