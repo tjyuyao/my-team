@@ -1,11 +1,11 @@
 ---
 kind: task
 phase: v0.11 扩展协议
-source: SPEC §6.5；用户定位补充（个体户/一人公司 + 开发者生态）
+source: SPEC §6.5（2026-08-24 补信任框架）；用户定位补充（个体户/一人公司 + 开发者生态）
 priority: medium
 ---
 
-# v0.11-16: MCP Provider Adapter（MCP server → ToolManifest）
+# MCP Provider Adapter（MCP server → ToolManifest）
 
 
 ## 目标
@@ -26,6 +26,15 @@ priority: medium
   allowlist 后才可使用。
 - 适配器负责超时、限流、重试与结果契约转换。
 - MCP resources 可映射为 SharedKB 只读条目或 AssetStore 引用。
+- **安装框架（2026-08-24 修订为审计制）**：Adapter 是可执行能力包，
+  经 `INSTALL_PACKAGE` 审计安装（E5/N9：如实申报 + 安装审计 + 审计员
+  通知）；方向不变：deny-by-default、内核注入 agent_id。
+- **设备入口（2026-08-24 三态收敛）**：MCP 是**外部能力设备**的
+  接入方式——MCP server 暴露的工具映射为设备能力（ToolManifest
+  device_id/capability），经设备 ACL 与授权使用。
+- **E3 挂接**：远程 HTTP 执行器（EXTERNAL_IRREVERSIBLE）的
+  unknown/对账语义挂接 pending-outbox-recovery（E3）；幂等键用
+  稳定键，不用随机后缀。
 
 ## 产出
 - MCP Adapter 模块与注册 API。

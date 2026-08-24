@@ -7,6 +7,11 @@ priority: high
 
 # Authority 裁决算法：DecisionClaim + context 匹配 + composition + escalation
 
+> **状态（2026-08-24 三态收敛）**：核心已实现（`authority.py`，
+> 32 测试，零内核依赖）；**剩余接点（与 simulation.py
+> Validate/Commit 集成、DecisionClaim 挂 task_id）已并入
+> N5 任务治理绑定**。本卡保留为历史与设计依据。
+
 
 ## 目标
 把 Authority 从"配置文件"变成"可执行裁决算法"。当前代码只有

@@ -7,6 +7,11 @@ priority: high
 
 # ExecutionProfile：不可变运行时语义版本绑定 + effective_tick 发布
 
+> **状态（2026-08-24 三态收敛）**：ProcessInstance 废弃后，本卡
+> **缩化为"知识/策略快照戳"**——schema 并入 **N4 记忆与注入**
+> （条目版本链 + 注入版本戳），绑定语义并入 **N5 任务治理绑定**
+> （任务/决策记录生效版本）。本卡保留为历史与设计依据。
+
 
 ## 目标
 ProcessInstance 依赖的不止 ProcessDef，还有 Role/Authority/ToolManifest/

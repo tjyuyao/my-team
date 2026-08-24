@@ -10,7 +10,8 @@
 
 本系统用于运行一个**由单人所有、多智能体协作、面向真实业务场景的
 "一人公司"**。人类是公司的所有者与最终决策人；AI Agent 是员工，
-按组织树分工、异步协作、在事务化时间步中推进工作。
+按协作网络分工（关系图 + 设备授权，§4.1）、异步协作、在事务化
+时间步中推进工作。
 
 ### 0.1 五个目标场景
 
@@ -65,9 +66,10 @@
 1. **Tick 是提交单位，ReAct 是行为协议**：内核按离散 tick 推进，
    每 tick 状态提交一次；Agent 的思考-行动循环（ReAct）可跨多个
    tick。
-2. **同一抽象水平思考**：观察必须按角色/任务裁剪。Root 看目标、
-   任务树、风险与 KPI；Manager 看工作流与子级状态；Worker 看当前
-   任务、相关文件、相关知识与最近消息。
+2. **同一抽象水平思考**：观察由**关系与记忆**决定（§4.1/§5）——
+   Agent 看到 superior 委派的、subordinate 回报的、collaborator
+   发来的、设备状态，以及经记忆召回的上下文；不存在按角色名的
+   观察裁剪。
 3. **异步外部交互**：LLM、工具、人类决策、外部平台全部通过
    pending operation / ingress event 异步进行；任何 tick 阶段不得
    同步等待外部调用。
@@ -77,7 +79,31 @@
    人类任务与审批走与 AI 相同的事务路径。
 6. **单一事实源**：所有状态变更写入统一 TickJournal；审计、回放、
    对账、恢复都是 Journal 的投影。
-7. **场景包 = 配置 + 插件**：业务场景不修改内核。
+7. **三态内核（2026-08-24 收敛）**：系统分三类——**内核（纯逻辑，
+   可带配置，零业务数据）**：时间引擎（tick/十阶段/事务回滚逻辑/
+   审计逻辑）、效果级策略求值（deny-by-default/预算/epoch/身份
+   注入）、**ACL 主体（role 本体：`{role_id: uuid4, name}`，零行为
+   语义）**、执行真理（执行器分级/沙箱/受限解释器/锁原语）、认知
+   真理（注入状态空间可重放）、Human UI 框架、闭包不变量校验；
+   **设备（数据 + 读写工具 + ACL + 锁）**：基础设备（KB/邮箱/
+   Record/Asset/Credential）、Task 设备、组织架构设备（positions/
+   边语义/role 映射，边语义为 org 声明、内核只校验不变量）、世界
+   记忆设备（Journal）、配置设备（role grants 与策略数据）、
+   Ingress/Integration/MCP；**Agent（内心/头脑/双手的数据）**：
+   记忆/continuation/私有工作区/身份。**内核是纯函数**
+   `S' = K(S_devices, S_agents)`；org = core + devices + agents；
+   业务场景不修改内核。
+8. **ACL 主体 = role（2026-08-24 收敛）**：一切权限判定以 role 为
+   主体——`有效权限 = role grants（岗位 roles 并集）∧ 设备 ACL ∧
+   锁可用`；ACL 与授权数据引用 role，与组织架构解耦（组织重组不动
+   ACL；岗人分离共享 role；细粒度 ACL——KB 页面级/任务级——同样
+   引用 role）。业务标签（岗位名/display）不构成权限；直派形态
+   （不经组织架构、直接指派 agent 的 role）为架构灵活性选项，框架
+   不依赖组织架构存在。
+8. **流程 = 知识，不是内核对象**（2026-08-24 决策）：业务过程以业务
+   语言 SOP 文本承载、注入提示词；不设严格 ProcessDef 语法（无对应
+   严格 runtime）。顺序/审批约束下沉为效果级策略（工具前置条件、
+   requires_approval）与人类任务（HumanTask + Email 往返）。
 
 ---
 
@@ -120,7 +146,7 @@
 | Control Plane | 对外 API/UI；人类操作入口 |
 | SimulationRuntime | wall-clock 循环；tick 调度；duration 变更 |
 | Kernel | 10 阶段 tick；状态提交/回滚；Journal 写入 |
-| ContextCompiler | 按 ObservationPolicy 为每个 Agent 编译 briefing |
+| ContextCompiler | 组装工作记忆（关系可见性 + 记忆召回 + 预算）；编排记忆整理模式（§5） |
 | Capability Layer | 工具注册/策略/执行器分级/审批 |
 | Ingress/Egress | 外部平台事件入站、请求出站、适配器管理 |
 | 数据层 | 文件、知识、记录、资产、凭证、邮件的存储与查询 |
@@ -171,6 +197,10 @@
 
 ### 3.2 统一 TickJournal
 
+> **归属（2026-08-24 三态收敛）**：Journal 的持久化与查询归
+> **世界记忆设备**（数据层）；内核只含写入/回滚**逻辑**（§3.3）。
+> 本节约定的是内核与设备的契约。
+
 - 每个 tick 产生一个 `TickRecord`（append-only），包含：
   - 状态摘要哈希（epoch/提交集摘要，非全量内容快照）、epoch、tick；
   - 所有 Intents 与验证结果；
@@ -209,31 +239,89 @@
 
 ## 4. 核心实体
 
-### 4.1 Agent 与组织树
+### 4.1 岗位（Position）与 Agent（协作网络）
+
+组织架构是组织的内容，由**岗位（Position）**承载：`{position_id,
+jd（职责/提示词）, edges, roles}`。Agent 被 hire 进岗位即
+**自动继承**岗位的人际关系与设备授权。岗人分离：同一岗位可有多个
+版本的 Agent 配置（不同基础信息/记忆/技能）用于评估——概念上动态，
+实现静态先行（不做运行时换人策略）。
 
 ```python
-AgentConfig:
-  agent_id: str
-  display_name: str
-  kind: "llm" | "human" | "service"     # 新增
-  role: str                              # 角色（场景包定义）
-  parent_id: str | None
-  children: list[str]
-  tools: list[str]                       # 能力授权（工具名）
-  observation_policy: str                # 新增：观察策略名
-  llm_profile: str | None                # kind=llm
-  human_queue: str | None                # kind=human
-  service_ref: str | None                # kind=service
+Role:                            # 内核 ACL 主体（零行为语义）
+  role_id: uuid4
+  name: str                      # 可读名；权限绑定是数据（配置设备）
+
+Position:                        # 组织架构数据（组织架构设备管理）
+  position_id: uuid4
+  jd: str                        # 职责/提示词：org 对 agent 的干预杠杆
+  superior_id: uuid4 | None      # 直属上司岗位（唯一）
+  subordinate_ids: list[uuid4]   # 下属岗位
+  collaborator_ids: list[uuid4]  # 沟通合作者岗位
+  roles: list[role_id]           # 多对多：岗位可具有多个 role（§1.8）
+
+Agent:                           # 占据岗位的实体（模拟人的内心/头脑/双手）
+  agent_id: uuid4                # 全局身份；显示名/标签可读
+  kind: "llm" | "human" | "service"   # 运行模式（非权限依据）
+  position_ref: uuid4 | None     # 占据的岗位（继承其边与 roles）
+  llm_profile: str | None        # kind=llm（LLM 供应商是 Agent 内部结构）
+  human_queue: str | None        # kind=human
+  service_ref: str | None        # kind=service
   metadata: dict
 ```
 
-- 组织树静态；日常运行不变更父子关系。
-- `kind=human` 的 Agent 由 UI 队列驱动，不由 LLM 驱动。
-- `kind=service` 的 Agent 是外部服务的代理（可选优化）；**兼作
-  WorkerPool 的 manager 节点**（决策 3：pool = kind=service manager +
-  children，见 §9.3）。
+- **ACL 主体 = role（内核实体）**：role 是一组权限绑定的命名主体
+  （经典 ACL 语义：一个 role 对应多个 agent 的用户组语义）；
+  岗位携带**多个** role（多对多，并集生效）——比一对一更灵活；
+- **有效权限 = role grants（岗位 roles 并集）∧ 设备 ACL ∧ 锁可用**
+  （§1.8）；grants（`role → (device, capability)`）与设备 ACL 条目
+  都是数据，引用 role；**细粒度 ACL 同样引用 role**——KB 页面级
+  （逐条目权限）、Task 级（同一任务对不同 role 可见/可改程度不同）；
+- **业务标签不构成权限**：position.name/display 仅路由元数据；
+- **直派形态**：不经组织架构、直接给 agent 指派 role 的
+  "agent grants 设备"是合法替代（框架不依赖组织架构存在）——组织
+  架构是默认形态，直派是朴素系统的选项；
+
+- **权限 = role grants（岗位 roles 并集）∧ 设备 ACL ∧ 锁**（§1.8），
+  全部动态注册；**边语义 = 组织架构设备声明的数据**（org 定义自己
+  的边行为，一客一实例主权自治）；内核只校验**闭包不变量**（四条
+  治理不变量：授权不授责 / veto 默认不可转授 / escalation 不转移
+  ownership / 委派单调）。参考边语义（组织架构设备默认声明）：
+
+| 边 | 方向 | 语义 |
+|---|---|---|
+| superior | 唯一入边 | 上报/escalation 对象；不可向它委派任务 |
+| subordinate | 出边集合 | 可**命令委派**；下属不可拒绝，只能 fail |
+| collaborator | 双向集合 | 可**请求委派**（请求帮忙），**可拒绝**（declined + 回执）；通信与共享上下文 |
+
+- **委派模式**：任务携带 `delegation_mode = command | request`
+  （见 §4.2）。command 的 accept 是确认（仪式性/UI 确认），request
+  的 accept 才是真正的接受权；
+- **升级 vs 回报**：escalation 严格沿 superior 边；collaborator 请求
+  的失败/拒绝只**回报**请求方，不构成升级——以上均为组织架构设备
+  默认声明的边语义，org 可改（不违反四条治理不变量）；
+- **可见性由关系派生**（内核可见性规则 + token 预算，见 §5.2），
+  无角色观察策略表；
+- **经手物归属岗位**：task / report / mail 账号概念上属于 position
+  （换人不换岗，活留岗上）；agent **无可持有资产**——身份、私密记忆、
+  工作上下文之外一切归 org；
+- **组织架构设备**：关系图/岗位/授权的读改写是一个设备——root 级
+  agent 持有该设备权限即可做组织调整（运行时换人、多版本评估挂载）
+  ——**动态优于静态**；
+- **org 干预 agent 的唯一杠杆 = position 的 jd 提示词**（内心机制
+  不可干预，见 §5.2）；role 标签仅路由元数据，非权限。
+
+> 迁移说明：现行代码的 `AgentConfig`（role/tools 白名单/
+> parent-children）与 ROOT_TOOLS/MANAGER_TOOLS/WORKER_TOOLS 硬编码
+> 三档属旧模型，v0.11 岗位模型迁移到本模型。`kind=service` 兼作
+> WorkerPool 的 manager 节点（§9.3）。
 
 ### 4.2 任务 Task
+
+> **归属（2026-08-24 三态收敛）**：Task = **Task 设备**——任务树
+> 是公共数据，**细粒度 ACL**（可见性按关系求值：同一任务对不同
+> 岗位可见/可改程度不同）；任务 CRUD 与生命周期状态机 = 设备逻辑；
+> 委派/升级的边语义校验在内核（对照组织架构设备的声明，§4.1）。
 
 任务（task）是可追踪的工作陈述，由**责任**与**内容**两部分构成。
 
@@ -241,7 +329,10 @@ AgentConfig:
 - `assigner`：委派方（谁分派这个任务）；
 - `assignee`：责任方（谁承接/执行，对 assigner 负责）。assignee **不限定
   `kind`**——规则型（service）或 LLM agent 均可承担任务责任，责任人由
-  任务字段声明，不由 agent 是否有推理能力决定（pool manager 语境见 §9.3）。
+  任务字段声明，不由 agent 是否有推理能力决定（pool manager 语境见 §9.3）；
+- `delegation_mode`: `command | request`（§4.1 边语义）——command =
+  subordinate 命令委派（不可拒，只能 fail）；request = collaborator
+  请求委派（**可拒绝**，进入 `declined` 态并回执请求方）。
 
 **内容（任务书正文，不可变）**：标题、描述、验收标准（required_outputs）、
 `deadline`（真实时间，见 §9.1）、`priority`、`depends_on: list[task_id]`
@@ -302,65 +393,134 @@ Email 是 Agent 间异步协作的正式渠道，并扩展为通用消息模型�
 
 ---
 
-## 5. 上下文模型（ContextCompiler）
+## 5. 记忆与注入
 
-### 5.1 ObservationPolicy
+Agent 的"看到什么"由**记忆系统**决定：长期记忆（条目列表）+ 工作
+记忆（每次 LLM 请求的注入集）+ 召回 + 记忆整理模式。本节取代旧
+ObservationPolicy/Briefing 模型（2026-08-24 重写）。
 
-每个角色声明一个观察策略：
+### 5.1 记忆条目（长期记忆）
 
-```json
-{
-  "role": "root",
-  "sections": ["mission", "task_tree_summary", "kpi_dashboard",
-               "escalations", "pending_decisions"],
-  "task_scope": "all",
-  "kb_injection": {"enabled": true, "max_entries": 5,
-                   "sources": ["glossary", "decision_log"]},
-  "max_tokens": 3000
-}
+记忆是**列表**，每条目由类型、内容、记忆点、关联对象四部分 + 元
+数据构成：
+
+```python
+MemoryEntry:
+  entry_id: uuid4
+  type: task | skill | tool | person   # 预定义枚举
+  title: str                           # 简短渲染用
+  content: type-aware 结构             # 见下表
+  memory_points: list[str]             # 触发器/索引，主动维护
+  associated: list[uuid4]              # 关联对象：agent/设备/任务/业务 id
+  version: int                         # 不可变版本链
 ```
 
-- `task_scope`：`all | subtree | owned | focus_task`。
-- `kb_injection`：按当前任务与消息正文的关键词注入术语/规则。
-- `kpi_dashboard`：从 Journal/RecordStore 投影计算的角色化指标。
+- **记忆天生关系型**：每条记忆必有关联对象；id 一律走 `associated`，
+  **不进 content**。无对象绑定的"自由知识"不存记忆，归设备（KB）。
+- content 按 type 结构化：
 
-### 5.2 Briefing 结构
+| type | content 结构 | associated 语义 |
+|---|---|---|
+| task | 任务上下文笔记/进度/决策依据 | 业务/任务 id |
+| skill | SOP 文本 + 适用条件 | 相关工具/设备 |
+| tool | 受限 python 模组源码 + 入口 + 能力声明 | 设备 uuid |
+| person | 档案、关系备注、偏好 | 对方 agent uuid |
 
-ContextCompiler 为每个激活的 Agent 编译 briefing：
+- 写入：系统自动沉淀（任务/邮件/工具事件）+ Agent 主动管理（记忆
+  工具），全部是 Journal effect；变更 = 新版本，永不原地改写。
+
+### 5.2 工作记忆（注入集）
+
+工作记忆 = **工作时预算范围内的上下文，直接影响下一次 LLM 请求**
+（术语与认知心理学一致）。它不是存储类型，而是每次由召回组装的
+注入集：
 
 ```text
-[身份与目标] 我是谁、公司目标、本 tick 时间
-[专注任务]   当前 continuation 绑定的 task：描述、验收标准、
-             deadline、依赖、我的进度
-[收件箱]     最近邮件全文（含附件清单）或摘要（超预算时）
-[相关知识]   自动注入的 KB 条目（术语/规则/决策）
-[数据看板]   本角色关心的指标（root/manager）
-[记忆]       最近 N 轮 ReAct 摘要与未完成承诺
-[可用工具]   由 ToolManifest 自动生成的工具定义
+工作记忆 = 召回(上下文词 ∪ 可控查询词 ∪ 临时覆盖) ∩ token 预算
 ```
 
-- 所有内容受 token budget 约束；超出时按优先级截断并标记
-  `[truncated]`。
-- 邮件正文默认进入上下文；超大时摘要 + 引用。
+- **可控查询词是状态**：Agent 可持久维护一部分查询词（注意力指针，
+  可显示控制），属于注入状态空间（§5.5）；
+- **主动回忆**：Agent 用 `memory_recall` intent 发起**临时召回策略**
+  （一次性覆盖），延迟 1 tick 生效，复用异步基建（非阻塞）；
+- **专注点**：`AgentContinuation.task_id` 为当前专注任务；切换任务
+  需完成或转交（沿用 v0.6 专注点漂移控制）；
+- **岗位 JD 注入**：position 的 `jd` 以 `[POSITION_JD]` 来源段注入
+  工作记忆——**org 干预 agent 行为的唯一杠杆**（内心机制不可干预，
+  §4.1）；
+- 注入布局（注入哪些条目、顺序、详细度）与版本戳**入 Journal**。
 
-### 5.3 专注点漂移控制
+### 5.3 召回
 
-- 每个 Agent 的 `AgentContinuation.task_id` 为当前专注任务；
-- 观察默认围绕该任务；Agent 只有通过显式工具（如 `task_tree_view`）
-  才能 zoom out；
-- 切换任务需完成或转交当前任务，避免上下文漂移。
+- 匹配：先关键词/子串匹配（触发器 vs 上下文词）；向量化是同一索引
+  的**可插拔后端**——召回面 = 触发器列表（主动维护、可审计），
+  **内容不向量化**；
+- 命中 top-k 注入，受 token 预算约束；注入保留来源段标签
+  （`[SKILL_INSTRUCTION]`/`[POLICY]`/`[UNTRUSTED_CUSTOMER_CONTENT]`，
+  见 §11.4）。
+
+### 5.4 记忆整理模式（CONSOLIDATING）
+
+预算超阈值时（ContextCompiler 组装检测），Agent 进入**记忆整理模式**
+——取代 harness 的固定总结提示词：
+
+```text
+触发：注入预算超阈值
+进入：内核置 CONSOLIDATING 相位；工具面收窄为记忆工具集
+输入：本次 LLM 请求允许以完整注入集为输入（目的就是让它变小）
+动作：整理动作序列（全部 Journal effect）+ 一段极短摘要
+退出：Agent 自决（exit 意图）或整理至阈值下
+保证：整理期间不注入冗长正文 → 被打断的工作下一 tick 立即续上
+```
+
+记忆工具集（整理模式全开，平时可用子集）：`memory_fold`（折叠操作
+历史/注入片段为浓缩条目）、`memory_promote`（提炼为长期条目）、
+`memory_edit`、`memory_retag`（维护触发器）、`memory_evict`（移出
+工作集、保留召回可达）、`memory_pin`（加入可控查询词）。
+
+### 5.5 注入状态空间（可重放）
+
+```text
+状态 S   = (注入布局, 召回策略配置含可控查询词, 条目状态快照)
+动力学   S_{t+1} = T(上下文_{t+1}, 策略调整(effect), 条目演化(effect), S_t)
+```
+
+- T 是确定函数；策略调整、主动回忆、条目写入/整理均为 Journal effect
+  ⇒ **注入序列可从 Journal 重建**（"当时它看到了什么"可审计）；
+- 控制面 = 三类 effect：调默认召回策略（持久）、主动回忆（临时）、
+  条目管理（写/迁移/触发器/整理）。
 
 ---
 
 ## 6. 能力模型（工具与集成）
 
-### 6.1 ToolManifest 与 OperationPolicy
+### 6.1 设备、ToolManifest 与 OperationPolicy
+
+**设备（Device）**：资产 = 设备 + 数据。设备 = **工具包 + 数据**，
+是带权限管理与锁机制的资源对象：基础设备（SharedKB、内部邮箱、
+RecordStore、AssetStore、CredentialStore，§7）、**Task 设备**
+（任务树公共数据 + 细粒度 ACL，§4.2）、**组织架构设备**（positions/
+边语义/授权数据）、**世界记忆设备**（Journal 持久化与查询，§3.2）、
+**配置设备**（引擎与策略配置数据）、Ingress/Integration（外部世界
+设备）。**工具是设备的操作面**：工具 manifest 声明它操作哪个设备
+（`device_id`）与能力（`capability`）。**设备依赖用接口定义**（如
+邮箱设备依赖凭证设备接口）。**预算拆分**：LLM API 请求限额归 Agent
+引擎内部管理（头脑的用度）；外部资源限额与 Ingress/Integration
+设备一起管理（外部世界速率与背压）。
+
+**授权单层化（2026-08-24 决策）**：ACL 主体 = **role**（内核实体，
+§1.8/§4.1）；Agent 的有效权限 = `role grants（岗位 roles 并集）∧
+设备 ACL ∧ 锁`。grants（`role → (device, capability)`）是配置设备
+数据；**废除独立工具白名单**——旧 ROOT_TOOLS/MANAGER_TOOLS/
+WORKER_TOOLS 与按名字的 `agent.tools` 不再存在。OperationPolicy
+继续 deny-by-default（闭包）。
 
 沿用 v0.8 并强化：
 
-- `ToolManifest` 增加 `approval_policy`（何时需要人工审批）、
-  `ingress_event_types`（工具是否消费入站事件）、`egress`（是否
-  外部出站）、`compensation_tool`（不可逆操作的补偿工具）。
+- `ToolManifest` 增加 `device_id`、`capability`、`approval_policy`
+  （何时需要人工审批）、`ingress_event_types`（工具是否消费入站
+  事件）、`egress`（是否外部出站）、`compensation_tool`（不可逆
+  操作的补偿工具）。
 - `OperationPolicy` 继续 deny-by-default；策略必须覆盖：
   allowlist、审批、网络、文件作用域、墙钟/输出上限、不可逆、
   速率上限。
@@ -419,7 +579,8 @@ Integration:
   health_check: str
 ```
 
-- 平台适配器 = Integration；内核只认 Integration 契约。
+- 平台适配器 = Integration；内核只认 Integration 契约；Integration
+  归位为**设备**（出站能力 + ingress 消费，§6.1）。
 - 凭证通过 CredentialStore 引用，不进 Journal/审计。
 
 ### 6.5 MCP Provider Adapter
@@ -449,6 +610,19 @@ MCP server（stdio / HTTP / SSE）
   allowlist 后才能被 Agent 使用。
 - 适配器负责限流、超时、重试与结果契约转换；MCP 的
   `resources` 可映射为 SharedKB 或 AssetStore 的只读引用。
+- **安装框架**：MCP Adapter 是可执行能力包，经 `INSTALL_PACKAGE`
+  审计安装（E5：如实申报 + 安装审计 + 审计员通知）；远程 HTTP 执行器
+  （EXTERNAL_IRREVERSIBLE）的 unknown/对账语义挂接 pending-outbox-
+  recovery（E3），幂等键用稳定键。
+
+### 6.6 Human UI 系统与设备插件
+
+- **Human UI 系统属内核**（2026-08-24 决策）：Control Plane 是
+  Owner/人类的通用操作台（启停/消息/审批/审计/看板），是世界的
+  一部分而非某设备；
+- **设备可为其扩展前后端模块插件**：任一设备可注册自己的 UI
+  模块（如组织架构设备的岗位管理页、KB 设备的知识编辑页），经
+  设备接口声明，插件化挂载到 Control Plane。
 
 ---
 
@@ -456,6 +630,8 @@ MCP server（stdio / HTTP / SSE）
 
 ### 7.1 PrivateStore（私有工作空间）
 
+- **归属：Agent 引擎内部机制**（§4.1/§5，每 agent 一个实例）——
+  **非设备**：无公共数据、无协作锁、权限仅本人；设备定义见 §6.1。
 - 路径解析统一走 `PrivateStore.resolve_path`；任何写路径必须先
   通过 resolve 与访问控制（修复 OI-003 P0-1）。
 - 文件读经提交态视图（tick 提交态 + 自己本 tick staged 的按需合并，
@@ -513,12 +689,13 @@ IngressEvent:
 
 - Ingest 阶段消费；`(source, external_id)` 去重（持久化，跨重启）。
 - 事件持久化成功后才向平台 ack（防丢）。
-- **映射前门**：事件进入内核后统一走 `IngressEvent → ProcessInstance`
-  （实例化流程），不再直接转 WakeEvent / TaskCreate / Record / Email；
-  该映射与流程实例化属 v0.11 编排层（E1 process-model，最小测试向量
-  首段）。v0.10 只交付方向中立的传输层：IngressBuffer / 去重 / ack /
-  Integration 注册 / 出站 pending op；Ingest 阶段可唤醒相关 Agent
-  （"有事件到达"），但不隐式决定下游对象（任务/记录/邮件由流程显式生成）。
+- **映射前门**：事件进入内核后统一走 `IngressEvent → 意图/任务`
+  （唤醒相关 Agent，或由 manager 结合 SOP 知识分解为 Task），不再
+  直接转 Record / Email 之外的对象；具体下游由被唤醒 Agent 决定
+  （SOP 注入提示词，2026-08-24 决策：无 ProcessInstance）。
+  v0.10 已交付方向中立的传输层：IngressBuffer / 去重 / ack /
+  Integration 注册 / 出站 pending op；事件→任务的语义闭合属
+  v0.11 任务治理绑定。
 
 ### 8.2 EgressRequest
 
@@ -572,7 +749,7 @@ IngressEvent:
 
 ### 9.3 WorkerPool
 
-**决策 3（2026-08-19 定稿）：pool 不设独立一等原语，建模为组织树上的
+**决策 3（2026-08-19 定稿）：pool 不设独立一等原语，建模为协作网络上的
 一个 `kind=service` manager + children + 声明式路由规则。** 选择动作本就
 存在（LLM manager 复杂判定选人，service manager 读状态+规则选人是同一
 动作的规则最简档），pool 只是该动作的退化形，不值得独立设计。立即/延迟
@@ -584,7 +761,8 @@ IngressEvent:
 - 删除 `AgentConfig.worker_pools`、Task `owner_pool` 等 Pool 专有机制。
 - 路由配置 `AgentConfig.pool: PoolConfig {mode, strategy}`（仅
   kind=service 合法）：`strategy` = round_robin / least_busy /
-  skill_match（内核执行的声明式规则，无 LLM 参与）；`mode` =
+  skill_match（内核执行的声明式规则，无 LLM 参与；`role`/`skill`
+  标签仅为路由元数据，不构成权限依据）；`mode` =
   immediate（委派同 tick 展开为原任务+副本+通知的单组原子 effect）/
   deferred（任务先挂 manager，Ingest 每 tick 无状态推导「待分配×空闲
   child」原子分派）。分配权在 manager 单点串行、同 tick 提交原子，
@@ -607,51 +785,98 @@ IngressEvent:
   路径；结构化 escalation（on/mode/target，post-commit 升级邮件 +
   审计；完整 escalation 机制归 v0.11 E1）。
 
-### 10.2 ApprovalGate（统一为 HumanTask）
+### 10.2 审批与三查分离（统一为 HumanTask）
 
-- 审批不再用独立的 `HUMAN_APPROVAL` pending op 建模，而是统一为
-  **HumanTask**（`kind = work | approval | decision | consultation`，
-  见 E1 process-model），吸收 ApprovalGate / Human Worker / HumanMessage
-  的重叠语义。
-- 审批触发 = 编排层 gate（引用 `authority_ref`）+ **三查分离**：
+- 审批不建模为独立 pending op，而是 **HumanTask**
+  （`kind = work | approval | decision | consultation`）：审批 =
+  创建人类任务 → Email 通知 → 人类经 UI/邮件动作（IngressEvent,
+  source="human"，T12a 路径）回应 → 结果决定续延方向。无编排层
+  gate 对象（2026-08-24 决策，流程=SOP 知识）。
+- 审批触发 = **效果级三查分离**：
   1. Capability：调用者能否调用（OperationPolicy，属闭包
      deny-by-default）；
   2. Authority：调用者是否有权作出该决策（Authority 裁决）；
-  3. Gate：流程是否完成必要审批。
+  3. 审批态：效果所需的人类审批任务是否已决/未决（HumanTask 状态）。
   三者互不替代——`content.final` 不豁免 OperationPolicy 的 approval。
 - 人类参与身份须经认证（Identity 闭包，见 §12.1：`from/to` 身份字段
   由内核注入，Agent 不可自指、不可伪造）。
-- 审批有 deadline；未决/超时走结构化 escalation（`on`/`mode`/`target`）。
+- 审批有 deadline；未决/超时走结构化 escalation（`on`/`mode`/`target`），
+  escalation 沿 **superior 边**（§4.1）；审批任务裁决者由关系图解析
+  （superior 或指定 collaborator），不按 role。
 - 审计记录谁在什么上下文批的。
 - **版本切分**：v0.10 交付 Human Worker（kind=human Agent，§10.1）与
-  CredentialStore（§7.5）；ApprovalGate 的 HumanTask 模型与三查分离
-  属 v0.11（E1/E2）。
+  CredentialStore（§7.5）；HumanTask 标准化与 Authority 接入属
+  v0.11（任务治理绑定）。
 
 ---
 
 ## 11. 场景包
 
-### 11.1 场景包结构
+### 11.1 场景包结构（2026-08-24 对齐扩展表面）
+
+场景包是**具备完全扩展能力的自包含安装单元**（2026-08-24 Owner
+决策）：可携带声明配置与数据，也可自带可执行能力——包括以
+ToolPlugin（§6.2）定义新工具、ingress adapter、受控脚本；引用既有
+能力包仅是复用手段，不是定位限制。裁决权走 Authority 模型，不再有
+独立审批策略文件。**流程 = 知识，不是内核对象**（2026-08-24 决策）：
+业务过程以业务语言 SOP 文本承载（`sops/`），注入提示词，无
+ProcessDef 语法。**信任模型为审计制（2026-08-24 Owner 决策）**：
+无签名门槛、无分发期（一客一实例）；一切可执行内容以如实申报 +
+安装审计 + 运行时约束承接，安全由审计员事后审查负责（见 §11.2）。
 
 ```text
 scenario/
-├── scenario.json           # 场景名、版本、描述
-├── org_tree.json           # 组织树（可含 human worker、pools）
-├── roles.json              # role → observation_policy/工具集
-├── tools/                  # manifest + handler/executor 引用
-├── record_schemas/         # RecordStore 记录类型定义
-├── ingress_adapters/       # 平台适配器（webhook/轮询）
-├── schedules.json          # 日历规则
-├── approval_policies.json  # 审批策略
-├── kb_seed/                # 术语表、规则、话术、决策日志
-└── kpi_dashboards/         # root/manager 指标视图
+├── package.yaml                # package_id/version/api_compatibility/
+│                               #   content_hash/installer/dependencies/
+│                               #   capabilities_requested/namespace（E5 schema）
+├── sops/                       # 业务语言流程 SOP（版本化知识，非内核对象）
+├── org/relations.json          # 协作网络：superior/subordinates/
+│                               #   collaborators + 设备能力授权（§4.1）
+├── org/roles.json              # role 标签（仅显示/路由元数据，非权限）
+├── authority/*.yaml            # AuthorityGrant 配置（8 域×strength×composition）
+├── tools/                      # 自带工具：ToolPlugin 定义 / 受控脚本
+│                               #   （须如实申报，审计制安装，§6.2/§11.2）
+├── record_schemas/             # RecordStore 记录类型定义
+├── ingress_mappings/           # 入站事件 → 意图/任务的声明式映射
+│                               #   （adapter 可自带或引用，审计安装）
+├── schedules.json              # 日历规则
+├── kb_seed/                    # C 类数据：术语/规则/话术（内容默认不可信）
+└── kpi/                        # root/manager 指标视图
 ```
 
-### 11.2 加载与校验
+相对旧结构的调整（2026-08-24 重划 + 定位修订）：
 
-- 场景包加载即校验：工具 manifest 合法、记录 schema 合法、
-  审批策略合法、组织树无环、pools 存在；
-- 任何非法项拒绝加载并给出结构化错误。
+- `tools/` 为一等目录：自带 ToolPlugin 工装与受控脚本，或以全限定 ID
+  引用既有能力包（`package_id:entity_type:entity_id@version`），
+  两路平权；是否拆独立能力包仅为复用考量。
+- `approval_policies.json`：被三查分离取代——Authority grants
+  （域×强度×合成）+ 审批任务（HumanTask）+ OperationPolicy
+  （requires_approval）。
+- `scenario.json`：元数据并入 `package.yaml`。
+
+### 11.2 安装与校验
+
+- 安装 = `INSTALL_PACKAGE` 事务 effect，入 Journal，可审计、可回滚；
+- 多阶段：Upload → Verify → Static validate → Stage → Prepare
+  migration → Activate → Route；仅 Activate 改变运行时可见配置（E4）；
+- 校验按条目类别分流：声明类条目过静态校验器（E7 五类基础 +
+  权限单调/敏感数据流/资源上限）；**可执行条目要求如实申报**
+  （capabilities_requested + 执行器分级），未申报的可执行条目加载
+  即拒——这是审计完整性要求，不是信任门槛；
+- ToolPlugin 定义的工具与内核内置工具**同权**（进程内注册，§6.2）：
+  约束面 = manifest 如实申报 + 安装审计 + OperationPolicy
+  deny-by-default；代码本体不做静态安全检查（查不了，由审计员
+  事后审查承接）；
+- **信任模型为审计制（2026-08-24 决策）**：无签名门槛、无分发期
+  （一客一实例）。每次安装记录 installer / content_hash /
+  capabilities_requested / 执行器分级入 Journal；能力类安装通知
+  **审计员**（Owner 本人或其指定 kind=human 成员）事后审查；
+- 运行时约束不因审计制放松：沙箱执行器分级、OperationPolicy
+  deny-by-default、epoch fencing 照常生效；
+- 拒绝 = 结构化错误列表 + **整体拒绝**（不半装）；
+- 版本绑定 = **知识/策略快照戳**（2026-08-24 坍缩，无 ProcessInstance）：
+  任务与决策记录其生效的 skill/tool/policy 版本；新 PackageVersion
+  只影响新任务与新实例（运行中任务不换绑）。
 
 ### 11.3 五个场景包
 
@@ -663,39 +888,62 @@ scenario/
 | 自媒体 | content_plan/asset_*/publish_*/metric_* | content_asset/publish_job | 评论/数据回传 | 老板/终审 |
 | 知识星球 | kb_search/content_calendar/member_*/post_* | member/subscription/post | 帖子/评论/会员事件 | 星主 |
 
+> 注：「关键工具」可由场景包自带（ToolPlugin 定义）或引用既有
+> 能力包，二者运行时地位相同。
+> 五个场景包的资产实现属场景资产：最小测试向量端到端闭合后交付
+> （v0.11 门：至少一个场景包 demo 运行且内核零改动）。
+
 ### 11.4 Skill Package（面向非专业用户的能力封装）
 
-Skill 是一组"提示词 + SOP + 工具集 + 知识 + 审批策略"的可装卸单元，
-回答"Agent 如何做好一类具体工作"。面向不会写代码的个体户：
+Skill 是一组"SOP + 提示词模板 + 知识 + 工具引用"的可装卸配置资产
+（A 类），回答"Agent 如何做好一类具体工作"，面向不会写代码的个体户：
 
 ```text
-skill/
-├── SKILL.md            # 人读说明书：做什么、何时触发、SOP、边界
-├── prompts/            # 角色/任务提示词模板
-├── tools/              # 可选：本技能需要的受限工具（manifest+handler）
-├── kb_seed/            # 可选：术语表、话术、规则、模板
-├── scripts/            # 可选：运行于 L0/L1 的脚本
-└── approval.json       # 哪些动作必须人工审批
+skill/                          # A 类配置资产：只引用，不携带可执行能力
+├── skill.manifest              # package.yaml 同构元数据 + frontmatter 触发条件
+│                               #   + capabilities_requested（仅引用已有 Tool）
+├── SKILL.md                    # 人读说明书：做什么、何时触发、SOP、边界；
+│                               #   正文按结构化来源段组织（见下）
+├── prompts/                    # 角色/任务提示词模板
+└── kb_seed/                    # 可选：术语、话术、规则、模板（C 类数据）
 ```
 
-- Skill 安装/卸载不修改内核；安装即校验。
-- ContextCompiler 按触发条件注入：任务标题、邮件正文或 KB 关键词
-  命中 Skill 的触发条件时，将该 Skill 的 SOP、模板与相关知识注入
-  对应 Worker 的 briefing。
-- Skill 与 Tool 的分工：Tool 是一个可执行能力；Skill 是"用这些
-  能力做好一类工作"的业务封装。
-- Skill 与场景包的关系：场景包 = 组织 + 多个 Skill + 记录模型 +
-  外部适配器 + 日历 + KPI。
+相对旧结构的删除（重划决策，2026-08-24）：
+
+- `scripts/`：脚本是可执行能力，默认独立成能力包（复用与注入面
+  收敛考虑，结构约定而非安全强制）；Skill 以稳定全限定 ID 引用既有
+  Tool/脚本，不自带；内嵌须如实申报并同等对待（§11.2，E5）。
+- `approval.json`：动作是否须人工审批由 OperationPolicy
+  （requires_approval）与审批任务（HumanTask/Authority）决定，
+  Skill 无权声明审批策略。
+- `tools/`：同 `scripts/`，只引用不携带。
+
+提示词注入隔离（落到 ContextCompiler）：
+
+- SKILL.md 正文按结构化来源段组织：`[SKILL_INSTRUCTION]` / `[POLICY]` /
+  `[UNTRUSTED_CUSTOMER_CONTENT]`；
+- 注入 briefing 时保留来源标签并规定优先级：POLICY（来自内核与 Owner）
+  不可被 SKILL_INSTRUCTION 覆盖；客户内容永不作为系统指令，只能作带
+  标签的数据上下文；
+- 触发注入（关键词/任务类型/角色命中）在 token budget 内进行，注入
+  内容必须带来源与信任等级。
+
+权限边界：Skill 引用的工具/KB 仍受 PermissionEngine 与 OperationPolicy
+deny-by-default 约束；Skill 不能自行提升权限。Skill 与场景包可组合：
+场景包可引用多个 Skill。首个示例 Skill 属场景资产，待最小测试向量
+闭合后交付。
 
 ---
 
 ## 12. 安全与不变量
 
-1. **身份**：ToolContext 只由内核创建；from/to 身份字段系统注入，
-   Agent 不可自指。
+1. **身份**：Agent 身份为全局 uuid4（§4.1）；ToolContext 只由内核
+   创建；from/to 身份字段（uuid4）由内核注入，Agent 不可自指、不可
+   伪造（Identity 闭包，P1 落地）。
 2. **路径**：一切写路径经 PrivateStore.resolve_path；拒绝 `..`、
    绝对路径越界与 symlink 逃逸。
-3. **权限**：工具、KB、记录、资产的访问全部显式授权。
+3. **权限**：权限 = **role grants ∧ 设备 ACL ∧ 锁**（§1.8），全部
+   显式、动态注册；不存在按业务标签授权的路径。
 4. **凭证**：引用式存储，不进 Journal/审计/prompt（T12b 已实现，
    可观测面有测试断言）。
 5. **事务**：一个 tick 要么完整提交，要么完整回滚；不存在孤儿
@@ -723,7 +971,10 @@ POST /runtime/step            单步（执行一个 tick 后暂停）
 PUT  /runtime/tick-duration   {value, unit, effective_tick}
 GET  /runtime/status          tick、state、epoch、agent 数、pending ops
 
-GET  /org/tree                组织树
+GET  /org/graph               协作网络（关系图）
+GET  /org/positions           岗位清单（JD/边/授权）
+PUT  /org/positions/{id}      编辑岗位（JD/边/授权；组织架构设备）
+POST /org/agents/{id}/mount   岗位挂载/换人（岗人分离）
 GET  /tasks                   任务树与 SLA 状态
 GET  /tickets                 客服/会员/内容工单
 
@@ -794,6 +1045,11 @@ GET  /audit?tick=...          审计查询
 - [ ] 审批通过前，高风险工具不得执行。
 - [ ] 连续内核级崩溃（滑动窗口内达阈值）自动暂停（reason=crash_guard）
       且仅人工 resume；业务失败（局部 FAILED，T18 分级）不计为崩溃。
+- [ ] 权限 = role grants ∧ 设备 ACL ∧ 锁；不存在按业务标签授权的
+      路径（§1.8/§4.1）。
+- [ ] 任一 Agent 的注入记忆序列（工作记忆布局 + 版本戳）可从 Journal
+      重建（§5.5 可重放性）。
+- [ ] 组织架构声明的边语义不违反四条治理不变量（静态校验，N8）。
 
 - **已落地注记（2026-08-24，T16a/b/c）**：
   - `run_tests` 在真实沙箱（只读挂载 + 网络拒绝 + 资源限制 + 环境
@@ -815,9 +1071,19 @@ GET  /audit?tick=...          审计查询
 - **v0.10 — 边界能力**：Ingress/Egress、RecordStore、AssetStore、
   ToolPlugin API、KB 读取与附件、Calendar/WorkerPool、
   ApprovalGate、Human Worker。
-- **v0.11 — 五场景包与扩展协议**：软件公司、小说工作室、电商、
-  自媒体、知识星球各一个可运行 demo；MCP Provider Adapter；
-  Skill Package 系统与首批技能包。
+- **v0.11 — 扩展表面 P0 语义闭合 + 场景资产**：设备化与单层授权
+  （基础设备归位 + Task 设备 + 世界记忆设备 + 配置设备）、岗位模型
+  （positions/边语义/组织架构设备）、记忆与注入系统、任务治理绑定
+  （HumanTask/Authority/escalation 归一）、恢复与对账、资产边界
+  （审计制）、谓词分级、静态校验器；场景包/Skill/MCP 在语义闭合后
+  交付（最小测试向量端到端闭合，内核零改动）。
+- **v0.12 — 真实 LLM API 接入验证**：llm_gateway 对接真实供应商
+  （OpenAI 兼容 / Anthropic / DeepSeek 等），端到端验证
+  （async 续延 + 工具调用 + 失败重试 + 限额记账），生产配置
+  化（模型/密钥经 CredentialStore）。
+- **v0.13 — 沙箱脚本执行器（bash）**：受限执行器族扩展
+  （python 模组 + bash 脚本，同 T16a 沙箱）；脚本执行模型 +
+  长驻会话复用 + max_processes 约束；v1.0 前必做。
 - **v1.0 — 一人公司可用**：成本/预算、审计回放、确定性重放、
   五场景端到端验收；README 面向个体户的安装/托管路径。
 
