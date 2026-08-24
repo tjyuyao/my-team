@@ -1,1 +1,68 @@
-"""Core data models for My-Team."""
+"""Core data models for My-Team.
+
+v0.11（N2）起导出新岗位/Agent 模型（Position/Agent，uuid4）与占据/
+继承解析 helper；旧 ``AgentConfig`` 保留兼容（弃用注记见
+``my_team.models.agent``）。
+"""
+
+from my_team.models.agent import (
+    Agent,
+    AgentConfig,
+    AgentKind,
+    AgentRole,
+    AgentStatus,
+    AgentTool,
+    PoolConfig,
+    PoolMode,
+    PoolStrategy,
+    SharedKBPermission,
+)
+from my_team.models.position import (
+    DEFAULT_EDGE_SEMANTICS,
+    PRIORITY_THRESHOLD,
+    ArtifactKind,
+    ArtifactOwnership,
+    ArtifactOwnershipRegistry,
+    DirectAssignment,
+    EdgeKind,
+    EdgeSemanticsDeclaration,
+    GovernanceInvariantError,
+    Position,
+    PositionGraph,
+    PriorityClass,
+    direct_assign,
+    effective_capabilities,
+    priority_class,
+    validate_edge_semantics,
+    validate_governance_invariants,
+)
+
+__all__ = [
+    "Agent",
+    "AgentConfig",
+    "AgentKind",
+    "AgentRole",
+    "AgentStatus",
+    "AgentTool",
+    "ArtifactKind",
+    "ArtifactOwnership",
+    "ArtifactOwnershipRegistry",
+    "DEFAULT_EDGE_SEMANTICS",
+    "DirectAssignment",
+    "EdgeKind",
+    "EdgeSemanticsDeclaration",
+    "GovernanceInvariantError",
+    "PRIORITY_THRESHOLD",
+    "PoolConfig",
+    "PoolMode",
+    "PoolStrategy",
+    "Position",
+    "PositionGraph",
+    "PriorityClass",
+    "SharedKBPermission",
+    "direct_assign",
+    "effective_capabilities",
+    "priority_class",
+    "validate_edge_semantics",
+    "validate_governance_invariants",
+]

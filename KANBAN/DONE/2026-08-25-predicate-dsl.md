@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.11 扩展表面
 source: 原 E6；SPEC §5.3/§6.3；三态收敛（2026-08-24）
 priority: high
@@ -35,10 +36,21 @@ priority: high
   私有工具条目 type=tool 的 python 模组在此执行）。
 
 ## 验收标准
-- [ ] 任意 predicate 纯、有限、可审计、可重放
-- [ ] transition `when`/gate 判定无法逃逸到网络/文件写/直接读当前
+- [x] 任意 predicate 纯、有限、可审计、可重放
+- [x] transition `when`/gate 判定无法逃逸到网络/文件写/直接读当前
       时间/随机
-- [ ] L0 表达式确定性重放（同输入同输出，无副作用）
-- [ ] 越级谓词（L2 伪装）被静态校验拒绝并提示改为 Tool/op
-- [ ] 最小测试向量段：transition `when` 用 L0 谓词驱动流程 通过
-- [ ] `uv run pytest -q` 全绿；ruff/mypy 通过
+- [x] L0 表达式确定性重放（同输入同输出，无副作用）
+- [x] 越级谓词（L2 伪装）被静态校验拒绝并提示改为 Tool/op
+- [x] 最小测试向量段：transition `when` 用 L0 谓词驱动流程 通过
+- [x] `uv run pytest -q` 全绿；ruff/mypy 通过
+
+## 完成注记（2026-08-24）
+
+- 交付：`predicate.py`（三级边界 spec + L0 DSL + L1 静态校验 + L2 拒绝
+  路径）+ `python_worker.py` L1 对齐（import 门显式禁 random/time）+
+  68 测试；
+- 关键决策：L0 结构性纯（AST 只遍历不执行）；L1 与工具组合环境同源
+  （复用 compute 受限解释器，谓词白名单剔除 datetime/uuid）；L2 只做
+  拒绝路径；bash 未做（v0.13）；
+- 遗留：L1 静态校验保守近似（误报偏好拒绝，运行时 import 门兜底）；
+  L1 无 OS 级隔离（与 python_compute 一致的诚实分类）。

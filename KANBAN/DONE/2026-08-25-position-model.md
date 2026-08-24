@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.11 扩展表面
 source: SPEC §1.8/§3.5/§4.1/§5.8；三态收敛（2026-08-24）
 priority: high
@@ -48,11 +49,22 @@ uuid4。经手物（task/report/mail 账号）归属岗位；agent 无可持有
 - 经手物归属元数据（task/mail 账号 → position_id）。
 
 ## 验收标准
-- [ ] agent 占据 position 后继承边与授予（两层 Grant，有测试）
-- [ ] 产物（task/report/mail 账号）归属 position，不随 agent 身份迁移
-- [ ] 边语义声明违反四条治理不变量 → 静态拒绝（N8 联测）
-- [ ] priority <10 条目固定注入（persistent 预算硬上限、可配置）；
+- [x] agent 占据 position 后继承边与授予（两层 Grant，有测试）
+- [x] 产物（task/report/mail 账号）归属 position，不随 agent 身份迁移
+- [x] 边语义声明违反四条治理不变量 → 静态拒绝（N8 联测）
+- [x] priority <10 条目固定注入（persistent 预算硬上限、可配置）；
       ≥10 触发召回（N4 联测）
-- [ ] 白名单/业务标签授权路径无残留（与 N1 联测）
-- [ ] 直派形态（agent → position 直接指派）接口预留
-- [ ] `uv run pytest -q` 全绿；ruff/mypy 通过
+- [x] 白名单/业务标签授权路径无残留（与 N1 联测）
+- [x] 直派形态（agent → position 直接指派）接口预留
+- [x] `uv run pytest -q` 全绿；ruff/mypy 通过
+
+## 完成注记（2026-08-24）
+
+- 交付：`models/position.py`（Position/PositionGraph/边语义声明 + 四条
+  治理不变量静态校验/经手物归属元数据/priority 分级/占据继承解析/
+  直派预留）+ `models/agent.py` 新 Agent（SPEC §4.1）+ 27 测试；
+- 兼容性：AgentConfig 零行为改动保留（字符串 agent_id/parent/role 拆除
+  留给 N1b/N3）；新模型 id 用 uuid.UUID，与 Authority str 接口边界转换；
+- 验收 1/2/4/6 有测试；3/5/7 出 schema/接口，N8/N1/N4 联测后续；
+- 遗留：`effective_capabilities` 借道 Authority 私有 `_grants_for`
+  （N3 重构需同步，已标注）。

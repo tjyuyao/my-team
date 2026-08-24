@@ -25,6 +25,14 @@ boundary — it does not exist yet.
 The worker never runs user code in-process: everything is a
 subprocess, killed by process group on timeout/cancel (no orphaned
 children), bounded by max_runtime_ms and max_output_bytes.
+
+v0.11 N7 (SPEC §3.4 受限执行器族): the L0/L1 import gate EXPLICITLY
+forbids `random` and `time` (both are already absent from the
+allowlist; the deny list makes the predicate boundary explicit — no
+randomness, no clock reads — so results stay deterministic and
+replayable/cacheable). The predicate L1 boundary (predicate.py) adds a
+static validator on top; this gate is the runtime backstop shared with
+the tool-combination environment.
 """
 
 from __future__ import annotations
@@ -67,6 +75,13 @@ _L0_BUILTINS = {
 # L1 adds filesystem access confined by CONVENTION to the sandbox
 # workspace (input/ read-only, output/ writable).
 _L1_BUILTINS = _L0_BUILTINS | {"open"}
+
+# Modules EXPLICITLY forbidden at L0/L1 (v0.11 N7, SPEC §3.4 predicate
+# boundary). They are not in the allowlist; the deny list makes the ban
+# explicit and produces a boundary-clear message instead of a generic
+# "not in the allowed set" — no randomness, no clock reads, so results
+# are deterministic and replayable/cacheable.
+_FORBIDDEN_MODULES: tuple[str, ...] = ("random", "time")
 
 _WRAPPER = r'''"""Restricted execution wrapper (written per run).
 
@@ -111,6 +126,13 @@ def _main() -> int:
     allowed = allow
 
     def _gate(name, globals=None, locals=None, fromlist=(), level=0):
+        root = name.split(".")[0]
+        if root in _FORBIDDEN_MODULES_:
+            raise ImportError(
+                "module '%s' is forbidden at L0/L1 (SPEC §3.4 predicate "
+                "boundary): no randomness, no clock reads. External "
+                "capabilities must go through the L2 Tool/op path." % name
+            )
         if name in allowed or any(name.startswith(a + ".") for a in allowed):
             return real_import(name, globals, locals, fromlist, level)
         raise ImportError(
@@ -182,7 +204,8 @@ def _write_worker(directory: Path, l0_builtins: set[str], l1_builtins: set[str])
     path = directory / "worker.py"
     path.write_text(
         _WRAPPER.replace("_L0_BUILTINS_", repr(l0_builtins))
-                .replace("_L1_BUILTINS_", repr(l1_builtins)),
+                .replace("_L1_BUILTINS_", repr(l1_builtins))
+                .replace("_FORBIDDEN_MODULES_", repr(_FORBIDDEN_MODULES)),
         encoding="utf-8",
     )
     return path
