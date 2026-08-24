@@ -11,12 +11,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "KANBAN"))
+# tests/integration → tests → repo root → KANBAN (three parents deep)
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent.parent.parent / "KANBAN"),
+)
 
 import kanban_lint  # noqa: E402
 
 
 def test_kanban_board_is_valid():
-    root = Path(__file__).resolve().parent.parent / "KANBAN"
+    root = Path(__file__).resolve().parent.parent.parent / "KANBAN"
     violations = kanban_lint.check_board(root)
     assert violations == [], "\n".join(violations)
