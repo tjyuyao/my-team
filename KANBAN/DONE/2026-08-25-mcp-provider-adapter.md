@@ -6,6 +6,12 @@ priority: medium
 ---
 
 # MCP Provider Adapter（MCP server → ToolManifest）
+> **废弃（2026-08-25，Owner 定）**：v0.11 计划整体归档（见
+> `KANBAN/PLAN/2026-08-25-v0.11.0-plan.archived.md`），本卡随计划
+> 一并废弃。原因：重构方案重议——原「增量功能 + 事后结构重排」
+> 路线不满足三态质量前提（测试绿 ≠ 结构正确）。本卡内容留档备查，
+> 不执行；新方案见 `docs/THREE_STATE_REFACTOR_PLAN.md`。
+
 
 
 ## 目标
