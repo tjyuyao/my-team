@@ -18,6 +18,7 @@ from my_team.kernel.event_validator import (
     DEFAULT_RULES,
     EventError,
     SourceRegistered,
+    TargetRegistered,
     validate_event,
 )
 from my_team.kernel.process_handle import ProcessHandle
@@ -27,7 +28,8 @@ class AgentOS:
     def __init__(self):
         self.processes = {}   # pid → ProcessHandle（agent/device 统一）
         self.event_bus = mp.Queue()   # 进程产出事件
-        self.rules = [*DEFAULT_RULES, SourceRegistered(self.processes)]
+        self.rules = [*DEFAULT_RULES, SourceRegistered(self.processes),
+                      TargetRegistered(self.processes)]
 
     def register(self, spawn, lazy=False):
         pid = None
@@ -46,15 +48,16 @@ class AgentOS:
     def step(self):
         """一个 tick：取事件 → 协议校验 → 路由。
 
-        事件只来自进程 emit；协议非法或 source 未注册的事件一律丢弃，
-        不中断内核循环。
+        事件只来自进程 emit；协议非法或 source/target 未注册的事件
+        一律丢弃，不中断内核循环。丢弃统一走 print 路径——这是未来
+        Journal 的原型（print 升级为 Journal 记录，含 outcome/原因）。
         """
         while not self.event_bus.empty():
             e = self.event_bus.get()
             try:
                 validate_event(e, self.rules)
             except EventError as e:
-                print(e)
+                print(f"[protocol] {e}")  # 未来的 Journal：此处升级为 Journal 记录（含丢弃原因）
                 continue
             self.route(e)
 

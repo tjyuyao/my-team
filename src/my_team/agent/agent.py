@@ -20,6 +20,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from my_team.device.llm import LLM_REQUEST, LLM_RESULT
+from my_team.kernel.event_protocol import VOID
 from my_team.kernel.process import Process
 
 MEMORY_FOLD_TOOL = {
@@ -40,7 +41,6 @@ CONSOLIDATE_SYSTEM = ("你是整理者。把当前历史折叠为一段结构化
                       "整理完成后不再调用工具。")
 
 AGENT_RESULT = "agent_result"
-CONSOLIDATED = "consolidated"
 MAX_MESSAGES = 30  # 预算阈值：超过即进入整理回合
 
 
@@ -129,8 +129,7 @@ class Agent(Process):
             None,
         )
         if entry is None:
-            return {"target": "void", "kind": "application",
-                    "payload": {"command": "unknown_tool", "name": name}}
+            return VOID  # 未知工具：无接收者，合法沉默（target 无 "void"）
         device_pid = entry["associated"][0]
         return {
             "target": device_pid,
@@ -168,8 +167,7 @@ class Agent(Process):
         if not tool_calls:
             if self.consolidating:
                 self.consolidating = False  # 整理回合完成
-                return {"target": "void", "kind": "application",
-                        "payload": {"command": CONSOLIDATED}}
+                return VOID
             return self._finish(ok=True, content=last.get("content") or "")
         call = tool_calls[0]  # 一次一个工具调用
         if call.get("name") == "memory_fold":

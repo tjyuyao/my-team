@@ -116,6 +116,9 @@ query 向量），embedding 源未定前不接。
 ## 原始层
 
 - append-only JSONL：所有 prompt/response/事件的完整记录。
+- **记录口径 = 内核所见**：每个到达事件 + outcome（已路由 / 校验失败 /
+  target 未注册等丢弃原因）。协议层事故只入 Journal、不投递业务层
+  （无退信——业务层不需要知道协议层事件）。
 - 查询工具 `memory_search`：全文/流式检索（按时间、关联对象），
   返回值可 append 到工作记忆（唯一的接入点）。
 

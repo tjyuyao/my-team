@@ -7,7 +7,7 @@
 - Agent 串行处理消息；设备并行处理消息。
 - 设备按 source 分桶：同一来源的事件排队串行（保序），
   不同来源的事件并行（各自 worker）。
-- respond 契约：async，返回产出事件；source 由宿主注入。
+- respond 契约：async，返回产出事件或 VOID；None 属协议违规（响亮丢弃）；source 由宿主注入。
 
 与 ProcessHandle 的关系：
 - ProcessHandle = 宿主持有的代理
@@ -17,7 +17,7 @@
 import asyncio
 import multiprocessing as mp
 
-from .event_protocol import Event
+from .event_protocol import VOID, Event
 
 
 class Process(mp.Process):
@@ -28,9 +28,10 @@ class Process(mp.Process):
         self.max_concurrent_sources = max_concurrent_sources  # 同时服务的 source 数上限；0 = 无限
 
     async def respond(self, event: Event):
-        """处理单个事件，返回产出事件（子类实现）。
+        """处理单个事件，返回产出事件或 VOID（子类实现）。
 
-        契约：必须返回合法事件（source 由宿主注入）；返回 None 属协议违规。
+        契约：返回合法事件（source 由宿主注入）或 VOID（无话可说，
+        本地消化不上总线）；返回 None 属协议违规，worker 响亮丢弃。
         """
         raise NotImplementedError
 
@@ -80,6 +81,12 @@ class Process(mp.Process):
         """同源串行：一个 source 同一时刻只处理一个事件，完成后取下一个。"""
         while True:
             event = await queue.get()
-            self.emit(await self.respond(event))
+            result = await self.respond(event)
+            if result is None:
+                # 协议违规：None 无法区分"故意沉默"与"忘记返回"，响亮丢弃
+                print(f"[protocol] respond 返回 None（source={source}），丢弃")
+                continue
+            if result != VOID:
+                self.emit(result)
             if queue.empty():
                 return

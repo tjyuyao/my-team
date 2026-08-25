@@ -71,6 +71,17 @@ class SourceRegistered(EventValidationRule):
             raise EventError(f"source 未注册: {event.get('source')!r}")
 
 
+class TargetRegistered(EventValidationRule):
+    """target 必须是已注册进程（否则校验失败，走 print 路径）。"""
+
+    def __init__(self, registry):
+        self.registry = registry
+
+    def validate(self, event):
+        if event.get("target") not in self.registry:
+            raise EventError(f"target 未注册: {event.get('target')!r}")
+
+
 DEFAULT_RULES = [IsDict(), HasSource(), HasTarget(), KnownKind(), SystemCommand()]
 
 
