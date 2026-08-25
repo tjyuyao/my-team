@@ -1,7 +1,6 @@
 # LLM 设备协议
 
 LLM 设备是设备进程，它经 application 事件承接 llm_request 并产出 llm_result。
-本文件定义设备业务协议；SPEC 不承载设备细节。
 
 ## 请求事件 llm_request
 
