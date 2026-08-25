@@ -88,42 +88,47 @@
 3. **异步外部交互**：LLM、工具、人类决策、外部平台全部通过
    pending operation / ingress event 异步进行；任何 tick 阶段不得
    同步等待外部调用。
-4. **默认拒绝，显式授权**：工具、平台、审批、知识库读取全部
-   deny-by-default（§3.5/§5.1）。
+4. **默认拒绝，显式授权（粗默认，非完备闭包）**：不可逆外部操作
+   deny-by-default；内部可逆工具自动放行。安全 = 简单原则 + 可扩展
+   审计，不做完备权限证明（§3.5）。
 5. **人类是一等参与者**：人类可以是 Owner、Worker、Approver；
    人类任务与审批走与 AI 相同的事务路径。
 6. **单一事实源**：所有状态变更写入统一 TickJournal（世界记忆
-   设备，§3.2）；审计、回放、对账、恢复都是 Journal 的投影。
+   设备，§3.2）——append-only 账本。审计/回放/对账/恢复等派生视图
+   暂缓实现（见 OPEN_ISSUE journal-projections）。
 7. **三态内核（2026-08-24 收敛）**：系统分三类——**内核（纯逻辑，
    可带配置，零业务数据）**：时间引擎（tick/十阶段/事务回滚逻辑/
    审计逻辑）、效果级策略求值（deny-by-default/预算/epoch/身份
    注入）、ACL 主体（position 本体）、执行真理（执行器分级/沙箱/受限
-   解释器/锁原语）、认知真理（注入状态空间可重放）、Human UI
+   解释器/锁原语）、认知真理（注入状态空间，重建=Journal 投影）、
+   Human UI
    框架、闭包不变量校验；**设备（数据 + 读写工具 + ACL + 锁）**：
    基础设备（KB/邮箱/Record/Asset/Credential）、Task 设备、组织
    架构设备、世界记忆设备（Journal）、配置设备、外部世界设备
    （Ingress/Integration/MCP）；**Agent（内心/头脑/双手的数据）**：
-   记忆/continuation/私有工作区/身份。**内核是可重放的确定性转移
-   逻辑**：`(S_dev, S_agt)_{t+1} = K(S_dev, S_agt)`——内核**不持有
+   记忆/continuation/私有工作区/身份。**内核是确定性的转移逻辑**：`(S_dev, S_agt)_{t+1} = K(S_dev, S_agt)`——内核**不持有
    状态**，世界状态 = 设备 ∪ Agent（§2.1）；到达输入（Ingress
    事件、op 结果、LLM 响应）消费前已落在设备/agent 缓冲中，属 S
    而非 K 的额外输入（§2.1）；K 确定（计算纯：无副作用地算出
    下一状态与 effect 列表；副作用由 Publish/执行侧执行），Journal
-   记录缓冲内容与 effect 使重放成立；org = core + devices + agents；
+   记录缓冲内容与 effect 使投影/审计成立；org = core + devices + agents；
    业务场景不修改内核（§2.1）。
 8. **ACL 主体 = position；Authority 是唯一的注册与布线设备
-   （2026-08-24 收敛）**：权限判定以 **position** 为主体（role 并入
-   position，不再单独设计）——`有效权限(agent, entity) = ∃position：
-   Grant(agent, position) ∧ Grant(position, entity)`，deny-by-default。
+   （2026-08-24 收敛；2026-08-25 降权——只布线+注入，不裁决）**：
+   权限判定以 **position** 为主体（role 并入 position，不再单独
+   设计）——`Grant(agent, position)`（成员）+ `Grant(position,
+   entity)`（能力，entity ∈ 注册 uuid），deny-by-default 为**粗默认**。
    **Authority** 是特殊 Device（每 Team 仅一个，Owner 安装）：设备
    动态向它注册受控 uuid（数据条目/范围、工具/工具包），它把 Agent
-   与 Device 经 position 布线（§5.1）。**能力 = 权限 + 记忆**：
-   授予生效 → 设备的数据与工具注入 agent 记忆（外加载记忆条目必然
-   对应一条 `(position, entity)` 授予，§4.2）；grant 带 priority——
-   `< 10` 固定工作记忆（单独预算、不可超、可配置；JD 属此类），
-   `≥ 10` 触发器召回（§4.3）。业务标签不构成权限；直派形态（不经
-   组织架构直接指派 position）为架构灵活性选项，框架不依赖组织
-   架构存在（§3.5/§5.1/§5.8）。
+   与 Device 经 position 布线（§5.1）。**Authority 不裁决放行/拒绝**：
+   授予生效时它把设备的数据与工具**注入 agent 记忆**（让 Agent 有
+   「意识」去用某工具）；**细节权限的最终裁决权在设备内部**（设备据
+   自身配置决定放行/拒绝/发邮件请 Owner 批示，§3.5/§5.1）。外加载
+   记忆条目必然对应一条 `(position, entity)` 授予（§4.2）；grant 带
+   priority——`< 10` 固定工作记忆（单独预算、不可超、可配置；JD 属
+   此类），`≥ 10` 触发器召回（§4.3）。业务标签不构成权限；直派形态
+   （不经组织架构直接指派 position）为架构灵活性选项，框架不依赖
+   组织架构存在（§3.5/§5.1/§5.8）。
 9. **流程 = 知识，不是内核对象**（2026-08-24 决策）：业务过程以业务
    语言 SOP 文本承载、注入提示词；不设严格 ProcessDef 语法（无对应
    严格 runtime）。顺序/审批约束下沉为效果级策略（工具前置条件、
@@ -135,7 +140,7 @@
 
 ### 2.1 三态与数据流
 
-系统由三类构成，**内核是可重放的确定性转移逻辑**（计算纯、
+系统由三类构成，**内核是确定性的转移逻辑**（计算纯、
 执行在外——副作用由 Publish/执行侧执行，见 §1.7）：
 
 ```text
@@ -147,7 +152,7 @@
   #   在设备/agent 的缓冲里（IngressBuffer、pending 结果槽、收件
   #   箱）——它们是 S 的一部分，不是 K 的额外输入；Ingest 阶段
   #   只消费缓冲（§3.1 阶段 1）
-  # K 确定；Journal 记录缓冲内容与 effect ⇒ 重放成立
+  # K 确定；Journal 记录缓冲内容与 effect ⇒ 投影/审计成立
 ```
 
 - **内核（§3）**：纯逻辑——**不持有状态**，每 tick 从设备与 agent
@@ -205,7 +210,7 @@
 | Journal（世界记忆设备） | §3.2/§5.9 |
 | 权限：position / Authority / Grant | §1.8/§3.5/§5.1 |
 | 执行器分级 / 沙箱 / 受限解释器 | §3.4 |
-| 记忆 / 注入 / 整理模式 / 可重放 | §4.2–4.4/§3.6 |
+| 记忆 / 注入 / 整理模式 / 可重建 | §4.2–4.4/§3.6 |
 | Agent | §4.1；岗位/边语义（Authority 子类） | §5.8；ACL/Authority | §3.5/§5.1 |
 | 设备清单与协议 | §5 |
 | 任务 / 委派 / 审批 | §6 |
@@ -270,10 +275,11 @@
   - 审批请求与结果；
   - 审计事件。
 - Commit 成功后 Journal 提交；rollback 时 Journal 标记 aborted。
-- PendingOperationRegistry、Outbox、AuditLog、RecordStore、KPI
-  都是 Journal 的投影（projection）。
-- 持久化：Journal 落 SQLite（或后续的追加文件），保存/恢复从
-  Journal 重放。
+- Journal 是 append-only 账本，记录一切，是单一事实源；不设「确定
+  性重放」这一设计不变量（向人类社会学习：记录而非重放）。审计/
+  对账/重放/恢复/KPI 等**派生视图（投影）暂缓实现**（见 OPEN_ISSUE
+  journal-projections）。
+- 持久化：Journal 落 SQLite（或后续的追加文件）。
 
 ### 3.3 事务与回滚
 
@@ -324,9 +330,13 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
 
 ### 3.5 效果级策略与 ACL
 
-- **deny-by-default 是闭包机制**：求值逻辑在内核；allowlist/审批
-  配置是数据（配置设备，§5.10）。未注册工具、未授权集成、未审批
-  高风险操作一律拒绝。
+- **deny-by-default 是粗默认，非完备闭包**（2026-08-25 软化）：内核
+  只保证结构性不变式（身份绑定 / effect 在 Commit 审计后应用 /
+  append-only 记录 / 沙箱分级）；**细节权限的最终裁决权在设备内部**
+  ——设备据自身配置决定放行/拒绝/发邮件请 Owner 批示；「设备收紧」是
+  **建议性标准**而非内核强制，除审计外无其他强制手段（有些权限隐蔽
+  且难定义）。简单原则 + 可扩展审计，胜过完备权限证明（避免杞人忧天
+  式过度设计）。未注册工具、未授权集成、未审批高风险外部操作仍拒绝。
 - **ACL 主体 = position**（§1.8）：有效权限 =
   `∃position：Grant(agent, position) ∧ Grant(position, entity_id)`，
   并受锁约束；求值细节与 Authority 见 §5.1。
@@ -347,7 +357,7 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
   设备职责（§5.1）；Agent 写作范围无身份字段——不可伪造是结构性
   保证（§9）。
 
-### 3.6 认知真理：注入状态空间（可重放）
+### 3.6 认知真理：注入状态空间（可重建，Journal 投影）
 
 ```text
 状态 S   = (注入布局, 召回策略配置含可控查询词, 条目状态快照)
@@ -358,6 +368,10 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
   ⇒ **注入序列可从 Journal 重建**（"当时它看到了什么"可审计）；
 - 控制面 = 三类 effect：调默认召回策略（持久）、主动回忆（临时）、
   条目管理（写/迁移/触发器/整理）。记忆本体见 §4.2–4.4。
+- **注（2026-08-25 重放降级）**：「可重建」是 append-only Journal 的
+  派生视图，**暂缓实现**（见 OPEN_ISSUE journal-projections），不是
+  「确定性重放」这一设计不变量。现实世界不可两次踏入同一条河流——
+  My-Team 记录（账本），不承诺重放（时间机），向人类社会学习（§3.2）。
 
 ### 3.7 Human UI 系统与设备插件
 
@@ -384,6 +398,7 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
 | 重试 | outbox `max_retries` | 达上限转失败/人工路径 |
 | 存储 | `private_storage_limit_mb` | 写拒绝（可解释） |
 | 输出 | `max_output_bytes` | 截断（不丢任务，只丢细节） |
+| 单次工具返回 | `max_tool_output_tokens`（上下文感知） | 返回超过模型剩余处理能力 → 截断并记 Journal 事件（预警） |
 | 委派深度 | `max_delegation_depth` | PreValidate 拒绝（防递归失控） |
 
 **语义分层**：
@@ -397,6 +412,11 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
 **协同顺序（级联减压）**：激活名额（调度层）→ LLM 并发（请求层）→
 工具并发（执行层）→ 外部配额（平台层）：上层名额不足时，下层不产生
 请求，逐级减压；任一层超限只影响该层，不升格为整 tick 失败。
+
+**量力而行（2026-08-25）**：单次工具调用返回不得超过模型剩余处理
+能力；上下文感知截断（按实时剩余 token 预算，非静态上限），截断记
+Journal 事件供预警。无法一次处理多任务就让需求排队，不硬撑——这是
+「宁可排队、不可丢失」在上下文维度的延伸。
 
 ---
 
@@ -476,6 +496,11 @@ MemoryEntry:
 - **skill 完全属于 agent 隐私**（agent 态）：skill 包安装 = 注入
   agent 私密记忆的**种子**（org 提供种子，agent 持有私有副本并可
   进化；晋升 = 从 agent 态发布为组织资产/设备能力）。
+- **岗人交接不全量继承**（向人类社会学习）：换岗时 A 的技能**不**
+  自动全量克隆给 B（技能池爆炸是前车之鉴）；A 通过**邮件交接**筛选
+  的技能，或作为 B 的**上司/师傅**在协作中指导；B 据自身情况**吸收
+  并独立演进**。组织学习经「晋升为组织资产」的显式路径，不靠私有
+  记忆克隆。
 
 ### 4.3 工作记忆与召回
 
@@ -508,31 +533,47 @@ MemoryEntry:
 
 ### 4.4 记忆整理模式（CONSOLIDATING）
 
-预算超阈值时（Agent 引擎组装检测），Agent 进入**记忆整理模式**——
-取代 harness 的固定总结提示词：
+Agent 进入**记忆整理模式**——取代 harness 的固定总结提示词，且**不只
+是工作记忆压缩，更是「反思与进步」**：
 
 ```text
-触发：注入预算超阈值
+触发：注入预算超阈值（必要触发）或 Agent 主动发起（不限于预算满）
 进入：内核置 CONSOLIDATING 相位；工具面收窄为记忆工具集
 输入：本次 LLM 请求允许以完整注入集为输入（目的就是让它变小）
-动作：整理动作序列（全部 Journal effect）+ 一段极短摘要
+动作：整理动作序列（全部 Journal effect）+ 一段结构化摘要
+      ——除折叠/压缩外，须含：反思与进步、经验教训整理、
+        流程优化与提炼、记忆之间建立链接
 退出：Agent 自决（exit 意图）或整理至阈值下
 保证：整理期间不注入冗长正文 → 被打断的工作下一 tick 立即续上
 ```
 
-记忆工具集（整理模式全开，平时可用子集）：`memory_fold`（折叠操作
-历史/注入片段为浓缩条目）、`memory_promote`（提炼为长期条目）、
-`memory_edit`、`memory_retag`（维护触发器）、`memory_evict`（移出
-工作集、保留召回可达）、`memory_pin`（加入可控查询词）。
+- **结果评估（JUDGE）来自 Assigner**：任务有 assigner/assignee 设计
+  （§5.8/§6.1），**Assigner 是天然的 JUDGE 提供方**，JD 里明确描述
+  KPI/评判标准；「犯错中改进」闭环 = 任务结果 → Assigner 评判 →
+  CONSOLIDATING 反思提炼 → 更新 skill（带结果证据 provenance）。
+  Authority 非组织架构时，反馈须在业务层定义（等价于 JD）。
+- 记忆工具集（整理模式全开，平时可用子集）：`memory_fold`（折叠操作
+  历史/注入片段为浓缩条目）、`memory_promote`（提炼为长期条目，可
+  关联 task_id 作结果 provenance）、`memory_edit`、`memory_retag`（维护
+  触发器）、`memory_evict`（移出工作集、保留召回可达）、`memory_pin`
+  （加入可控查询词）。
 
 ### 4.5 私有工作区（PrivateStore）
 
-- **归属：Agent 引擎内部机制**（每 agent 一个实例）——**非设备**：
-  无公共数据、无协作锁、权限仅本人；设备定义见 §5.1。
+- **归属：完全并入 Agent**（每 agent 一个实例）——**非设备**：无公共
+  数据、无协作锁、权限仅本人；**不拆 Position/Agent 两部分**（岗位无
+  私有语义，换人不换岗的经手物在设备侧）。设备定义见 §5.1。
+- **内容分两层**：① Agent 工作区——工作文件/代码/草稿/中间产物；
+  ② **原始 ReAct 记录**——prompt/response 全文的 append-only
+  conversation JSONL（agent 私有记忆的**原始层**，忠实不精炼；精炼层
+  是 §4.2 的记忆条目网络）。两层 recall/retrieve 机制区分：条目层走
+  触发器召回（关键词/语义），原始层走全文检索（按时间/task_id 流式）。
 - 路径解析统一走 `PrivateStore.resolve_path`；任何写路径必须先
   通过 resolve 与访问控制。
 - 文件读经提交态视图（tick 提交态 + 自己本 tick staged 的按需合并，
   走 lazy per-path 读取，见 §3.1 冻结视图按需化）；文件写经 effect。
+- 产物交接（工作区文件 → 同事）经**邮件**（附件引用 AssetStore/外部
+  git 等，§5.4/§5.6）；不设私有文件直接共享的旁路。
 
 ### 4.6 LLM 执行器
 
@@ -558,7 +599,8 @@ MemoryEntry:
   Ingress/Integration 设备（§5.11）。
 
 - **设备不维护账本**：设备只持当前状态（effect 应用直接改状态），
-  重放源唯一 = Journal（§3.2/§5.9）；设备构建轻便，不涉及账本维护；
+  投影/重建源唯一 = Journal（§3.2/§5.9）；设备构建轻便，不涉及账本
+  维护；
 - **身份落字段是设备职责**：设备工具把调用上下文身份（agent_id +
   position_ref，由内核构造的 ToolContext 绑定）落为自己的数据字段
   （邮件 from、任务 assignee 等）；
@@ -571,11 +613,13 @@ MemoryEntry:
   工具/工具包）；
 - **布线中心**：把 Team 内所有 Agent 与所有 Device 经 **position**
   布线——`Grant(agent, position)`（成员）+ `Grant(position,
-  entity_id)`（能力，entity_id ∈ 注册的 uuid）；deny-by-default；
-  effect = allowed / denied / requires_approval；
-- **基类行为（能力 = 权限 + 记忆）**：授予生效 → 设备的数据与工具
-  **注入 agent 记忆**；外加载记忆条目必然对应一条 `(position,
-  entity_id)` 授予（§4.2）；grant 带 priority（§4.3 分级）；
+  entity_id)`（能力，entity_id ∈ 注册的 uuid）；deny-by-default 为
+  粗默认；
+- **注入中心（不裁决）**：授予生效 → 设备的数据与工具**注入 agent
+  记忆**（让 Agent 有「意识」去用某工具）；外加载记忆条目必然对应
+  一条 `(position, entity_id)` 授予（§4.2）；grant 带 priority
+  （§4.3 分级）。**Authority 不裁决放行/拒绝/审批**——细节权限的
+  最终裁决权在设备内部（设备据自身配置决定，§3.5）；
 - 本身是 Device（可向自己注册、可为特定 position 提供 memory
   entry）；**每 Team 仅一个**，安装/替换权归 Owner；引导 = org
   初始化（场景包携带 Authority 子类）安装 + 初始授予集；
@@ -602,9 +646,11 @@ sim.register_tool(
   - LLM 工具定义从 `ToolManifest.input_schema/output_schema`
     自动生成；删除手写工具表；
   - 场景包的工具在加载时注册并校验（§8.2）；
-- OperationPolicy 继续 deny-by-default（机制在内核 §3.5，
-  allowlist/审批数据在配置设备 §5.10）；策略覆盖：allowlist、
-  审批、网络、文件作用域、墙钟/输出上限、不可逆、速率上限；
+- OperationPolicy：不可逆外部操作默认 deny-by-default（粗默认在
+  内核 §3.5）；**细节裁决在设备内部**（设备据自身配置放行/拒绝/
+  发邮件请 Owner 批示）；策略覆盖：allowlist、审批、网络、文件
+  作用域、墙钟/输出上限、不可逆、速率上限。设备收紧是建议性标准，
+  内核只保结构性不变式（§3.5）；
 - **废除独立工具白名单**——旧 ROOT_TOOLS/MANAGER_TOOLS/
   WORKER_TOOLS 与按名字的 `agent.tools` 不再存在。
 
@@ -625,8 +671,8 @@ sim.register_tool(
 - 所有变更走 effect；CommitValidate 检查记录级不变量
   （库存非负、单号唯一、金额合法、到期日合法）。
 - **不维护设备账本**：设备只持当前状态（effect 应用直接改状态）；
-  重放源唯一 = Journal（§3.2/§5.9）；审计/对账/重放从 Journal 推导
-  （重放一致性由重放测试把关，v0.11 N6）。
+  投影/重建源唯一 = Journal（§3.2/§5.9）；审计/对账/重建从 Journal
+  推导（重建一致性由重建测试把关，v0.11 N6）。
 - **外部联系人 Contact**：服务对象不是 Agent——客户、会员、粉丝、
   供应商；`contact_id`、`platform`、`external_id`、`display_name`、
   `tags`、`segments`、`metadata`；与 Ticket/Post/Order 等 Record
@@ -642,6 +688,9 @@ sim.register_tool(
 - 二进制或大文本对象；内容寻址（sha256）；MIME、size、metadata。
 - `put/get/stat`；私有文件快照支持二进制读取；
 - 私有文件与 Email 附件基于 AssetStore 引用。
+- AssetStore 是内容寻址的**便利设施，非唯一共享通道**——git 仓库、
+  外部平台 API 等同样可作协作/共享路径；Agent 工作区产物经「发布」
+  effect 进入共享（AssetStore/git/外部平台皆可，§4.5）。
 
 ### 5.5 凭证设备（CredentialStore）
 
@@ -728,7 +777,8 @@ Authority（不经组织架构、直接给 agent 指派 position），不改变
 ### 5.9 世界记忆设备（Journal）
 
 - Journal 的持久化与查询（§3.2 契约）；内核只含写入/回滚逻辑；
-- 保存/恢复从 Journal 重放；审计/对账/KPI 都是其投影。
+- 审计/对账/重放/恢复/KPI 等派生视图暂缓（见 OPEN_ISSUE
+  journal-projections）。
 
 ### 5.10 配置设备
 
@@ -889,7 +939,7 @@ assigner/assignee 与（可选）deadline/验收；原任务书不变。责任�
 ### 6.4 知识/策略快照戳与对账
 
 - **快照戳**：任务与决策记录其生效的 skill/tool/policy 版本（与
-  注入可重放 §3.6 联测）；新 PackageVersion 只影响新任务与新实例
+  注入可重建 §3.6 联测）；新 PackageVersion 只影响新任务与新实例
   （运行中任务不换绑），见 §8.2 版本绑定；
 - **补偿/对账**：外部不可逆副作用（§3.3）经补偿工具 + unknown/对账
   状态闭合（v0.11 恢复与对账；幂等键稳定化）。
@@ -1101,8 +1151,9 @@ deny-by-default 约束；Skill 不能自行提升权限。Skill 与场景包可�
    状态与决策。
 8. **Epoch fencing**：外部结果携带 state_epoch；旧 epoch 结果
    一律 fence。
-9. **默认拒绝**：未注册工具、未授权集成、未审批高风险操作一律
-   拒绝（§3.5）。
+9. **默认拒绝（粗默认）**：未注册工具、未授权集成、未审批高风险
+   外部操作一律拒绝；细节权限裁决在设备内部，收紧为建议性标准
+   （§3.5）。
 10. **非目标边界**：LOCAL_PROCESS 只防意外不防恶意；安全边界从
     SANDBOXED_PROCESS 开始（§3.4）。
 
@@ -1156,7 +1207,7 @@ GET  /audit?tick=...          审计查询
 - [ ] 权限 = Grant(position) 两层授予 ∧ 锁；不存在按业务标签授权
       的路径（§1.8/§3.5/§5.1）。
 - [ ] 任一 Agent 的注入记忆序列（工作记忆布局 + 版本戳）可从 Journal
-      重建（§3.6 可重放性）。
+      重建（§3.6 可重建性）。
 - [ ] 组织架构声明的边语义不违反四条治理不变量（静态校验）。
 
 **已落地注记（2026-08-24，T16a/b/c）**：
@@ -1190,7 +1241,7 @@ GET  /audit?tick=...          审计查询
 - **v0.13 — 沙箱脚本执行器（bash）**：受限执行器族扩展
   （python 模组 + bash 脚本，同 T16a 沙箱，§3.4）；脚本执行模型 +
   长驻会话复用 + max_processes 约束；v1.0 前必做。
-- **v1.0 — 一人公司可用**：成本/预算、审计回放、确定性重放、
+- **v1.0 — 一人公司可用**：成本/预算、审计与 Journal 投影重建、
   五场景端到端验收；README 面向个体户的安装/托管路径。
 
 ---

@@ -1,6 +1,6 @@
 ---
 kind: task
-phase: v0.11 扩展表面
+phase: v0.11 post-agent
 source: 审阅 P0-6、§七；OPEN_ISSUE 能力层；SPEC §11/§11.2；2026-08-24 信任模型决策（审计制）
 priority: high
 ---

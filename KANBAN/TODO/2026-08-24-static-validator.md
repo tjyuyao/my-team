@@ -1,6 +1,6 @@
 ---
 kind: task
-phase: v0.11 扩展表面
+phase: v0.11 post-agent
 source: 原 E7（缩）；SPEC §11.2/§15；三态收敛（2026-08-24）
 priority: high
 ---

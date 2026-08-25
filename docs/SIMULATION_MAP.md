@@ -101,7 +101,7 @@ tick 是世界节拍，ReAct 回合**跨 tick**：等待时 Agent 不占世界�
 - `fake_llm`：脚本化假 LLM（测试/演示，无真实模型）
 - `authority.py`：Authority 裁决原语（扩展表面三查分离的裁判核心，当前
   独立未接线）
-- `reliability.py`：超时 / 重试 / 锁租约 / 确定性重放
+- `reliability.py`：超时 / 重试 / 锁租约（确定性重放 DeterministicReplay 已删，随 N4）
 - `tool_manifest.py`：工具契约 + `manifest_to_tool_definition`（T7，LLM
   工具定义的唯一来源）
 
@@ -112,8 +112,9 @@ tick 是世界节拍，ReAct 回合**跨 tick**：等待时 Agent 不占世界�
    但主体拆分（抽独立服务）短中期不做。
 2. **Journal 尚未完全兑现"单一事实源"**：`_phase_commit` 先改内存再记
    Journal；持久化走 `_collect_state` 全量序列化（`save_to`）。当前是
-   "Journal 记账 + 快照存档"双轨。回滚靠逆操作（T18）、重放靠 Journal、
-   恢复靠存档——三者是邻接议题，统一时再收敛。
+   "Journal 记账 + 快照存档"双轨。回滚靠逆操作（T18）、重建/投影靠 Journal、
+   恢复靠存档——三者是邻接议题，统一时再收敛（重放降级为投影，见
+   OPEN_ISSUE journal-projections）。
 3. **外部进程工具（run_tests / git）的 cwd 当前指向宿主目录**，未接到
    agent workspace——归"工具执行环境对齐"卡（v0.10 次优先级），读代码
    时勿误以为它们已作用于模拟世界。

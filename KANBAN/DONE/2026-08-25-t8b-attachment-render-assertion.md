@@ -1,11 +1,15 @@
 ---
 kind: task
+status: rejected
 phase: v0.10 收尾（T8b 补强）
 source: KANBAN/DONE/email-attachments 遗留注记（2026-08-19）
 priority: low
 ---
 
 # v0.10-f1: ContextCompiler 附件清单端到端渲染断言（T8b 补强）
+
+> **否决（2026-08-25）**：不做了。邮件系统可能重新实现，附件渲染断言
+> 随邮件系统重做一起处理，不再单独补。
 
 ## 目标
 补 T8b 的测试覆盖缺口：收件人上下文（ContextCompiler 实际产出）含附件清单

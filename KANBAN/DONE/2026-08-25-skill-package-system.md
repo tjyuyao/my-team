@@ -1,11 +1,17 @@
 ---
 kind: task
+status: rejected
 phase: v0.11 场景
 source: SPEC §11.4（2026-08-24 重划版）；v0.11-plan 待重划项；依赖 E5/E7
 priority: medium
 ---
 
 # Skill Package 系统（面向非专业用户的能力封装）
+
+> **否决（2026-08-25）**：裁撤。与 grill 讨论后的设计差距太大，独立
+> Skill 包系统没有用。有效部分已并入 N4 记忆系统——skill 就是 agent
+> 私有记忆的种子（§4.2），「晋升 = 发布为组织资产」（§4.2），来源段
+> 隔离（§8.4）。不再单独做 Skill 包加载器/校验入口。
 
 
 ## 目标

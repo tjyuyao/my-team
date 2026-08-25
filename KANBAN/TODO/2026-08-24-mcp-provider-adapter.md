@@ -1,6 +1,6 @@
 ---
 kind: task
-phase: v0.11 扩展协议
+phase: v0.11 agent-impl
 source: SPEC §6.5（2026-08-24 补信任框架）；用户定位补充（个体户/一人公司 + 开发者生态）
 priority: medium
 ---

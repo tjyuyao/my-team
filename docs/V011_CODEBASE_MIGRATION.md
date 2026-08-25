@@ -4,6 +4,13 @@
 > 自顶向下规划互补）：每个现有文件逐一映射到三态（内核/设备/Agent），
 > 判定迁移动作，核对卡片覆盖，暴露计划缺口。
 > 权威设计见 SPEC §1.7/§2.1/§3/§4/§5；本文件是迁移执行清单。
+>
+> **更新注记（2026-08-25，grill 后）**：本文件是 08-24 审计快照，部分
+> 结论已随 grill 更新——①「确定性重放」降级为「Journal 投影」，重放/
+> 审计/对账/恢复/KPI 派生视图暂缓（OPEN_ISSUE journal-projections）；
+> ②「RecordStore 删 ledger」暂缓（见 §4.1 裁决项 1）；③ Authority 从
+> 「布线+裁决」改为「布线+注入，不裁决」，裁决下放设备（§3.5/§5.1）。
+> 文中「重放」「删 ledger」字样按此理解，不再逐行改写。
 
 ## 0. 审计方法
 
@@ -134,10 +141,11 @@
 
 ### 4.1 高优裁决项（已定案，2026-08-24 Owner 拍板）
 
-1. **RecordStore ledger（已定案：设备不维护账本）**：设备只持当前
-   状态（effect 应用直接改状态），重放源唯一 = Journal；RecordStore
-   删 ledger（现状"ledger 推导当前状态"废除）；重放一致性由重放
-   测试把关（性质验证，非实现裁判）。落位 N6（Journal 持久化）。
+1. **RecordStore ledger（已定案：设备不维护账本；2026-08-25 暂缓）**：
+   设备只持当前状态（effect 应用直接改状态），投影/重建源唯一 = Journal；
+   RecordStore 删 ledger 与「重放一致性由重放测试把关」**暂缓**（见
+   OPEN_ISSUE journal-projections）；RecordStore 现持当前状态，回滚维持
+   invert_data + ledger_ids 现状。落位 N6 的仅是 Journal 持久化落地。
 2. **SharedKB 权限模型（已定案：注册即声明注入内容）**：注册受控
    uuid 时设备同时声明"授予生效后注入记忆的 content"（引导 Agent
    使用，如页面权限说明——注入记忆非数据全量）；授权查 Authority，

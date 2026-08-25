@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.11 扩展表面
 source: 审阅 P0-4、§五；OPEN_ISSUE 发布层
 priority: high

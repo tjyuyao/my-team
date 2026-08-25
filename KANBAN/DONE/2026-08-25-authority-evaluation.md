@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.11 扩展表面
 source: 审阅 P0-5、§三；OPEN_ISSUE Authority 模型
 priority: high

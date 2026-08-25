@@ -1,6 +1,6 @@
 ---
 kind: task
-phase: v0.11 扩展表面
+phase: v0.11 post-agent
 source: 原 E3；SPEC §3.2/§8.2/§6.4；三态收敛（2026-08-24）
 priority: high
 ---
@@ -13,6 +13,13 @@ priority: high
 的矛盾；②Commit 成功 → Publish 前崩溃的故障窗口（Journal 已记录
 但外部调用未发送/重复发送）；③外部不可逆操作崩溃后误判为失败
 （请求可能已在平台侧生效）。
+
+> **注记（2026-08-25）**：「统一 Journal 投影化」（把 pending/outbox/
+> 审计/KPI 全部变为 Journal 重放派生）**暂缓**，见 OPEN_ISSUE
+> journal-projections。本卡保留运行正确性部分：pending op 七绑定 +
+> outbox 恢复 + 稳定幂等键 + `unknown` 不自动重复 + 外部不可逆的
+> 补偿/对账。**「对账」作为完整 Journal 投影层后移**，不影响本卡的
+> 崩溃恢复与幂等交付。
 
 ## 要求 / 规则
 - **改措辞**：禁止的是"无归属、无生命周期、无恢复语义的孤儿 op"，

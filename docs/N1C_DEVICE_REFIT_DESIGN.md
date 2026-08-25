@@ -22,7 +22,7 @@ AuditLog/LockManager 等，SharedKB 已有先例）；simulation 构造区只做
 **关键实现约束（最高优先）**：内置工具 capability 必须**沿用契约派生的
 uuid5**（`ToolManifest._derive_capability`），设备用 **adopt**（`Device.
 register_entity` 支持显式 entity_id）而非新生成 uuid4——否则
-manifest_hash 每次运行变化，重放/审计链断裂（test_tool_protocol 哨兵）。
+manifest_hash 每次运行变化，重建/审计链断裂（test_tool_protocol 哨兵）。
 
 ## 2. 工具处理器拆域清单（17 个内置工具）
 
@@ -44,9 +44,10 @@ manifest_hash 每次运行变化，重放/审计链断裂（test_tool_protocol �
 `WorldMemoryDevice(Device)` 持有 TickJournal 实例（组合）：
 - **写入/回滚逻辑留内核**（TickJournal.start_tick/finalize/AuditLog 写入不动，§3.2）；
 - 设备接口：`append(record)` / `query`/`last`/`for_tick`（只读）/ `replay()`
-  （重放入口）/ `audit_projection`/`kpi_projection` / `snapshot`/`restore`；
+  （重建入口 = Journal 投影）；`audit_projection`/`kpi_projection` 暂缓
+  （见 OPEN_ISSUE journal-projections）；`snapshot`/`restore` 过渡保留；
 - `attach_backend(backend)`：`PersistenceBackend` protocol —— N1c 实现
-  `MemoryBackend`（默认），**N6 实现 SQLiteBackend**（保存/恢复从 Journal 重放）；
+  `MemoryBackend`（默认），**N6 实现 SQLiteBackend**（保存/恢复从 Journal 投影）；
 - 分界判定（验收"内核无数据直连"）：内核只做写入逻辑；**一切读**经设备
   接口；`_collect_state/_restore_state` 不得摸 `_journal._records`（过渡：
   入口换 `world_memory.snapshot()/restore()`，格式不变保 test_snapshot_matrix）；
@@ -85,7 +86,11 @@ manifest_hash 每次运行变化，重放/审计链断裂（test_tool_protocol �
 | N1c-2 工具拆域（分批） | 17 handler 按 §2 移入设备/引擎模块；`_register_tool_handlers` 瘦身 | 工具行为不变（全量绿）；manifest device_id/capability 绑定正确 | N1c-1 | **独占 simulation 该区域** |
 | N1c-3 世界记忆设备接口 | WorldMemoryDevice + collect/restore 入口替换 + org.journal_sink | 内核无数据直连；snapshot matrix 绿 | N1c-1（弱） | 与 N1c-4 并行 |
 | N1c-4 预算+Admission+日历数据 | 容量字段归位（值不变）+ IntegrationDevice + CalendarDevice | 预算拆分生效；日历数据在设备；test_budget/sla_capacity/calendar 绿 | N1c-1（弱） | 与 N1c-3 并行；与 N1c-2 错开构造区 |
-| N1c-5 Task 公共数据层 + Record ledger 删除 | TaskDevice + delegate 归位；RecordStore 删 ledger（回滚改 invert_data 前值机制） | 无 ledger 字段；回滚语义不变（test_commit_rollback 绿） | N1c-1/2 | 建议在 3/4 之后 |
+| N1c-5 Task 公共数据层 | TaskDevice + delegate 归位 | Task 树归设备；回滚语义不变（test_commit_rollback 绿） | N1c-1/2 | 建议在 3/4 之后 |
+
+> **注（2026-08-25）**：原 N1c-5 的「RecordStore 删 ledger」**暂缓**——
+> 删 ledger 属 Journal 投影层（见 OPEN_ISSUE journal-projections），
+> RecordStore 现持当前状态即可，回滚维持 invert_data + ledger_ids 现状。
 
 **simulation.py 共享文件分区**：构造区（1/4）、`_register_tool_handlers`
 （2 独占）、`_collect_state/_restore_state`（3/5）、`_phase_commit`（5）、

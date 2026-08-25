@@ -1,6 +1,6 @@
 ---
 kind: task
-phase: v0.11 扩展表面
+phase: v0.11 agent-impl
 source: SPEC §5.2–5.11；三态收敛（2026-08-24）；拆分自原 device-model（N1 → N1a/N1b/N1c）
 priority: high
 ---
@@ -58,7 +58,7 @@ Task 设备细粒度 position 求值随 N5（依赖 N2）。
   python_*/git_*）**非设备**（§4.5/§3.4），仅搬移归属；
 - 世界记忆设备：写入留内核、读经设备接口、PersistenceBackend 预留 N6；
 - Task 细粒度 position 求值留 N5；预算/容量归位**值不变只换归属**；
-- RecordStore 删 ledger：回滚改 invert_data 前值机制（§3.3）。
+- RecordStore 删 ledger：回滚改 invert_data 前值机制（§3.3）。**（2026-08-25 暂缓：删 ledger 属 Journal 投影层，见 OPEN_ISSUE journal-projections；RecordStore 现持当前状态即可，回滚维持 invert_data + ledger_ids 现状）**
 
 **子任务**：N1c-1 设备适配层 → N1c-2 工具拆域（独占 simulation）→
 {N1c-3 世界记忆设备接口 ‖ N1c-4 预算+Admission+日历} → N1c-5 Task

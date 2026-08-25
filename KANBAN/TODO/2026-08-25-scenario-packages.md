@@ -1,6 +1,6 @@
 ---
 kind: task
-phase: v0.11 场景
+phase: v0.11 post-agent
 source: SPEC §11（2026-08-24 重划 + 定位修订版）；v0.11-plan 待重划项；依赖 E1/E4/E5/E7
 priority: medium
 ---

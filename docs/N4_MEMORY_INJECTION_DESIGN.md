@@ -1,13 +1,21 @@
 # N4 记忆与注入系统 — 设计定稿与任务拆解
 
-> 2026-08-25 定稿。设计草案由设计 agent 产出，主 agent 审阅定案。
-> 对应卡：`KANBAN/TODO/2026-08-24-memory-injection.md`。
+> 2026-08-25 定稿（2026-08-25 二版：吸收 grill 结论）。
+> 对应卡：`KANBAN/TODO/2026-08-25-memory-injection.md`。
 > 依据：SPEC §3.6/§4.2–4.6/§5.1/§5.8/§6.4/§8.4。
-> 核心立场：**外加载条目 = 投影不入库**（权限边界结构性成立）、**记忆
-> 写入 = Journal effect**（可重放可回滚）、**context_compiler 保留签名
-> 重写为三预算注入管线**（存量冲击最小）、**CONSOLIDATING = continuation
-> 相位 + 授权集切换**（零新机制）、**DeterministicReplay 删除**、**LLM
-> 执行器归位并入 N4 作 N4-6**。
+> 核心立场（v2 更新）：
+> - **外加载条目 = 投影不入库**（权限边界结构性成立）、**记忆写入 =
+>   Journal effect**（可回滚可重建）；
+> - **context_compiler 保留签名重写为三预算注入管线**（存量冲击最小）；
+> - **CONSOLIDATING = continuation 相位 + 授权集切换**（零新机制），且
+>   **不只压缩，更是反思+经验+链接**，Assigner 是天然 JUDGE；
+> - **记忆分两层**：条目网络（精炼层）+ 原始 ReAct 记录（原始层，归
+>   PrivateStore），recall/retrieve 路径区分；
+> - **岗人交接不全量继承**（邮件/师徒，B 独立演进）；
+> - **量力而行**：工具返回超模型剩余预算即上下文感知截断；
+> - **重放降级**：「可重建」是 Journal 投影，非「确定性重放」不变量；
+>   **DeterministicReplay 删除**；
+> - **LLM 执行器归位并入 N4 作 N4-6**。
 
 ## 1. MemoryEntry schema（models/memory.py）
 
@@ -29,18 +37,44 @@ MemoryEntry:
   provenance: EntryProvenance     # origin: own | injected；injected 记 injection_ref 快照
 ```
 
-## 2. MemoryStore（Agent 私密态，非设备）
+- **结果 provenance（v2 新增）**：`memory_promote` 可关联 `task_id`，把
+  「这条 skill 在哪个任务里产生了什么结果（completed/failed/escalated/
+  customer_rejected）」作为 provenance 带进条目。这样 skill 条目天然带
+  结果证据，下次召回时能看到「这策略在 3 次退款里 2 次成功 1 次升级」，
+  而不是一条裸规则。这是「犯错中改进」闭环的数据基础（§5 CONSOLIDATING
+  + Assigner JUDGE）。
 
-- `AgentMemory` 每 agent 一实例（归属 Agent 引擎，不注册 Authority，与
-  private_store 同为 §4.5 机制）；版本链 + 触发器倒排索引 + RecallConfig
-  （可控查询词是状态）；
-- **权限边界**：**外加载条目 = 投影不入库**——`injection_for` 输出每次
-  渲染时包装为只读 MemoryEntry 视图（provenance.injection_ref），store
-  中不存在该 entry_id ⇒ **"来源段不可改写"是结构性保证（不在 store =
-  不可写），非运行时检查**；自有条目（own）完整读写；
-- **写入 = Journal effect**（带 INVERT 逆操作：追加版本撤销 = 移除该
-  版本），回滚/重放与 agent 状态回滚同路径；
-- 与 private_store `memory/` 目录**不绑定**（目录保留为通用文件区）。
+## 2. MemoryStore 与 PrivateStore（Agent 私有态，两层）
+
+**归属：完全并入 Agent**（每 agent 一实例，非设备，不注册 Authority）。
+**不拆 Position/Agent 两部分**——岗位无私有语义，经手物在设备侧。
+
+Agent 私有态分两层：
+
+| 层 | 内容 | 性质 | 检索路径 |
+|---|---|---|---|
+| **精炼层** MemoryStore | 条目网络（MemoryEntry 版本链） | 结构化、主动精炼 | 触发器召回（关键词/语义） |
+| **原始层** PrivateStore | prompt/response 全文 append-only JSONL | 忠实、不精炼 | 全文检索（按时间/task_id 流式） |
+
+> **原始层已拆分**（2026-08-25）：原始层独立成 `raw-transcript-layer`
+> 卡，本设计文档只负责**精炼层**（MemoryStore + 召回 + 注入 + 整理）。
+> 两层联测（条目召回 vs 全文检索不混）见该卡。
+
+- **精炼层（MemoryStore）**：
+  - `AgentMemory` 每 agent 一实例；版本链 + 触发器倒排索引 +
+    RecallConfig（可控查询词是状态）；
+  - **外加载条目 = 投影不入库**——`injection_for` 每次渲染时包装为只读
+    MemoryEntry 视图（provenance.injection_ref），store 中不存在该
+    entry_id ⇒ 「来源段不可改写」是**结构性保证**（不在 store = 不可写），
+    非运行时检查；自有条目（own）完整读写；
+  - **写入 = Journal effect**（INVERT 逆操作：追加版本撤销 = 移除该版本），
+    回滚/重建与 agent 状态同路径。
+- **原始层（PrivateStore）**：
+  - prompt/response 全文 append-only conversation JSONL（§4.5 机制），
+    是记忆的**忠实原始层**，不被摘要/折叠破坏；
+  - 与精炼层**检索路径分开**：原始层走全文检索（`search_transcript`
+    式，按时间/task_id 流式返回片段），精炼层走触发器召回；
+  - 体积问题用定期归档解决（Owner 审批），不作为设计约束。
 
 ## 3. 召回引擎（recall.py）
 
@@ -75,20 +109,29 @@ MemoryEntry:
   parse_llm_response（保留，归 LLM 执行器侧）/ render_system_prompt
   （收敛为"注入布局 → 最终 messages"纯排版，role 参数保留签名停止语义）。
 
-## 5. 整理模式 CONSOLIDATING
+## 5. 整理模式 CONSOLIDATING（v2 扩展）
 
-- 触发：组装器检测固定预算使用率 > 90%（只读标志 pending_consolidation，
-  Observe 无副作用）；相位迁移在 decide/act（写路径）；
+**不只压缩，更是「反思与进步」**——取代 harness 的固定总结提示词：
+
+- **触发**：① 组装器检测固定预算使用率 > 90%（只读标志
+  pending_consolidation，Observe 无副作用）；② **agent 主动发起**（不
+  限于预算满）。相位迁移在 decide/act（写路径）；
 - `ContinuationPhase.CONSOLIDATING` + `resume_phase` 字段（退出后下 tick
   立即续上被打断工作）；
 - 工具面收窄：CONSOLIDATING 下授权集切换为记忆工具集（memory_fold/
   promote/edit/retag/evict/pin）——N1b 后授权集本就是动态求值，零新机制；
-- 输入 = 完整注入集（目的就是变小）；输出 = 整理动作序列 + 极短摘要；
-  全部动作 = Journal effect；
+- 输入 = 完整注入集（目的就是变小）；输出 = 整理动作序列 + **结构化摘要**
+  ——除折叠/压缩外，**须含：反思与进步、经验教训整理、流程优化与提炼、
+  记忆之间建立链接**；全部动作 = Journal effect；
+- **结果评估（JUDGE）来自 Assigner**：任务有 assigner/assignee 设计
+  （§5.8/§6.1），**Assigner 是天然的 JUDGE 提供方**，JD 里明确写
+  KPI/评判标准；闭环 = 任务结果 → Assigner 评判 → CONSOLIDATING 反思
+  提炼 → 更新 skill（带结果 provenance，见 §1）。Authority 非组织架构时，
+  反馈须在业务层定义（等价于 JD）；
 - 退出：agent 自决（exit → 恢复 resume_phase）或预算回落阈值下；
   **hysteresis**（进 90%/出 80%）防连续 tick 抖动。
 
-## 6. 注入状态空间可重放（§3.6）
+## 6. 注入状态空间可重建（§3.6，重放降级）
 
 - **三类 effect 入 Journal**：MEMORY_RECALL_CONFIG（策略调整）/
   MEMORY_RECALL（主动回忆）/ MEMORY_ENTRY_WRITE、EVICT、FOLD（条目管理）；
@@ -98,11 +141,38 @@ MemoryEntry:
 - **重建函数 + 测试**：`reconstruct_injection(journal, agent_id, tick)`
   —— 断言"Journal 重建的注入序列 == 运行时实际注入序列"（§11 验收不变
   量直接落位）；
-- **DeterministicReplay 删除**：零使用者 + 快照式与 effect 式重放冲突；
+- **重放降级（v2）**：「可重建」是 append-only Journal 的**投影**（谁
+  需要谁投影），**不是「确定性重放」这一设计不变量/保证**。现实世界不可
+  两次踏入同一条河流——My-Team 记录（账本），不承诺重放（时间机）。
+  派生视图（审计/对账/重放/恢复/KPI）暂缓，见 OPEN_ISSUE
+  journal-projections；
+- **DeterministicReplay 删除**：零使用者 + 快照式与 effect 式投影冲突；
   随迁删除 test_reliability 7 测试；RetryManager/TimeoutChecker/CrashGuard
   保留。
 
-## 7. LLM 执行器归位（N4-6，并入 N4）
+## 7. 岗人交接（不全量继承，v2 新增）
+
+换岗时 A 的技能**不自动全量克隆**给 B（技能池爆炸是前车之鉴）：
+
+- A 通过**邮件交接**筛选的技能，或作为 B 的**上司/师傅**在协作中指导；
+- B 据自身情况**吸收并独立演进**（参考人类社会的真实解决方案）；
+- 组织学习经「晋升 = 从 agent 态发布为组织资产」的**显式路径**，不靠
+  私有记忆克隆；
+- 实现上是 N2（岗人分离）语义的自然结果，N4 只需保证「晋升」接口存在，
+  不做自动继承。
+
+## 8. 量力而行（v2 新增，§3.8）
+
+单次工具调用返回不得超过模型剩余处理能力：
+
+- 上下文感知截断（按实时剩余 token 预算，非静态上限），截断记 Journal
+  事件供预警；
+- 无法一次处理多任务就让需求排队，不硬撑——「宁可排队、不可丢失」在
+  上下文维度的延伸；
+- 这是 LLM 执行器（N4-6）与注入组装器（N4-3）的共同责任：组装器算好
+  剩余预算，执行器在边界处截断工具返回。
+
+## 9. LLM 执行器归位（N4-6，并入 N4）
 
 - dispatcher 构造参数 `simulation` → `registry: PendingOperationRegistry`
   （去 `_sim._pending_ops`/`_operations` 双重私有耦合，走公共接口）；
@@ -111,21 +181,24 @@ MemoryEntry:
 - 归属 Agent 引擎（§4.6）；规模小且与主动回忆同语境（异步路径），并入
   N4 作子任务；若排期紧可拆独立小卡并行（零依赖）。
 
-## 8. 任务拆解
+## 10. 任务拆解
 
 | 子任务 | 范围 | 验收要点 | 依赖 | 并行 |
 |---|---|---|---|---|
-| N4-1 记忆模型与存储 | MemoryEntry schema + AgentMemory + 记忆写 effect（含 INVERT） | schema 校验（type-content 一致、content 禁 uuid）、版本链、effect 可回滚、外加载不在 store | 无 | 与 N4-6 并行 |
+| N4-1 记忆模型与存储 | MemoryEntry schema（含结果 provenance）+ AgentMemory + 记忆写 effect（含 INVERT） | schema 校验（type-content 一致、content 禁 uuid）、版本链、effect 可回滚、外加载不在 store | 无 | 与 N4-6 并行 |
 | N4-2 召回引擎 | 触发器索引 + KeywordRecallBackend + RecallBackend 接口 + 可控查询词 + MEMORY_RECALL intent | 关键词命中 top-k、可控查询词持久、主动回忆 1 tick、召回面=触发器列表 | N4-1 | 与 N4-6 并行 |
-| N4-3 注入组装器重写 | 三预算注入管线 + 来源段 + 布局 + stamp + prompt_templates 拆分 + role 停止消费 | `[POLICY]`/`[POSITION_JD]` 不可覆盖（测试）、固定预算不可超、stamp 入 Journal | N4-1+2 接口 | 与 N4-4 并行 |
-| N4-4 整理模式 | CONSOLIDATING 相位 + resume_phase + 触发接线 + 记忆工具集 handler + 自决退出 + hysteresis | 超预算触发、工具面收窄、动作入 Journal、退出后续上（测试） | N4-1 + N4-3 触发接口 | 与 N4-3/5 并行 |
-| N4-5 注入可重放 | 三类 effect + stamp + reconstruct_injection + 重放测试 + 删 DeterministicReplay | 注入序列可从 Journal 重建（确定性测试）；死代码移除 | N4-3 | 与 N4-4 并行 |
-| N4-6 LLM 执行器归位 | dispatcher 注入 registry + fake_llm 协议化 + advance 走公共接口 | 无 `_operations` 直接访问（grep 断言）、fake/gateway 同协议、全量绿 | 无 | **全程并行** |
+| N4-3 注入组装器重写 | 三预算注入管线 + 来源段 + 布局 + stamp + prompt_templates 拆分 + role 停止消费 + 量力而行截断 | `[POLICY]`/`[POSITION_JD]` 不可覆盖（测试）、固定预算不可超、stamp 入 Journal、工具返回超预算截断 | N4-1+2 接口 | 与 N4-4 并行 |
+| N4-4 整理模式 | CONSOLIDATING 相位 + resume_phase + 触发接线（预算+主动）+ 记忆工具集 handler + 结构化摘要（反思/经验/链接）+ Assigner JUDGE 接线 + 自决退出 + hysteresis | 超预算触发、主动触发、工具面收窄、动作入 Journal、退出后续上、输出含反思/经验/链接（测试） | N4-1 + N4-3 触发接口 | 与 N4-3/5 并行 |
+| N4-5 注入可重建 | 三类 effect + stamp + reconstruct_injection + 重建测试 + 删 DeterministicReplay | 注入序列可从 Journal 重建（确定性测试）；死代码移除 | N4-3 | 与 N4-4 并行 |
+| N4-6 LLM 执行器归位 | dispatcher 注入 registry + fake_llm 协议化 + advance 走公共接口 + 上下文感知截断 | 无 `_operations` 直接访问（grep 断言）、fake/gateway 同协议、全量绿 | 无 | **全程并行** |
+
+> **N4-7 原始 ReAct 记录层已拆分为独立卡** `raw-transcript-layer`
+> （2026-08-25），不在本卡子任务内。
 
 **主干串行链**：N4-1 → N4-2 → N4-3 → N4-5；N4-4/N4-6 并行。每子任务后
-全量回归（基线 1143 passed）。
+全量回归。
 
-## 9. 风险清单（要点）
+## 11. 风险清单（要点）
 
 1. **存量测试随迁**：test_context_compiler（281 行，role 三档断言重写）、
    test_llm_agent（render_system_prompt 输出变化）、test_reliability
@@ -136,16 +209,23 @@ MemoryEntry:
    下 tick 生效；设备注入内容无显式版本 → stamp 记 content hash；
 3. **与 N1b 衔接**：AgentConfig.role/prompt_templates role 参数保留字段
    停止读取（兼容桥，N8 收尾拆除）；
-4. **与 N5 衔接**：§6.4 快照戳与 §3.6 注入可重放是同一族机制两面（agent
+4. **与 N5 衔接**：§6.4 快照戳与 §3.6 注入可重建是同一族机制两面（agent
    侧 stamp vs 业务侧版本绑定）；联测 = 快照戳 + 注入序列一起重建"当时
    它知道什么"；
-5. **Journal 通道未定型**：N1c/N6 迁移（先走 TickJournal/audit）；
-6. **hysteresis** 防抖动；**回滚一致性**（记忆 effect 逆操作 + snapshot
+5. **Journal 通道未定型**：N1c/N6 迁移（先走 TickJournal/audit）；派生
+   视图投影层暂缓（journal-projections）；
+6. **Assigner JUDGE 闭环**：Assigner 评判结果如何进入 CONSOLIDATING 输入，
+   需要 N5 的任务结果状态机配合（completed/failed/escalated 标签）；
+7. **原始层体积**：conversation JSONL 会持续增长，定期归档（Owner 审批）
+   作为唯一减压手段，不设自动删除；
+8. **hysteresis** 防抖动；**回滚一致性**（记忆 effect 逆操作 + snapshot
    matrix 扩展）；**注入安全不变量**（客户内容不作系统指令，验收测试显式
-   覆盖）；**范围控制**（裁减顺序：memory_fold > 向量后端接口 > stamp 细化）。
+   覆盖）；**范围控制**（裁减顺序：memory_fold > 向量后端接口 > stamp
+   细化 > 原始层检索）。
 
-## 10. 卡修订建议（已并入卡）
+## 12. 卡修订建议（已并入卡）
 
-N4 卡补三处：外加载条目 = 投影不入库（权限结构性）、memory_recall 走
-effect 而非 pending op、DeterministicReplay 删除；产出补 N4-6 子任务
-（迁移文档缺口 5 取"并入 N4"）。
+N4 卡 v2 补：外加载条目 = 投影不入库、memory_recall 走 effect、重放降级
+（投影非重放）、CONSOLIDATING 反思+Assigner JUDGE、岗人交接不全量继承、
+量力而行截断；产出补 N4-6 LLM 执行器。**原始 ReAct 记录层拆分为
+`raw-transcript-layer` 独立卡**。
