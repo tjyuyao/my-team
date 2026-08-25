@@ -5,6 +5,11 @@ Per SPEC §4.4, §11.2:
 - Task states with defined transitions
 - Tree traversal (parent/children)
 - Deadline checking
+
+N1c-4: TaskTree 归位为 Device 子类（SPEC §5.7，N1c Task 设备公共数据层）。
+注册受控 uuid（范围级 DATA + delegate TOOL）+ InjectionDecl。
+构造签名保持完全兼容（simulation.py 不变，位置参数 transaction_buffer 仍可用）。
+细粒度 position 求值留 N5（§4 / §6）。
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 from my_team.models.task import TASK_TRANSITIONS, Task, TaskPriority, TaskStatus
 
 if TYPE_CHECKING:
@@ -43,20 +49,59 @@ class InvalidTransitionError(TaskTreeError):
         )
 
 
-class TaskTree:
+class TaskTree(Device):
     """Manages the dynamic task tree.
 
     Provides CRUD operations, state transitions, tree traversal,
     and deadline checking.
+
+    N1c-4 设备归位：继承 Device，构造时注册受控 uuid
+    （范围级 DATA task-tree-scope + delegate TOOL 实体）并声明 InjectionDecl。
+    构造签名保持原样：``transaction_buffer`` 仍为第一个位置参数；
+    新增 ``device_id`` 可选关键字参数（默认 None，simulation 构造不变）。
+    细粒度 position 求值留 N5。
     """
 
-    def __init__(self, transaction_buffer: TransactionBuffer | None = None) -> None:
+    def __init__(
+        self,
+        transaction_buffer: TransactionBuffer | None = None,
+        device_id: str | None = None,
+    ) -> None:
+        # Device 基类初始化（生成 device_id 并初始化实体注册表）
+        Device.__init__(self, device_id)
         self._tasks: dict[str, Task] = {}
         self._children_map: dict[str, list[str]] = {}  # derived_from → [child_ids]
         self._parent_map: dict[str, str | None] = {}  # task_id → derived_from
         self._assignee_map: dict[str, list[str]] = {}  # agent_id → [task_ids]
         # N1c-2: injected kernel services for tool handlers
         self._transaction_buffer = transaction_buffer
+
+        # N1c-4：注册设备受控实体
+        # 范围级 DATA 实体 — 任务树整体范围，InjectionDecl 引导 agent 使用 delegate 工具
+        self.task_tree_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "task-tree-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[TASK_INSTRUCTION] 任务树（TaskTree）是团队任务委派与跟踪的数据层。\n"
+                    "通过 delegate 工具将任务委派给直属子 agent（STAGED_MUTATION：\n"
+                    "原子组 TASK_CREATE + EMAIL_SEND，提交时生效）。\n"
+                    "任务有生命周期状态（assigned → accepted → in_progress → "
+                    "submitted → completed / failed / cancelled / expired）；\n"
+                    "parent cancel 会级联取消所有非终态子任务。"
+                ),
+                source_tag="[TASK_INSTRUCTION]",
+            ),
+        )
+        # 工具面 TOOL 实体 — delegate 工具，采用 uuid5 派生值（adopt 机制）
+        from my_team.tool_manifest import builtin_manifests
+
+        _manifests = builtin_manifests()
+        self.delegate_capability = self.register_entity(
+            EntityKind.TOOL,
+            "delegate",
+            entity_id=_manifests["delegate"].capability,
+        )
 
     def create(
         self,

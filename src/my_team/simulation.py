@@ -91,6 +91,8 @@ from my_team.journal import (
     TickRecordStatus,
 )
 from my_team.mailbox import MailSystem
+from my_team.memory_recall import RecallConfig, RecallEngine
+from my_team.memory_store import AgentMemory
 from my_team.models.activation import (
     AgentActivation,
     ExecutionConfig,
@@ -472,6 +474,17 @@ class Simulation:
             audit_log=self._audit_log,
         )
 
+        # N4-3 记忆子系统（每 agent 一实例；注入组装器消费）
+        self._agent_memories: dict[str, AgentMemory] = {
+            cfg.agent_id: AgentMemory(cfg.agent_id) for cfg in self._agent_tree
+        }
+        self._recall_configs: dict[str, RecallConfig] = {
+            cfg.agent_id: RecallConfig() for cfg in self._agent_tree
+        }
+        self._recall_engines: dict[str, RecallEngine] = {
+            cfg.agent_id: RecallEngine() for cfg in self._agent_tree
+        }
+
         # T6: ContextCompiler for role-aware observation assembly
         self._context_compiler = ContextCompiler(
             agent_tree=self._agent_tree,
@@ -479,6 +492,11 @@ class Simulation:
             shared_kb=self._shared_kb,
             mail_system=self._mail_system,
             private_store=self._private_store,
+            authority=self._authority,
+            agent_memories=self._agent_memories,
+            recall_configs=self._recall_configs,
+            recall_engines=self._recall_engines,
+            audit_log=self._audit_log,
         )
 
         # Agent scheduler (event-driven activation)

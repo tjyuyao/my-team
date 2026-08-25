@@ -103,6 +103,9 @@ class AuditEventType(str, Enum):
     SYSTEM_CRASH = "system.crash"
     CRASH_GUARD_TRIGGERED = "crash_guard.triggered"
 
+    # N4-3 注入组装器：注入布局版本戳（审计复盘）
+    MEMORY_INJECTION_STAMP = "memory.injection_stamp"
+
 
 class AuditEntry(BaseModel):
     """A single audit log entry."""

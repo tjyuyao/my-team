@@ -511,6 +511,14 @@ class AgentObservation(BaseModel):
             "to this kind=human agent, awaiting translation to Intents"
         ),
     )
+    # N4-3 注入组装器：本轮注入布局元数据（审计复盘，非内容快照）
+    memory_injection: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "N4-3 注入布局版本戳：{layout_refs, detail_levels, stamp_hash, "
+            "pending_consolidation}；空字典 = 本轮无注入（兼容旧代码）"
+        ),
+    )
 
 
 def _proxy(d: dict[str, Any]) -> MappingProxyType[str, Any]:
