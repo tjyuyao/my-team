@@ -179,6 +179,12 @@ class EntryProvenance(BaseModel):
         default_factory=list,
         description="关联的任务结果列表（skill 条目带结果证据，闭环学习）",
     )
+    # 整理来源（N4-4 新增）：CONSOLIDATING 摘要/晋升条目写入时标记，
+    # 形如 "consolidating:<agent_id>:<tick>"
+    consolidation_origin: str = Field(
+        default="",
+        description="整理来源标记（CONSOLIDATING 摘要条目写入时记录）",
+    )
 
     @model_validator(mode="after")
     def _check_injection_ref(self) -> EntryProvenance:

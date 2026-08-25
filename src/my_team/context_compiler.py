@@ -128,11 +128,15 @@ class InjectionLayout:
         recalled_slots: list[InjectionSlot],
         context_sections: dict[str, Any],
         pending_consolidation: bool = False,
+        # N4-4 新增（只读消费）：固定注入需求使用率（demand/budget），
+        # CONSOLIDATING hysteresis 进出阈值的数据来源
+        fixed_usage_ratio: float = 0.0,
     ) -> None:
         self.fixed_slots = fixed_slots
         self.recalled_slots = recalled_slots
         self.context_sections = context_sections
         self.pending_consolidation = pending_consolidation
+        self.fixed_usage_ratio = fixed_usage_ratio
 
         # 计算布局版本戳
         self.layout_refs: list[str] = [
@@ -155,6 +159,7 @@ class InjectionLayout:
             },
             "stamp_hash": self.stamp_hash,
             "pending_consolidation": self.pending_consolidation,
+            "fixed_usage_ratio": self.fixed_usage_ratio,
             "fixed_count": len(self.fixed_slots),
             "recalled_count": len(self.recalled_slots),
         }
@@ -345,7 +350,9 @@ class ContextCompiler:
         }
 
         # ① 固定注入（priority<10）
-        fixed_slots, pending_consolidation = self._build_fixed_injection(agent_id)
+        fixed_slots, pending_consolidation, fixed_usage_ratio = (
+            self._build_fixed_injection(agent_id)
+        )
 
         # ② 召回注入（priority≥10 + 召回引擎）
         # 召回上下文词：从快照中提取 task/email 关键词
@@ -364,6 +371,7 @@ class ContextCompiler:
             recalled_slots=recalled_slots,
             context_sections=result,
             pending_consolidation=pending_consolidation,
+            fixed_usage_ratio=fixed_usage_ratio,
         )
         result["memory_injection"] = layout.to_meta_dict()
 
@@ -389,19 +397,22 @@ class ContextCompiler:
     def _build_fixed_injection(
         self,
         agent_id: str,
-    ) -> tuple[list[InjectionSlot], bool]:
+    ) -> tuple[list[InjectionSlot], bool, float]:
         """组装固定注入槽（priority<10）。
 
         - 来自 Authority.injection_for()（同一 entity 多 position 去重取最小 priority）；
         - POLICY/[POSITION_JD] 最先且不可覆盖；
         - fixed_memory_tokens 单独预算不可超，超限置 pending_consolidation；
-        - 客户不可信内容不进固定注入（来源段安全不变量）。
+        - 客户不可信内容不进固定注入（来源段安全不变量）；
+        - N4-4：返回固定注入**需求使用率**（demand/budget，demand 含
+          因超限被跳过槽位的 token 需求）——CONSOLIDATING 触发与
+          hysteresis 退出的数据来源（进 90% / 出 80%）。
 
         Returns:
-            (fixed_slots 列表, pending_consolidation 标志)
+            (fixed_slots 列表, pending_consolidation 标志, fixed_usage_ratio)
         """
         if self._authority is None:
-            return [], False
+            return [], False, 0.0
 
         # 从 authority 获取全部注入
         raw_injections = self._authority.injection_for(agent_id)
@@ -421,6 +432,7 @@ class ContextCompiler:
 
         slots: list[InjectionSlot] = []
         tokens_used = 0
+        demand_tokens = 0  # N4-4：需求 token（含被预算跳过者），hysteresis 数据源
         pending_consolidation = False
 
         for inj in fixed_injections:
@@ -436,6 +448,7 @@ class ContextCompiler:
 
             content = inj.content
             tok = _estimate_tokens(content)
+            demand_tokens += tok
 
             if tokens_used + tok > self._fixed_memory_tokens:
                 # 固定预算超限：置 pending_consolidation 标志（Observe 只读，无副作用）
@@ -457,7 +470,13 @@ class ContextCompiler:
             ))
             tokens_used += tok
 
-        return slots, pending_consolidation
+        # N4-4：固定注入需求使用率（demand/budget；预算为 0 时按 1.0 记）
+        if self._fixed_memory_tokens > 0:
+            fixed_usage_ratio = demand_tokens / self._fixed_memory_tokens
+        else:
+            fixed_usage_ratio = 1.0 if demand_tokens > 0 else 0.0
+
+        return slots, pending_consolidation, fixed_usage_ratio
 
     # ------------------------------------------------------------------
     # ② 召回注入管线（priority≥10 命中 + RecallEngine）
@@ -784,7 +803,9 @@ class ContextCompiler:
         continuation: Any | None = None,
     ) -> InjectionLayout:
         """直接组装注入布局（测试/审计场景，不写 Journal）。"""
-        fixed_slots, pending_consolidation = self._build_fixed_injection(agent_id)
+        fixed_slots, pending_consolidation, fixed_usage_ratio = (
+            self._build_fixed_injection(agent_id)
+        )
         contextual_terms = self._extract_contextual_terms(agent_id, snapshot, continuation)
         recalled_slots = self._build_recalled_injection(agent_id, contextual_terms)
         return InjectionLayout(
@@ -792,4 +813,5 @@ class ContextCompiler:
             recalled_slots=recalled_slots,
             context_sections={},
             pending_consolidation=pending_consolidation,
+            fixed_usage_ratio=fixed_usage_ratio,
         )

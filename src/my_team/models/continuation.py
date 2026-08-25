@@ -37,6 +37,7 @@ class ContinuationPhase(str, Enum):
     WAITING_FOR_EXTERNAL = "waiting_for_external"  # T9: awaiting outbound op
     PROCESSING_RESULT = "processing_result"  # Processing a received result
     READY_TO_DECIDE = "ready_to_decide"  # Ready for next decision
+    CONSOLIDATING = "consolidating"  # 记忆整理模式（N4-4，SPEC §4.4）
     COMPLETED = "completed"            # Task completed
     FAILED = "failed"                  # Task failed
 
@@ -62,6 +63,11 @@ class AgentContinuation(BaseModel):
         default=0,
         ge=0,
         description="Version of the context snapshot used in last activation",
+    )
+    # N4-4 整理模式（CONSOLIDATING）：进入前记住被打断的相位，退出后恢复
+    resume_phase: ContinuationPhase | None = Field(
+        default=None,
+        description="进入 CONSOLIDATING 前被打断的相位（退出后恢复，续上被打断的工作）",
     )
 
     # Pending external operation (if any)
@@ -184,6 +190,43 @@ class AgentContinuation(BaseModel):
         """Mark continuation as failed."""
         self.phase = ContinuationPhase.FAILED
         self._log("failed", reason=reason, tick=tick)
+
+    # ------------------------------------------------------------------
+    # N4-4 整理模式 CONSOLIDATING（SPEC §4.4 / N4_MEMORY_INJECTION_DESIGN §5）
+    # ------------------------------------------------------------------
+
+    def enter_consolidating(self, tick: int) -> None:
+        """进入 CONSOLIDATING：记住被打断的相位。
+
+        相位迁移在 decide/act（写路径）；Observe 只读消费
+        pending_consolidation 标志，不在此迁移。
+
+        会话标记 = ``resume_phase``：会话跨越 CONSOLIDATING /
+        WAITING_FOR_LLM / PROCESSING_RESULT / READY_TO_DECIDE 等相位
+        （响应处理期 phase 为 PROCESSING_RESULT，finalize 后回落
+        READY_TO_DECIDE），resume_phase 在会话期间持续置位。重复进入
+        （resume_phase 已置位）为 no-op。
+        """
+        if self.phase == ContinuationPhase.CONSOLIDATING or self.resume_phase is not None:
+            return
+        self.resume_phase = self.phase
+        self.phase = ContinuationPhase.CONSOLIDATING
+        self._log("enter_consolidating", resume_phase=self.resume_phase.value, tick=tick)
+
+    def exit_consolidating(self, tick: int) -> None:
+        """退出 CONSOLIDATING：恢复被打断的相位（resume_phase）。
+
+        退出路径：agent 自决（MemoryConsolidateIntent exit）或预算回落
+        阈值下（hysteresis）。以会话标记（resume_phase）判定——处理完
+        整理响应后 phase 可能已回落 READY_TO_DECIDE，仍须正确恢复
+        resume_phase。非会话中调用为 no-op（resume_phase 为 None ⟺
+        不在整理会话）。
+        """
+        if self.resume_phase is None:
+            return
+        self.phase = self.resume_phase
+        self.resume_phase = None
+        self._log("exit_consolidating", resumed_phase=self.phase.value, tick=tick)
 
     def _log(self, event: str, **kwargs: Any) -> None:
         """Append to event log."""

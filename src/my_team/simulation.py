@@ -62,6 +62,7 @@ from my_team.budget import (
     estimate_llm_usage,
 )
 from my_team.calendar import CalendarStore, ScheduleAction, ScheduleRule
+from my_team.consolidation import MEMORY_TOOL_NAMES, ConsolidationGate
 from my_team.context_compiler import ContextCompiler
 from my_team.credential_store import CredentialStore
 from my_team.devices.authority import Authority, new_team_id
@@ -112,6 +113,7 @@ from my_team.models.intent import (
     DelegateIntent,
     FailTaskIntent,
     Intent,
+    MemoryConsolidateIntent,
     SendEmailIntent,
     SubmitLLMRequest,
     SubmitToolRequest,
@@ -380,7 +382,24 @@ class Simulation:
 
         # Tool registry (N1b: attached to the Authority — authorization
         # goes through two-layer Grants, §3.5/§5.1)
-        self._tool_registry = ToolRegistry(authority=self._authority)
+        # N4-4：相位提供器——CONSOLIDATING 会话期间（resume_phase 置位）
+        # 授权集动态收窄为记忆工具集（工具面收窄，SPEC §4.4）。会话标记
+        # 而非单相位值：会话跨越 CONSOLIDATING / WAITING_* /
+        # PROCESSING_RESULT / READY_TO_DECIDE 等相位，收窄须覆盖整个
+        # 会话（_agent_runtime_states 在 _initialize 填充，lambda 惰性求值）。
+        self._tool_registry = ToolRegistry(
+            authority=self._authority,
+            phase_provider=lambda agent_id: (
+                (
+                    ContinuationPhase.CONSOLIDATING
+                    if self._agent_runtime_states[agent_id].continuation.resume_phase
+                    is not None
+                    else self._agent_runtime_states[agent_id].continuation.phase
+                )
+                if agent_id in self._agent_runtime_states
+                else None
+            ),
+        )
 
         # Pending operation registry (v0.6.0 — async LLM/tool tracking)
         self._pending_ops = PendingOperationRegistry()
@@ -485,6 +504,9 @@ class Simulation:
             cfg.agent_id: RecallEngine() for cfg in self._agent_tree
         }
 
+        # N4-4 整理模式：CONSOLIDATING 进出判定（hysteresis 进 90%/出 80%）
+        self._consolidation_gate = ConsolidationGate()
+
         # T6: ContextCompiler for role-aware observation assembly
         self._context_compiler = ContextCompiler(
             agent_tree=self._agent_tree,
@@ -556,8 +578,11 @@ class Simulation:
 
             # N1b 初始授予集 = 基础工具 ∪ config 声明的工具（白名单载体
             # 已废除，config.tools 仅作初始授予集来源；N3 场景包可替换）。
+            # N4-4：记忆工具集并入初始授予集（记忆归属 agent 自身；
+            # CONSOLIDATING 下授权集收窄为记忆工具集——工具面收窄只在
+            # 相位门内收紧，不做相位外额外放宽）。
             declared = frozenset(agent_config.tools or [])
-            grant_tools = _BASE_GRANT_TOOLS | declared
+            grant_tools = _BASE_GRANT_TOOLS | declared | MEMORY_TOOL_NAMES
             self._tool_registry.declare_tools(agent_id, grant_tools)
 
             # Create agent runtime
@@ -733,6 +758,14 @@ class Simulation:
             make_handle_run_tests,
             make_handle_write,
         )
+        from my_team.memory_tools import (
+            make_handle_memory_edit,
+            make_handle_memory_evict,
+            make_handle_memory_fold,
+            make_handle_memory_pin,
+            make_handle_memory_promote,
+            make_handle_memory_retag,
+        )
 
         manifests = builtin_manifests()
         handlers = {
@@ -789,6 +822,39 @@ class Simulation:
             # §5.7 TaskTree tool (N1c-2: handler moved here; device
             # subclassing deferred to N1c-4)
             "delegate": self._task_tree.make_handle_delegate(),
+            # N4-4 记忆工具集（CONSOLIDATING 工具面收窄目标；归属 Agent
+            # 引擎数据面，经 memory_tools 工厂接线）
+            "memory_fold": make_handle_memory_fold(
+                agent_memories=self._agent_memories,
+                recall_engines=self._recall_engines,
+                transaction_buffer=self._transaction_buffer,
+            ),
+            "memory_promote": make_handle_memory_promote(
+                agent_memories=self._agent_memories,
+                recall_engines=self._recall_engines,
+                transaction_buffer=self._transaction_buffer,
+            ),
+            "memory_edit": make_handle_memory_edit(
+                agent_memories=self._agent_memories,
+                recall_engines=self._recall_engines,
+                transaction_buffer=self._transaction_buffer,
+            ),
+            "memory_retag": make_handle_memory_retag(
+                agent_memories=self._agent_memories,
+                recall_engines=self._recall_engines,
+                transaction_buffer=self._transaction_buffer,
+            ),
+            "memory_evict": make_handle_memory_evict(
+                agent_memories=self._agent_memories,
+                recall_engines=self._recall_engines,
+                transaction_buffer=self._transaction_buffer,
+            ),
+            "memory_pin": make_handle_memory_pin(
+                agent_memories=self._agent_memories,
+                recall_engines=self._recall_engines,
+                recall_configs=self._recall_configs,
+                transaction_buffer=self._transaction_buffer,
+            ),
         }
         for name, handler in handlers.items():
             self.register_tool(manifests[name], handler)
@@ -2751,6 +2817,9 @@ class Simulation:
                 lock_states=compiled.get("lock_states", {}),
                 private_workspace_path=compiled.get("private_workspace_path", ""),
                 pending_human_actions=list(self._pending_human_actions.get(agent_id, [])),
+                # N4-3 注入布局元数据（Observe 只读消费；N4-4 CONSOLIDATING
+                # 预算触发数据源：pending_consolidation + fixed_usage_ratio）
+                memory_injection=compiled.get("memory_injection", {}),
             )
         return observations
 
@@ -2778,6 +2847,36 @@ class Simulation:
             obs = observations.get(agent_id)
             if obs:
                 continuation = self._agent_runtime_states[agent_id].continuation
+                # N4-4：CONSOLIDATING 预算触发/回落（hysteresis 进 90%/
+                # 出 80%）。Observe 只读消费 pending_consolidation 与
+                # fixed_usage_ratio，相位迁移在 decide/act（写路径）。
+                # 会话标记 = continuation.resume_phase（会话跨越
+                # CONSOLIDATING / WAITING_* / PROCESSING_RESULT 等相位）。
+                # 有未处理的 LLM/工具结果时先处理结果（PROCESSING_RESULT
+                # 优先），不抢占结果处理路径。
+                pending_result = (
+                    continuation.phase == ContinuationPhase.PROCESSING_RESULT
+                    and bool(continuation.last_llm_result or continuation.last_tool_result)
+                )
+                if not pending_result:
+                    mi = obs.memory_injection or {}
+                    in_session = continuation.resume_phase is not None
+                    if (
+                        not in_session
+                        and self._consolidation_gate.should_enter(
+                            pending_consolidation=mi.get("pending_consolidation", False),
+                            usage_ratio=mi.get("fixed_usage_ratio", 0.0),
+                            active_intent=False,
+                        )
+                    ):
+                        continuation.enter_consolidating(tick)
+                    elif (
+                        in_session
+                        and self._consolidation_gate.should_exit(
+                            usage_ratio=mi.get("fixed_usage_ratio", 0.0),
+                        )
+                    ):
+                        continuation.exit_consolidating(tick)
                 intents[agent_id] = runtime.decide_intents(
                     obs,
                     continuation=continuation,
@@ -3230,6 +3329,70 @@ class Simulation:
                     )
                     continue
 
+                # N4-4：MemoryConsolidateIntent → CONSOLIDATING 相位迁移
+                # （写路径）。enter：置相位（下 tick 生效，本 tick 的 LLM
+                # 请求已在 Observe 后定型）；exit：结构化摘要写入 MemoryEntry
+                # （provenance 记整理来源）+ 恢复 resume_phase（被打断的
+                # 工作立即续上）。会话标记 = resume_phase（处理完整理响应
+                # 后 phase 可能已回落 READY_TO_DECIDE）。
+                if isinstance(intent, MemoryConsolidateIntent):
+                    runtime_state = self._agent_runtime_states.get(agent_id)
+                    cont = runtime_state.continuation if runtime_state else None
+                    if intent.action == "enter":
+                        if cont is not None and cont.resume_phase is None:
+                            cont.enter_consolidating(tick)
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=True,
+                                result_data={
+                                    "phase": (
+                                        cont.phase.value if cont is not None else "unknown"
+                                    ),
+                                },
+                            )
+                        )
+                    elif intent.action == "exit":
+                        if cont is not None and cont.resume_phase is not None:
+                            if intent.structured_summary:
+                                try:
+                                    self._write_consolidation_summary(
+                                        agent_id,
+                                        intent.structured_summary,
+                                        tick,
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    results.append(
+                                        ActionResult(
+                                            action=action,
+                                            success=False,
+                                            error="摘要写入失败",
+                                        )
+                                    )
+                                    continue
+                            cont.exit_consolidating(tick)
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=True,
+                                result_data={
+                                    "phase": (
+                                        cont.phase.value if cont is not None else "unknown"
+                                    ),
+                                },
+                            )
+                        )
+                    else:
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=f"未知 memory_consolidate action: {intent.action}",
+                                error_code="INVALID_ARGUMENT",
+                            )
+                        )
+                    continue
+
                 # WaitForEventIntent → agent waits for specific event
                 if isinstance(intent, WaitForEventIntent):
                     if runtime_state:
@@ -3317,6 +3480,35 @@ class Simulation:
             all_results[agent_id] = results
 
         return all_results
+
+    # -- N4-4 整理模式辅助 ------------------------------------------------
+
+    def _write_consolidation_summary(
+        self,
+        agent_id: str,
+        summary_dict: dict[str, Any],
+        tick: int,
+    ) -> None:
+        """把 CONSOLIDATING 结构化摘要写入 AgentMemory（Journal effect）。
+
+        摘要作为 MemoryEntry（type=skill）写入，provenance 记整理来源
+        （consolidation_origin）；索引同步（摘要条目可被链接词召回）。
+        """
+        from my_team.consolidation import ConsolidationSummary, write_summary_entry
+
+        summary = ConsolidationSummary.model_validate(summary_dict)
+        store = self._agent_memories.get(agent_id)
+        engine = self._recall_engines.get(agent_id)
+        if store is None or engine is None:
+            raise RuntimeError(f"agent {agent_id} 无记忆子系统（未接线）")
+        write_summary_entry(
+            store,
+            engine,
+            summary,
+            agent_id=agent_id,
+            tick=tick,
+            buffer=self._transaction_buffer,
+        )
 
     def _phase_validate(
         self,

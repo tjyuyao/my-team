@@ -22,12 +22,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from my_team.consolidation import MEMORY_TOOL_NAMES
 from my_team.devices.authority import Authority
 from my_team.devices.base import Device, EntityKind, RegisteredEntity
+from my_team.models.continuation import ContinuationPhase
 from my_team.models.intent import (
     AcceptTaskIntent,
     CompleteTaskIntent,
@@ -163,8 +165,16 @@ class ToolRegistry:
     e2e 行为；未声明者永不自动授予）。
     """
 
-    def __init__(self, authority: Authority | None = None) -> None:
+    def __init__(
+        self,
+        authority: Authority | None = None,
+        phase_provider: Callable[[str], "ContinuationPhase | None"] | None = None,
+    ) -> None:
         self._authority = authority
+        # N4-4：相位提供器（agent_id → 当前 ContinuationPhase，None=未知）。
+        # CONSOLIDATING 相位下授权集动态收窄为记忆工具集（工具面收窄，
+        # SPEC §4.4 —— 授权集本就是动态求值，零新机制）。
+        self._phase_provider = phase_provider
         # 兼容回退（无 authority 的裸注册表）：agent_id → 工具名集合。
         self._agent_tools: dict[str, frozenset[str]] = {}
         self._tool_handlers: dict[str, Any] = {}
@@ -213,14 +223,27 @@ class ToolRegistry:
         """agent 当前被授权（两层 Grant，§3.5）的工具名集合。
 
         deny-by-default：未注册实体 / 无授予的工具不出现。
+
+        N4-4（工具面收窄）：CONSOLIDATING 相位下授权集切换为记忆工具集
+        （SPEC §4.4）——LLM 只见记忆工具定义，杜绝整理期间调用业务工具。
         """
         if self._authority is not None:
-            return frozenset(
+            granted = frozenset(
                 name
                 for name, entity_id in self._tool_entities.items()
                 if self._authority.authorize(agent_id, entity_id).allowed
             )
-        return self._agent_tools.get(agent_id, frozenset())
+        else:
+            granted = self._agent_tools.get(agent_id, frozenset())
+        if self._consolidation_restricts(agent_id):
+            return granted & MEMORY_TOOL_NAMES
+        return granted
+
+    def _consolidation_restricts(self, agent_id: str) -> bool:
+        """是否处于 CONSOLIDATING 相位（授权集收窄为记忆工具集）。"""
+        if self._phase_provider is None:
+            return False
+        return self._phase_provider(agent_id) == ContinuationPhase.CONSOLIDATING
 
     def capability_for(self, tool_name: str) -> str | None:
         """工具名 → 受控 capability uuid（未注册返回 None，§5.1）。"""
@@ -365,7 +388,13 @@ class ToolRegistry:
         无 uuid（manifest 缺失）→ 兼容回退 context.allowed_tools
         （Simulation 构造的 context 不含该字段 → 生产路径 deny-by-default）。
         裸注册表：旧式 ``_agent_tools`` 记录。
+
+        N4-4（工具面收窄）：CONSOLIDATING 相位下只允许记忆工具集，
+        其余工具一律拒绝（执行侧防绕行，与 authorized_tools 渲染侧一致）。
         """
+        if self._consolidation_restricts(context.agent_id):
+            if tool_name not in MEMORY_TOOL_NAMES:
+                return False
         if self._authority is not None:
             entity_id = self._tool_entities.get(tool_name)
             if entity_id is not None:
@@ -661,6 +690,8 @@ def action_plan_to_intents(plan: ActionPlan) -> list[Intent]:
             "read", "ls",
             "kb_read", "kb_list", "kb_search",  # v0.10 T8a
             "kb_write", "kb_create",
+            # N4-4 记忆工具集（CONSOLIDATING 整理动作 → SubmitToolRequest）
+            *MEMORY_TOOL_NAMES,
         }:
             intents.append(SubmitToolRequest(
                 agent_id=plan.agent_id,

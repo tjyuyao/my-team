@@ -502,6 +502,41 @@ class RecallEngine:
         return effect
 
     # ------------------------------------------------------------------
+    # N4-4 整理模式：memory_pin 固定条目（防召回降级）
+    # ------------------------------------------------------------------
+
+    def apply_pin_effect(
+        self,
+        config: RecallConfig,
+        entry: MemoryEntry,
+        buffer: TransactionBuffer,
+        agent_id: str,
+    ) -> StagedEffect:
+        """固定条目（memory_pin），产生 MEMORY_PIN effect（可回滚）。
+
+        语义（SPEC §4.4）：把条目的 title + memory_points 并入可控
+        查询词（persistent_query_terms，去重）——触发词常驻查询空间，
+        条目每 tick 必被召回，防召回降级（detail 降级属另一预算机制）。
+
+        invert_data 记录固定前的可控查询词列表，支持 rollback_pin_effect。
+        """
+        terms = [t for t in ([entry.title] + list(entry.memory_points)) if t]
+        before = list(config.persistent_query_terms)
+        added = [t for t in terms if t not in before]
+        effect = buffer.stage(
+            effect_type=EffectType.MEMORY_PIN,
+            agent_id=agent_id,
+            resource=f"recall_config:{agent_id}:pin:{entry.entry_id}",
+            data={
+                "entry_id": str(entry.entry_id),
+                "added_terms": added,
+            },
+        )
+        effect.invert_data["recall_config_before"] = before
+        config.persistent_query_terms = before + added
+        return effect
+
+    # ------------------------------------------------------------------
     # 回滚支持
     # ------------------------------------------------------------------
 
@@ -529,3 +564,15 @@ class RecallEngine:
         if added:
             added_set = set(added)
             config.temp_overrides = [t for t in config.temp_overrides if t not in added_set]
+
+    @staticmethod
+    def rollback_pin_effect(
+        config: RecallConfig,
+        effect: StagedEffect,
+    ) -> None:
+        """回滚 MEMORY_PIN effect（恢复固定前的可控查询词列表）。"""
+        if effect.effect_type != EffectType.MEMORY_PIN:
+            return
+        before = effect.invert_data.get("recall_config_before")
+        if before is not None:
+            config.persistent_query_terms = list(before)

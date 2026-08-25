@@ -49,6 +49,8 @@ class EffectType(str, Enum):
     # N4-2 召回引擎 effect
     MEMORY_RECALL_CONFIG = "memory_recall_config"  # 策略调整：更新可控查询词（持久）
     MEMORY_RECALL = "memory_recall"  # 主动回忆：写入临时召回策略（一次性，延迟 1 tick 生效）
+    # N4-4 整理模式 effect
+    MEMORY_PIN = "memory_pin"  # 固定条目：并入可控查询词（防召回降级）
 
 
 # Effect types that have external (non-in-memory) side effects.
@@ -198,6 +200,14 @@ INVERT_CONTRACT: dict[EffectType, InvertSpec] = {
         recorded=(
             "temp_overrides_added: 写入 recall_config.temp_overrides 的词列表；"
             "逆操作=从 temp_overrides 移除这些词（一次性，下 tick 消费后自动清空）"
+        ),
+    ),
+    # N4-4 整理模式 effect 逆操作
+    EffectType.MEMORY_PIN: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded=(
+            "recall_config_before: 固定前的可控查询词列表；逆操作=恢复原列表"
+            "（移除 memory_pin 并入的条目标题/触发器词）"
         ),
     ),
 }

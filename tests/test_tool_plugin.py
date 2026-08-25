@@ -192,12 +192,13 @@ class TestPluginHandlerContext:
 class TestGeneratedToolDefinitions:
     def test_all_builtins_generated(self) -> None:
         manifests = builtin_manifests()
-        assert len(manifests) == 17  # 15 + record_upsert/record_delta (T10)
+        # 17 = 15 + record_upsert/record_delta (T10)；+6 = N4-4 记忆工具集
+        assert len(manifests) == 23
         templates = PromptTemplates()
         tools = templates.render_tool_definitions(
             frozenset(manifests), manifests=manifests,
         )
-        assert len(tools) == 17
+        assert len(tools) == 23
         assert {t.name for t in tools} == set(manifests)
         for t in tools:
             m = manifests[t.name]

@@ -382,12 +382,17 @@ class TestSimulation:
 
     def test_root_agent_restricted(self, sample_agent_tree):
         """N1b：root 的可用工具由初始授予集（两层 Grant）决定，不再按
-        role 内置白名单（§5.1）。"""
+        role 内置白名单（§5.1）。N4-4：记忆工具集并入初始授予集。"""
         sim = Simulation(agent_tree=sample_agent_tree)
         root_runtime = sim._runtimes["agent.root"]
         assert isinstance(root_runtime, RootAgent)
         assert sim._tool_registry.authorized_tools("agent.root") == frozenset(
-            {"read", "write", "ls", "delegate"},
+            {
+                "read", "write", "ls", "delegate",
+                # N4-4 记忆工具集（记忆归属 agent 自身）
+                "memory_fold", "memory_promote", "memory_edit",
+                "memory_retag", "memory_evict", "memory_pin",
+            },
         )
         assert not sim._tool_registry.can_use("agent.root", "send_email")
 

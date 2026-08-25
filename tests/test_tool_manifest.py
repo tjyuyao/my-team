@@ -317,6 +317,9 @@ class TestBuiltinManifests:
             "python_compute", "python_transform",
             "kb_read", "kb_list", "kb_search",  # v0.10 T8a
             "record_upsert", "record_delta",   # v0.10 T10
+            # N4-4 记忆工具集（CONSOLIDATING 工具面收窄目标）
+            "memory_fold", "memory_promote", "memory_edit",
+            "memory_retag", "memory_evict", "memory_pin",
         }
 
     def test_execution_classes(self) -> None:

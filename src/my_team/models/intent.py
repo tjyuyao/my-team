@@ -43,6 +43,8 @@ class IntentType(str, Enum):
     # N4-2 召回引擎 intent
     MEMORY_RECALL = "memory_recall"           # 主动回忆（临时召回策略，延迟 1 tick 生效）
     MEMORY_RECALL_CONFIG = "memory_recall_config"  # 更新可控查询词（持久影响召回）
+    # N4-4 整理模式 intent
+    MEMORY_CONSOLIDATE = "memory_consolidate"  # 主动发起/自决退出 CONSOLIDATING（不限于预算满）
 
 
 class Intent(BaseModel):
@@ -301,4 +303,39 @@ class MemoryRecallConfigIntent(Intent):
     # 新的可控查询词列表（完全替换）
     persistent_query_terms: list[str] = Field(
         description="新的可控查询词列表（持久，完全替换旧值）",
+    )
+
+
+class MemoryConsolidateIntent(Intent):
+    """Intent: 主动发起 / 自决退出记忆整理（memory_consolidate，N4-4）。
+
+    CONSOLIDATING 的**主动触发**通道——agent 不限于预算满即可发起
+    整理（SPEC §4.4 / N4_MEMORY_INJECTION_DESIGN §5）：
+    - action="enter"：主动发起整理 → 框架置 CONSOLIDATING 相位
+      （记 resume_phase，退出后恢复）；
+    - action="exit"：自决退出 → 框架恢复 resume_phase，并（若携带
+      structured_summary）把结构化摘要作为 MemoryEntry 写入
+      （provenance 记整理来源）。
+
+    相位迁移在 decide/act（写路径）：enter 从下 tick 生效（本 tick 的
+    LLM 请求已在 Observe 之后定型），exit 当 tick 生效。
+    """
+
+    intent_type: IntentType = Field(
+        default=IntentType.MEMORY_CONSOLIDATE,
+        init=False,
+    )
+    action: str = Field(
+        default="enter",
+        description="'enter'=主动发起整理；'exit'=自决退出",
+    )
+    reason: str = Field(
+        default="",
+        description="主动触发说明（如 budget pressure / manual）",
+    )
+    # CONSOLIDATING 结构化摘要（exit 时携带；框架写入 MemoryEntry，
+    # provenance 记整理来源，见 consolidation.make_summary_entry）
+    structured_summary: dict[str, Any] | None = Field(
+        default=None,
+        description="结构化摘要（反思/经验/流程优化/记忆链接 + assigner_ref/kpi_ref 预留）",
     )

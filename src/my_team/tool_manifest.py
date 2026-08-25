@@ -822,6 +822,148 @@ def builtin_manifests() -> dict[str, ToolManifest]:
         reversible=True,
         max_output_bytes=100_000,
     )
+    # ------------------------------------------------------------------
+    # N4-4 记忆工具集（CONSOLIDATING 工具面收窄目标，SPEC §4.4）。
+    # STAGED_MUTATION：内核执行，动作 = Journal effect（可审计可回滚）。
+    # 记忆归属 Agent 引擎（§4.2），工具面声明 device_id 为空（内核直管）。
+    # ------------------------------------------------------------------
+    memory_fold = ToolManifest(
+        name="memory_fold",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Fold a memory entry's version chain into one condensed "
+                    "entry (consolidation)",
+        input_schema={
+            "entry_id": {"type": "string", "description": "Entry to fold"},
+            "content_text": {"type": "string",
+                             "description": "Condensed content text"},
+            "title": {"type": "string", "description": "New title (optional)"},
+            "memory_points": {"type": "array", "items": {"type": "string"},
+                              "description": "New trigger words (optional)"},
+        },
+        required_inputs=("entry_id", "content_text"),
+        output_schema={"entry_id": {"type": "string"},
+                       "version": {"type": "integer"}},
+        capabilities=("memory:fold",),
+        effect_types=(EffectType.MEMORY_ENTRY_FOLD,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,
+        reversible=True,
+    )
+    memory_promote = ToolManifest(
+        name="memory_promote",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Promote an entry/note into a long-term skill entry "
+                    "(optionally linked to a task result as provenance)",
+        input_schema={
+            "entry_id": {"type": "string",
+                         "description": "Source entry to promote (optional)"},
+            "title": {"type": "string", "description": "Skill title (optional)"},
+            "sop_text": {"type": "string", "description": "SOP text (optional)"},
+            "applies_to": {"type": "array", "items": {"type": "string"},
+                           "description": "Applicable scenarios"},
+            "memory_points": {"type": "array", "items": {"type": "string"},
+                              "description": "Trigger words"},
+            "task_id": {"type": "string",
+                        "description": "Task id for result provenance"},
+            "outcome": {"type": "string",
+                        "description": "Outcome label (completed/failed/...)"},
+            "note": {"type": "string", "description": "Provenance note"},
+        },
+        required_inputs=(),
+        output_schema={"entry_id": {"type": "string"},
+                       "version": {"type": "integer"}},
+        capabilities=("memory:promote",),
+        effect_types=(EffectType.MEMORY_ENTRY_WRITE,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,
+        reversible=True,
+    )
+    memory_edit = ToolManifest(
+        name="memory_edit",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Edit a memory entry (appends a new immutable version)",
+        input_schema={
+            "entry_id": {"type": "string", "description": "Entry to edit"},
+            "content_text": {"type": "string",
+                             "description": "New content text (optional)"},
+            "title": {"type": "string", "description": "New title (optional)"},
+            "memory_points": {"type": "array", "items": {"type": "string"},
+                              "description": "New trigger words (optional)"},
+        },
+        required_inputs=("entry_id",),
+        output_schema={"entry_id": {"type": "string"},
+                       "version": {"type": "integer"}},
+        capabilities=("memory:edit",),
+        effect_types=(EffectType.MEMORY_ENTRY_WRITE,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,
+        reversible=True,
+    )
+    memory_retag = ToolManifest(
+        name="memory_retag",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Retag a memory entry (maintain its trigger words, "
+                    "appends a new version)",
+        input_schema={
+            "entry_id": {"type": "string", "description": "Entry to retag"},
+            "memory_points": {"type": "array", "items": {"type": "string"},
+                              "description": "New trigger words (full replace)"},
+        },
+        required_inputs=("entry_id", "memory_points"),
+        output_schema={"entry_id": {"type": "string"},
+                       "version": {"type": "integer"}},
+        capabilities=("memory:retag",),
+        effect_types=(EffectType.MEMORY_ENTRY_WRITE,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,
+        reversible=True,
+    )
+    memory_evict = ToolManifest(
+        name="memory_evict",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Evict a memory entry from the working set (removes "
+                    "from store; journal effect is reversible)",
+        input_schema={
+            "entry_id": {"type": "string", "description": "Entry to evict"},
+        },
+        required_inputs=("entry_id",),
+        output_schema={"entry_id": {"type": "string"}},
+        capabilities=("memory:evict",),
+        effect_types=(EffectType.MEMORY_ENTRY_EVICT,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,
+        reversible=True,
+    )
+    memory_pin = ToolManifest(
+        name="memory_pin",
+        version="1.0.0",
+        execution_class=ExecutionClass.STAGED_MUTATION,
+        description="Pin a memory entry: merge its title and trigger words "
+                    "into the controlled query terms (protect from recall "
+                    "degradation)",
+        input_schema={
+            "entry_id": {"type": "string", "description": "Entry to pin"},
+        },
+        required_inputs=("entry_id",),
+        output_schema={"entry_id": {"type": "string"},
+                       "added_terms": {"type": "array"}},
+        capabilities=("memory:pin",),
+        effect_types=(EffectType.MEMORY_PIN,),
+        filesystem_scopes=("none",),
+        deterministic=True,
+        idempotent=False,
+        reversible=True,
+    )
     return {
         m.name: m
         for m in (
@@ -830,6 +972,8 @@ def builtin_manifests() -> dict[str, ToolManifest]:
             python_compute, python_transform,
             kb_read, kb_list, kb_search,
             record_upsert, record_delta,
+            memory_fold, memory_promote, memory_edit,
+            memory_retag, memory_evict, memory_pin,
         )
     }
 
