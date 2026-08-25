@@ -58,6 +58,18 @@
 - **KB**（Knowledge Base，知识库）：SharedKB 的简称，见 §5.2。
 - **ACL**（Access Control List，访问控制列表）：主体 = position（§3.5/§5.1）。
 - **API**（Application Programming Interface，应用程序接口）：见 §10。
+- **Maintainer**（框架维护方）：My-Team 框架的作者/维护/咨询/托管方——
+  框架层设计与架构决策的主体；位于实例之外（OPEN_ISSUE
+  extension-surface-spec 四类人角色表；旧称 Provider，2026-08-25
+  消歧改名）。
+- **Owner**（Deployment 所有者）：个体户老板，人类一等参与者、
+  最终决策人（§1.0 目标 5）；Authority 安装/替换权归 Owner
+  （§5.1）；审计员 = Owner 本人或其指定 kind=human 成员（审计制）。
+- **Customer**：个体户的客户；Contact，非组织成员，经 ingress 交互。
+- **Human Member**：个体户的人类员工；组织树 kind=human 的 Agent
+  （Manager/Worker）。
+- **Provider**（外部服务提供方）：MCP Provider（§5.11）、LLM 供应商
+  （§4.6）、外部平台（ProviderAdmission）——与 Maintainer 不同义。
 
 后续章节使用缩写时不再重复全称；遇到未定义的缩写视为文档缺陷，
 应在审阅中指出补齐。

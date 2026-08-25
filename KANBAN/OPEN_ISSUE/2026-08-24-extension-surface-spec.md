@@ -9,10 +9,10 @@ source: SPEC §6 ToolPlugin / §11 场景包 / §12 安全 / §16 演进
 **Opened:** 2026-08-18
 **Status:** OPEN — 持续讨论中
 
-> **【决策 2026-08-24】扩展信任模型改审计制**（Owner 裁定）：可执行
+> **【决策 2026-08-24】扩展信任模型改审计制**（Maintainer 裁定）：可执行
 > 内容只要可审计即可；安全由**审计员**（Owner 或其指定 Human Member）
 > 事后负责；本项目扩展**无分发期**（一客一实例，无包市场）。本文及
-> 各卡中「B 类仅 Provider 安装 + 签名」「配置包不得携带可执行能力」
+> 各卡中「B 类仅 Maintainer 安装 + 签名」「配置包不得携带可执行能力」
 > 的信任论证就此作废；三类资产区分保留，语义改为「校验深度 + 审计
 > 要求」；声明诚实性（未申报可执行条目加载即拒）与运行时沙箱/
 > deny-by-default 不变。权威表述见
@@ -67,7 +67,7 @@ Owner 需要 My-Team 适配新的、多样且"脏"的真实业务场景，同时
 
 | 术语 | 是谁 | 在系统中的位置 |
 |---|---|---|
-| Provider | My-Team 维护/咨询/托管方 | 框架外，能力层大改动 + 咨询 |
+| Maintainer | My-Team 维护/咨询/托管方（旧称 Provider，2026-08-25 消歧改名） | 框架外，能力层大改动 + 咨询 |
 | Owner | 个体户老板，Deployment 所有者 | 人类一等参与者，最终决策 |
 | Customer | 个体户的客户 | Contact，非组织成员，经 ingress 交互 |
 | Human Member | 个体户的人类员工 | 组织树 kind=human 的 Agent（Manager/Worker） |
@@ -254,7 +254,7 @@ root 生成/改写的是**数据**（ProcessDef/roles/org_tree），非代码—
 3. 生成物强制走发布层校验 + 审计 + 可回滚。
 
 「流程生成器」（管理学知识库 + LLM）本身是能力层的一个 Skill：初期作 root 的
-受控工具（`propose_process` / `publish_process`），成熟后抽离为 Provider 托管服务。
+受控工具（`propose_process` / `publish_process`），成熟后抽离为 Maintainer 托管服务。
 
 ## 方向：朝 AGI
 
@@ -304,7 +304,7 @@ delegate 动作时查、escalation 不转移 ownership 在 effect 层保证）�
 - [ ] 声明式谓词的表达能力上限，何时必须引用能力层函数
 - [x] Authority 收敛为 8 域（含 method）+ composition 三档 + unresolved 语义 —— v1 待确认
 - [ ] transient 临时工的授权/记忆/工作区精确边界
-- [ ] 能力层放权梯度的判断边界（哪些脚本可放权、哪些必须 Provider）
+- [ ] 能力层放权梯度的判断边界（哪些脚本可放权、哪些必须 Maintainer）
 - [ ] 与 SPEC §6 ToolPlugin / §11 场景包 / Skill 的术语对齐与合并
 - [ ] 【落地·已展开】配置包静态校验器（职责边界见正文「静态校验器」节）：五类检查 + 校验器本身属闭包 + 四条不变量静态那半
 - [ ] 【落地·已暂存】Authority 解析算法：context 匹配 / composition 求值 / escalation 触发
