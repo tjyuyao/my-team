@@ -116,5 +116,5 @@ LLM 设备是设备进程，它经 application 事件承接 llm_request 并产�
 ## 当前实现行为（临时方案，未定稿）
 
 - provider 由工厂在设备进程内创建（HTTP 客户端不可跨进程 pickle）。
-- 设备串行处理请求，其余在 inbox 排队（并发 = 1）。
+- 设备按请求方（source）分桶：同一请求方串行保序，不同请求方并行处理。
 - 凭据经环境变量 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` 注入。

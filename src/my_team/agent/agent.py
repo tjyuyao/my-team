@@ -1,12 +1,18 @@
 """Agent：react 循环的认知主体（内心自持：记忆与决策都在进程内）。
 
 模型：
-- 唯一状态 = memory（append-only 记忆条目，事件即条目）。
-- 事件到来 → 反应：事件入记忆 → 决策 → 产出事件。永远如此。
-- 无会话/对话/requester 概念：上下文与回填目标都从记忆恢复。
-- 工作记忆映射：决策时把记忆映射为 wire 消息发给 LLM 设备。
-- 工具调用串行执行：llm_result 带多个 tool_calls 时逐个发出，
-  下一个由"记忆推断"（比较 llm_result 条目与已执行的 bash_result）触发。
+- 状态 = messages（工作记忆，append-only）+ memory（精炼层，条目组织）。
+  事件 append 到 messages（为 input cache rate）；决策时从精炼层
+  召回的知识增量 append 到 messages 末尾。
+- 事件到来 → 反应：事件转消息 append → 决策 → 产出事件。永远如此。
+- 无会话/对话/requester 概念：发起者从 messages 条目恢复（触发条目
+  带 source 元数据，LLM 设备协议忽略未知字段）。
+- 工具 = 精炼层的 type=tool 条目（设备记忆注入的结果）：tools= 每次
+  从条目动态生成；tool_call 按条目 associated 分发到设备。
+- 一次只执行一个工具调用。
+- 整理模式（CONSOLIDATING）：messages 超预算或收到整理意图时进入
+  整理回合——tools 收窄为记忆工具集（memory_fold），多轮工具调用
+  在本地执行，直到 LLM 不再调用工具，整理完成。
 """
 
 from __future__ import annotations
@@ -16,40 +22,68 @@ from uuid import uuid4
 from my_team.device.llm import LLM_REQUEST, LLM_RESULT
 from my_team.kernel.process import Process
 
-BASH_TOOL = {
-    "name": "bash",
-    "description": "执行 shell 命令，返回输出与退出码。",
+MEMORY_FOLD_TOOL = {
+    "name": "memory_fold",
+    "description": "把历史折叠为一段结构化摘要（保留任务目标、已完成动作、"
+                    "关键结论与待办）。整理完成后不要再调用工具。",
     "parameters": {
         "type": "object",
-        "properties": {"command": {"type": "string"}},
-        "required": ["command"],
+        "properties": {"summary": {"type": "string", "description": "折叠后的摘要"}},
+        "required": ["summary"],
     },
 }
 
+WORK_SYSTEM = ("你是工作 Agent。需要执行命令时调用 bash 工具，"
+               "拿到结果后继续，直到完成任务。")
+CONSOLIDATE_SYSTEM = ("你是整理者。把当前历史折叠为一段结构化摘要（memory_fold），"
+                      "摘要须保留任务目标、已完成动作、关键结论与待办。"
+                      "整理完成后不再调用工具。")
+
 AGENT_RESULT = "agent_result"
-MAX_MESSAGES = 30  # 工作记忆映射上限（防止记忆无限膨胀）
+CONSOLIDATED = "consolidated"
+MAX_MESSAGES = 30  # 预算阈值：超过即进入整理回合
 
 
 class Agent(Process):
-    def __init__(self, emit, llm_pid, bash_pid, *, model):
-        super().__init__(emit)
+    def __init__(self, emit, llm_pid, model, *, seed_tools=None):
+        super().__init__(emit, 1)  # Agent 串行处理消息
         self.llm_pid = llm_pid
-        self.bash_pid = bash_pid
         self.model = model
-        self.memory = []  # append-only 记忆条目
+        self.messages = []  # 工作记忆（append-only）
+        self.consolidating = False  # 整理回合标志
+        self.memory = [self._tool_entry(t) for t in (seed_tools or [])]  # 精炼层
 
     # ---- react 循环 ----
 
-    def respond(self, event):
-        self._remember(event)
+    async def respond(self, event):
+        self._append(event)
         return self._react(event)
 
-    def _remember(self, event):
-        self.memory.append({
-            "entry_id": str(uuid4()),
-            "source": event["source"],
-            "payload": event["payload"],
-        })
+    def _append(self, event):
+        """事件 → wire 消息 append。触发条目附带 source 元数据（恢复发起者）。"""
+        payload = event["payload"]
+        command = payload.get("command")
+        if command == LLM_RESULT:
+            self.messages.append({
+                "role": "assistant",
+                "content": payload.get("content") or "",
+                "tool_calls": payload.get("tool_calls") or [],
+                "ok": payload.get("ok"),
+                "error": payload.get("error"),
+            })
+        elif command == "bash_result":
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": payload.get("tool_call_id") or "",
+                "content": payload.get("content") or "",
+                "is_error": not payload.get("ok"),
+            })
+        else:  # 触发事件
+            self.messages.append({
+                "role": "user",
+                "content": payload.get("content", ""),
+                "source": event["source"],
+            })
 
     def _react(self, event):
         command = event["payload"].get("command")
@@ -57,98 +91,110 @@ class Agent(Process):
             return self._on_llm_result()
         if command == "bash_result":
             return self._on_tool_result()
-        return self._ask_llm()  # 触发事件：开始工作
+        if command == "consolidate":
+            self.consolidating = True
+        return self._ask_llm()
 
-    # ---- 决策：工作记忆 → LLM ----
+    # ---- 精炼层：工具条目 ----
+
+    def _tool_entry(self, tool):
+        return {
+            "entry_id": str(uuid4()),
+            "type": "tool",
+            "content": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
+            },
+            "trigger": list(tool.get("trigger") or []),
+            "priority": tool.get("priority", 10),
+            "associated": list(tool["associated"]),
+            "version": 1,
+            "links": [],
+            "deleted_at": None,
+        }
+
+    def _tools_for_llm(self):
+        """tools= 从工具条目动态生成（未删除的 type=tool 条目）。"""
+        return [e["content"] for e in self.memory
+                if e["type"] == "tool" and e.get("deleted_at") is None]
+
+    def _dispatch(self, tool_call):
+        """tool_call.name → 查工具条目 → associated 设备 → 构造该设备协议事件。"""
+        name = tool_call.get("name")
+        entry = next(
+            (e for e in self.memory
+             if e["type"] == "tool" and e["content"]["name"] == name
+             and e.get("deleted_at") is None),
+            None,
+        )
+        if entry is None:
+            return {"target": "void", "kind": "application",
+                    "payload": {"command": "unknown_tool", "name": name}}
+        device_pid = entry["associated"][0]
+        return {
+            "target": device_pid,
+            "kind": "application",
+            "payload": {
+                "command": "bash_run",  # 设备协议事件，由设备 PROTOCOL 定义
+                "cmd": (tool_call.get("arguments") or {}).get("command", ""),
+                "tool_call_id": tool_call.get("id"),
+            },
+        }
+
+    # ---- 决策 ----
 
     def _ask_llm(self):
+        if not self.consolidating and len(self.messages) > MAX_MESSAGES:
+            self.consolidating = True  # 预算触发整理回合
         return {
             "target": self.llm_pid,
             "kind": "application",
             "payload": {
                 "command": LLM_REQUEST,
                 "model": self.model,
-                "system": "你是工作 Agent。需要执行命令时调用 bash 工具，"
-                          "拿到结果后继续，直到完成任务。",
-                "messages": self._map_messages(),
-                "tools": [BASH_TOOL],
+                "system": CONSOLIDATE_SYSTEM if self.consolidating else WORK_SYSTEM,
+                "messages": self.messages[-MAX_MESSAGES:],
+                "tools": [MEMORY_FOLD_TOOL] if self.consolidating else self._tools_for_llm(),
             },
         }
 
-    def _map_messages(self):
-        """工作记忆映射：记忆条目 → wire 消息（最近 MAX_MESSAGES 条）。"""
-        messages = []
-        for entry in self.memory[-MAX_MESSAGES:]:
-            payload = entry["payload"]
-            command = payload.get("command")
-            if command == LLM_RESULT:
-                messages.append({
-                    "role": "assistant",
-                    "content": payload.get("content") or "",
-                    "tool_calls": payload.get("tool_calls") or [],
-                })
-            elif command == "bash_result":
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": payload.get("tool_call_id") or "",
-                    "content": payload.get("content") or "",
-                    "is_error": not payload.get("ok"),
-                })
-            else:  # 触发事件：作为 user 消息
-                messages.append({"role": "user", "content": payload.get("content", "")})
-        return messages
-
-    # ---- 分支 ----
-
     def _on_llm_result(self):
-        last = self.memory[-1]["payload"]
+        last = self.messages[-1]
         if not last.get("ok"):
+            self.consolidating = False
             return self._finish(ok=False, error=last.get("error") or "llm failed")
         tool_calls = last.get("tool_calls") or []
         if not tool_calls:
+            if self.consolidating:
+                self.consolidating = False  # 整理回合完成
+                return {"target": "void", "kind": "application",
+                        "payload": {"command": CONSOLIDATED}}
             return self._finish(ok=True, content=last.get("content") or "")
-        return self._bash_run(tool_calls[0])  # 串行：先发第一个
+        call = tool_calls[0]  # 一次一个工具调用
+        if call.get("name") == "memory_fold":
+            return self._apply_fold(call)
+        return self._dispatch(call)
 
     def _on_tool_result(self):
-        pending = self._pending_tool_calls()
-        if pending:
-            return self._bash_run(pending[0])
-        return self._ask_llm()  # 全部执行完，回填 LLM 继续决策
+        return self._ask_llm()  # 工具结果回填 messages，继续决策
 
-    # ---- 记忆推断 ----
+    # ---- 记忆工具（本地执行） ----
 
-    def _pending_tool_calls(self):
-        """最近的 llm_result 条目中尚未执行的 tool_calls。"""
-        done = {
-            e["payload"].get("tool_call_id") for e in self.memory
-            if e["payload"].get("command") == "bash_result"
-        }
-        for entry in reversed(self.memory):
-            payload = entry["payload"]
-            if payload.get("command") == LLM_RESULT:
-                return [c for c in (payload.get("tool_calls") or [])
-                        if c.get("id") not in done]
-        return []
-
-    def _work_start_source(self):
-        """工作起点：记忆中第一个非设备产出条目的来源（回填 target）。"""
-        for entry in self.memory:
-            if entry["payload"].get("command") not in (LLM_RESULT, "bash_result"):
-                return entry["source"]
-        return self.memory[0]["source"] if self.memory else None
+    def _apply_fold(self, call):
+        """memory_fold：历史折叠为摘要，替换 messages。"""
+        summary = (call.get("arguments") or {}).get("summary", "") or "(folded)"
+        requester = self._work_start_source()
+        folded = len(self.messages)
+        self.messages = [{"role": "user", "content": summary, "source": requester}]
+        self.messages.append({
+            "role": "tool",
+            "tool_call_id": call.get("id"),
+            "content": f"已折叠 {folded} 条历史为摘要。",
+        })
+        return self._ask_llm()  # 继续整理回合
 
     # ---- 产出 ----
-
-    def _bash_run(self, tool_call):
-        return {
-            "target": self.bash_pid,
-            "kind": "application",
-            "payload": {
-                "command": "bash_run",
-                "cmd": (tool_call.get("arguments") or {}).get("command", ""),
-                "tool_call_id": tool_call.get("id"),
-            },
-        }
 
     def _finish(self, *, ok, content=None, error=None):
         requester = self._work_start_source()
@@ -162,3 +208,10 @@ class Agent(Process):
                 "error": error,
             },
         }
+
+    def _work_start_source(self):
+        """发起者：最近的触发条目（user 消息带 source 元数据）。"""
+        for message in reversed(self.messages):
+            if message.get("source") is not None:
+                return message["source"]
+        return None

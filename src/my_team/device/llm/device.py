@@ -10,11 +10,9 @@
 - llm_result：{command, ok, content, tool_calls?, usage?, error?}
   target 回填请求方 pid。
 
-设备串行处理请求：一次一个 in-flight，其余在 inbox 排队（排队不拒绝）。
+设备按请求方（source）分桶：同一请求方串行保序，不同请求方并行。
 provider 由工厂在进程内懒创建（httpx 客户端不可跨进程 pickle）。
 """
-
-import asyncio
 
 from my_team.device.llm.vendor.types.messages import (
     AssistantMessage,
@@ -38,19 +36,19 @@ LLM_RESULT = "llm_result"
 class LLMDevice(Process):
     """LLM 服务进程：收 llm_request 事件，调用 provider，产出 llm_result。"""
 
-    def __init__(self, emit, provider_factory, poll_interval=0.05):
-        super().__init__(emit, poll_interval=poll_interval)
+    def __init__(self, emit, provider_factory, max_concurrent_sources):
+        super().__init__(emit, max_concurrent_sources)
         self.provider_factory = provider_factory
         self._provider = None
 
-    def respond(self, event: dict) -> dict:
+    async def respond(self, event: dict) -> dict:
         if event["payload"].get("command") != LLM_REQUEST:
             return {"target": event["source"], "kind": "application",
                     "payload": _result_error(
                         f"unexpected command: {event['payload'].get('command')!r}")}
         if self._provider is None:
             self._provider = self.provider_factory()
-        result = asyncio.run(self._call(self._provider, event["payload"]))
+        result = await self._call(self._provider, event["payload"])
         return {"target": event["source"], "kind": "application", "payload": result}
 
     async def _call(self, provider, payload: dict) -> dict:
