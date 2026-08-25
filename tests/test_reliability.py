@@ -1,6 +1,6 @@
 """Tests for Phase 5: Reliability mechanisms.
 
-Covers: timeout/retry, lock lease, deterministic replay.
+Covers: timeout/retry, lock lease, crash guard.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -10,7 +10,6 @@ import pytest
 from my_team.audit import AuditEventType, AuditLog
 from my_team.models.task import TaskStatus
 from my_team.reliability import (
-    DeterministicReplay,
     FailureType,
     RetryManager,
     RetryPolicy,
@@ -190,70 +189,3 @@ class TestTimeoutChecker:
         assert len(entries) == 1
         assert entries[0].details["failure_type"] == "timeout"
 
-
-# ---------------------------------------------------------------------------
-# DeterministicReplay
-# ---------------------------------------------------------------------------
-
-class TestDeterministicReplay:
-    def test_save_and_get_state(self):
-        dr = DeterministicReplay()
-        dr.save_tick_state(0, {"agents": {"a": "idle"}})
-        state = dr.get_tick_state(0)
-        assert state == {"agents": {"a": "idle"}}
-
-    def test_save_and_get_actions(self):
-        dr = DeterministicReplay()
-        actions = [{"agent_id": "a", "action_type": "write"}]
-        dr.save_tick_actions(0, actions)
-        assert dr.get_tick_actions(0) == actions
-
-    def test_verify_determinism_match(self):
-        dr = DeterministicReplay()
-        state = {"tick": 0, "data": "x"}
-        dr.save_tick_state(0, state)
-        assert dr.verify_determinism(0, {"tick": 0, "data": "x"})
-
-    def test_verify_determinism_mismatch(self):
-        dr = DeterministicReplay()
-        dr.save_tick_state(0, {"tick": 0, "data": "x"})
-        assert not dr.verify_determinism(0, {"tick": 0, "data": "y"})
-
-    def test_verify_determinism_no_previous(self):
-        dr = DeterministicReplay()
-        assert dr.verify_determinism(999, {"anything": True})
-
-    def test_resolve_conflicts_deterministic(self):
-        dr = DeterministicReplay()
-        actions = [
-            {"agent_id": "agent.b", "action_type": "write"},
-            {"agent_id": "agent.a", "action_type": "read"},
-            {"agent_id": "agent.a", "action_type": "write"},
-        ]
-        resolved = dr.resolve_conflicts(actions)
-        assert resolved[0]["agent_id"] == "agent.a"
-        assert resolved[0]["action_type"] == "read"
-        assert resolved[1]["agent_id"] == "agent.a"
-        assert resolved[1]["action_type"] == "write"
-        assert resolved[2]["agent_id"] == "agent.b"
-
-    def test_is_tick_immutable(self):
-        dr = DeterministicReplay()
-        assert not dr.is_tick_immutable(0)
-        dr.save_tick_state(0, {"data": True})
-        assert dr.is_tick_immutable(0)
-
-    def test_finalized_ticks(self):
-        dr = DeterministicReplay()
-        dr.save_tick_state(2, {})
-        dr.save_tick_state(0, {})
-        dr.save_tick_state(1, {})
-        assert dr.finalized_ticks == [0, 1, 2]
-
-    def test_state_isolation(self):
-        """Saved state should be a copy, not a reference."""
-        dr = DeterministicReplay()
-        original = {"data": [1, 2, 3]}
-        dr.save_tick_state(0, original)
-        original["data"].append(4)
-        assert dr.get_tick_state(0)["data"] == [1, 2, 3]

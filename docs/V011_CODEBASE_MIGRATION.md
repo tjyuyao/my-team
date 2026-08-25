@@ -11,6 +11,14 @@
 > ②「RecordStore 删 ledger」暂缓（见 §4.1 裁决项 1）；③ Authority 从
 > 「布线+裁决」改为「布线+注入，不裁决」，裁决下放设备（§3.5/§5.1）。
 > 文中「重放」「删 ledger」字样按此理解，不再逐行改写。
+>
+> **更新注记（2026-08-25，恢复机制裁撤）**：N6「恢复与对账」**裁撤**
+> （见 KANBAN/DONE/2026-08-25-pending-outbox-recovery.md）——恢复/
+> 重放/对账机制不做（日志可复盘，不做时间机）。本文中「接 N6」「落位
+> N6」「世界记忆设备（Journal 重放模型）替代」等字样**作废**：Journal
+> 保持 simulation 层现状（append-only + `_collect_state/_restore_state`
+> 状态快照持久化），outbox/pending_ops 维持现状（运行时重试/生命周期，
+> 无恢复入口），世界记忆设备接口层不建。不再逐行改写。
 
 ## 0. 审计方法
 
@@ -77,9 +85,9 @@
 | task_tree.py | 任务树 | 拆解：position/Authority 接点（细粒度按 position 求值） | N1/N5 |
 | models/task.py | 任务模型 | 适配：归 Task 设备（N5 接点字段） | N1/N5 |
 | models/email.py | 邮件模型 | 适配：补 HUMAN_APPROVAL_REQUEST | N1/N3/N5 |
-| journal.py（部分） | 内存 TickJournal | 持久化/查询归世界记忆设备（SQLite 落 N6） | N1/N6 |
-| outbox.py | 出站队列 | 状态机留内核、投影/Egress 归设备；entry_id 去 uuid4 | N6 |
-| pending_ops.py | op 注册表 | 内核逻辑保留、恢复/对账归设备（restore_seen_requests 雏形） | N6 |
+| journal.py（部分） | 内存 TickJournal | 写入/回滚留内核（契约 §3.2）；**保持现状**（世界记忆设备接口层裁撤，恢复机制随 N6 裁撤） | N1 |
+| outbox.py | 出站队列 | 状态机留内核；**保持现状**（运行时重试保留；恢复/对账入口随 N6 裁撤；entry_id 去 uuid4 记 P1） | — |
+| pending_ops.py | op 注册表 | 内核逻辑保留；**保持现状**（恢复/对账状态机随 N6 裁撤；restore_seen_requests 现状保留） | N1 |
 | ingress.py | 入站缓冲 | 保留（外部世界设备 §5.11，结构已对齐） | T17/N1 |
 | integration.py | 平台适配器 | 保留+适配（补 webhook_endpoint；rate_limit 背压归此） | T17/N1 |
 | models/agent.py | AgentConfig（含旧字段） | **重构**：删 role/tools/parent-children/SharedKBPermission；PoolConfig 保留 | N2/N3 |
@@ -112,7 +120,7 @@
 |---|---|
 | 十阶段 `_phase_*`（run_tick/ingest/schedule/observe/decide/validate/act/commit/publish/dispatch/audit） | **内核 K**（保留，§3.1） |
 | `_register_tool_handlers`（~830 行工具处理器注册） | **各设备工具面**：按设备域拆出（KB/Record/Asset/Mail/Task/私密区/凭证/集成），经 ToolPlugin API 向 Authority 注册 |
-| `_collect_state`/`_restore_state`（~350 行全量状态序列化） | **世界记忆设备**（Journal 重放模型）替代；过渡期保留（N6 依赖） |
+| `_collect_state`/`_restore_state`（~350 行全量状态序列化） | **保持现状**（状态快照持久化即终态；世界记忆设备/Journal 重放模型不建，N6 已裁撤） |
 | `_plugin_handles`（v0.10 T7） | **设备句柄注入**（已是雏形，直接演进） |
 | `register_tool` | **ToolPlugin API**（§5.1，加 device_id/capability 注册到 Authority） |
 | 白名单接线 4 处（L3640 ToolContext.allowed_tools / L4007、L4053 按名检查 / L4766 dispatch 上下文） | **两层 Grant 求值**（∃position：Grant(agent,position) ∧ Grant(position,entity_id) ∧ 锁） |
@@ -123,8 +131,9 @@
 **迁移顺序建议**（与 N1a/N1b/N1c 实施对齐）：
 1. 先立设备协议与 Authority（新代码，不动旧路径）→ 2. 白名单废除
    （simulation 4 接线点 + agent_runtime/llm_agent/prompt_templates）→
-   3. 工具处理器按域拆设备 → 4. 状态序列化/持久化归位（N6 衔接）→
-   5. 其余（日历/WorkerPool/AuditLog 投影）。
+   3. 工具处理器按域拆设备 → 4. 其余（日历/WorkerPool/AuditLog 审计化）。
+   （2026-08-25：原「状态序列化/持久化归位（N6 衔接）」**取消**——
+   N6 裁撤，`_collect_state/_restore_state` 保持现状。）
 
 ## 3. 测试影响面（迁移冲击评估）
 

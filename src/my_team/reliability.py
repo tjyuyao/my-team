@@ -10,7 +10,6 @@ Per SPEC §14:
 
 from __future__ import annotations
 
-import copy
 from collections import deque
 from datetime import datetime
 from enum import Enum
@@ -458,86 +457,3 @@ class CrashGuard:
         """Re-arm after an explicit human resume. The sliding window is
         kept — old crashes age out naturally (窗口继续滑动)."""
         self._triggered = False
-
-
-class DeterministicReplay:
-    """In-memory snapshot storage and deterministic conflict ordering.
-
-    Per SPEC §2.3, §18.8. Guarantees are limited to:
-
-    **Within scope (deterministic):**
-    - In-memory state snapshots per tick
-    - Conflict resolution ordering (by agent_id + effect_id)
-    - Fixed action inputs producing fixed outputs
-
-    **Outside scope (NOT guaranteed):**
-    - Cross-process replay (no serialization)
-    - LLM output replay (no LLM integration yet)
-    - File system state consistency (external to in-memory)
-    - Thread scheduling determinism (single-threaded)
-    - Random number reproducibility (no seed control)
-    - Network/external service responses
-
-    To achieve full replay, the following must also be saved:
-    initial state, tick duration config, mail delivery schedule,
-    agent observations, action plans, tool results, random seeds,
-    commit decisions.
-    """
-
-    def __init__(self) -> None:
-        self._snapshots: dict[int, dict[str, Any]] = {}
-        self._action_log: dict[int, list[dict[str, Any]]] = {}
-
-    def save_tick_state(self, tick: int, state: dict[str, Any]) -> None:
-        """Save the state snapshot for a tick (deep copy)."""
-        self._snapshots[tick] = copy.deepcopy(state)
-
-    def get_tick_state(self, tick: int) -> dict[str, Any] | None:
-        """Get the saved state for a tick."""
-        return self._snapshots.get(tick)
-
-    def save_tick_actions(self, tick: int, actions: list[dict[str, Any]]) -> None:
-        """Save the actions taken during a tick."""
-        self._action_log[tick] = list(actions)
-
-    def get_tick_actions(self, tick: int) -> list[dict[str, Any]]:
-        """Get the actions taken during a tick."""
-        return list(self._action_log.get(tick, []))
-
-    def verify_determinism(
-        self,
-        tick: int,
-        new_state: dict[str, Any],
-    ) -> bool:
-        """Verify that a tick's execution is deterministic.
-
-        Compares new_state against saved snapshot.
-        Returns True if they match (deterministic).
-        """
-        saved = self._snapshots.get(tick)
-        if saved is None:
-            return True  # no previous run to compare against
-        return saved == new_state
-
-    def resolve_conflicts(
-        self,
-        actions: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Resolve conflicting actions deterministically.
-
-        Sorts by agent_id then action_type for consistent ordering,
-        regardless of the order actions were produced.
-        """
-        return sorted(
-            actions,
-            key=lambda a: (a.get("agent_id", ""), a.get("action_type", "")),
-        )
-
-    def is_tick_immutable(self, tick: int) -> bool:
-        """Check if a tick has been finalized (saved)."""
-        return tick in self._snapshots
-
-    @property
-    def finalized_ticks(self) -> list[int]:
-        """List of ticks that have been finalized."""
-        return sorted(self._snapshots.keys())

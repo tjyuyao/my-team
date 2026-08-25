@@ -19,7 +19,8 @@
   §5.8/§11）——违反则拒绝且不落状态、不入 Journal；
 - **组织调整全程入 Journal**（审计、可回滚）：``journal_sink`` 接口
   预留——现有 TickJournal 在 simulation 层（tick 粒度），设备侧不
-  直接持有；N1c 世界记忆设备接口层落地时把 sink 接到真实 Journal；
+  直接持有；世界记忆设备接口层已裁撤（2026-08-25），sink 维持预留
+  （审计经 AuditLog 落 Journal）；
 - **可替换**：``register=False`` 候选 + ``replace``（直派 Authority →
   组织架构，同一接口，§5.8/§4.1；朴素系统不装本设备也能直派）。
 
@@ -63,8 +64,8 @@ class OrgChange:
 
     设备侧统一审计载荷；``OrgStructure.journal_sink`` 为预留接口——
     现有 TickJournal 在 simulation 层（tick 粒度），设备侧不直接持有；
-    N1c 世界记忆设备接口层落地时把 sink 接到真实 Journal（审计、
-    可回滚，§3.2/§5.9）。
+    世界记忆设备接口层已裁撤（2026-08-25），sink 维持预留（测试中
+    接线，生产未接；组织调整审计经 AuditLog 落 Journal，§3.2/§5.8）。
     """
 
     op: str
@@ -671,7 +672,8 @@ class OrgStructure(Authority):
         self._registry[entity_id] = updated
 
     # ------------------------------------------------------------------
-    # Journal 审计（接口预留：N1c 世界记忆设备接口层落地时接真实 Journal）
+    # Journal 审计（接口预留：世界记忆设备接口层已裁撤，sink 维持预留；
+    # 审计经 AuditLog 落 Journal，§3.2/§5.8）
     # ------------------------------------------------------------------
 
     def _record(self, change: OrgChange) -> None:

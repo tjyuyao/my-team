@@ -352,9 +352,9 @@ class Simulation:
             lock_manager=self._lock_manager,
         )
 
-        # T10: RecordStore (typed records + ledger) & AssetStore
+        # T10: RecordStore (typed records) & AssetStore
         # (content-addressed binaries) — in-memory; SQLite persistence
-        # and Journal integration are future work.
+        # is future work.
         self._record_store = RecordStore()
         self._asset_store = AssetStore()
 

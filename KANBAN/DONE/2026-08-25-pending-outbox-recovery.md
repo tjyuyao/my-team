@@ -1,5 +1,6 @@
 ---
 kind: task
+status: rejected
 phase: v0.11 post-agent
 source: 原 E3；SPEC §3.2/§8.2/§6.4；三态收敛（2026-08-24）
 priority: high
@@ -7,19 +8,22 @@ priority: high
 
 # 恢复与对账：pending op 生命周期 + outbox 恢复 + unknown/对账
 
+> **否决（2026-08-25）**：裁撤。恢复/重放/对账属于「事后层」（重建/
+> 补偿/时间机），与主功能（Agent 工具 + 记忆 + 扩展接缝）正交，且
+> 从未实现（outbox 只有运行时重试，pending_ops 无 unknown/恢复
+> 状态）。原则：**日志可复盘，不做时间机**——Journal 只做
+> append-only 记录（§3.2），审计/对账/重放/恢复等派生视图不做
+> （见 OPEN_ISSUE journal-projections）。保留项：幂等去重
+> （发信前查账本，防重复发送）、运行时重试、save_state/load_state
+> （持久化基础设施）。outbox `_make_key` 的 uuid4 随机后缀问题
+> 记入 P1 backlog（幂等键稳定化，恢复机制回归前修复）。
+
 
 ## 目标
 闭合三处可靠性缺口：①"不得跨 tick 孤儿 op"与"异步 op 天然跨 tick"
 的矛盾；②Commit 成功 → Publish 前崩溃的故障窗口（Journal 已记录
 但外部调用未发送/重复发送）；③外部不可逆操作崩溃后误判为失败
 （请求可能已在平台侧生效）。
-
-> **注记（2026-08-25）**：「统一 Journal 投影化」（把 pending/outbox/
-> 审计/KPI 全部变为 Journal 重放派生）**暂缓**，见 OPEN_ISSUE
-> journal-projections。本卡保留运行正确性部分：pending op 七绑定 +
-> outbox 恢复 + 稳定幂等键 + `unknown` 不自动重复 + 外部不可逆的
-> 补偿/对账。**「对账」作为完整 Journal 投影层后移**，不影响本卡的
-> 崩溃恢复与幂等交付。
 
 ## 要求 / 规则
 - **改措辞**：禁止的是"无归属、无生命周期、无恢复语义的孤儿 op"，

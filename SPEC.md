@@ -94,13 +94,14 @@
 5. **人类是一等参与者**：人类可以是 Owner、Worker、Approver；
    人类任务与审批走与 AI 相同的事务路径。
 6. **单一事实源**：所有状态变更写入统一 TickJournal（世界记忆
-   设备，§3.2）——append-only 账本。审计/回放/对账/恢复等派生视图
-   暂缓实现（见 OPEN_ISSUE journal-projections）。
+   设备，§3.2）——append-only 账本。**日志可复盘，不做时间机**：
+   审计/回放/对账/恢复等派生视图暂缓或裁撤（见 OPEN_ISSUE
+   journal-projections）。
 7. **三态内核（2026-08-24 收敛）**：系统分三类——**内核（纯逻辑，
    可带配置，零业务数据）**：时间引擎（tick/十阶段/事务回滚逻辑/
    审计逻辑）、效果级策略求值（deny-by-default/预算/epoch/身份
    注入）、ACL 主体（position 本体）、执行真理（执行器分级/沙箱/受限
-   解释器/锁原语）、认知真理（注入状态空间，重建=Journal 投影）、
+   解释器/锁原语）、认知真理（注入状态空间，记录入 Journal）、
    Human UI
    框架、闭包不变量校验；**设备（数据 + 读写工具 + ACL + 锁）**：
    基础设备（KB/邮箱/Record/Asset/Credential）、Task 设备、组织
@@ -111,7 +112,7 @@
    事件、op 结果、LLM 响应）消费前已落在设备/agent 缓冲中，属 S
    而非 K 的额外输入（§2.1）；K 确定（计算纯：无副作用地算出
    下一状态与 effect 列表；副作用由 Publish/执行侧执行），Journal
-   记录缓冲内容与 effect 使投影/审计成立；org = core + devices + agents；
+   记录缓冲内容与 effect 使审计成立；org = core + devices + agents；
    业务场景不修改内核（§2.1）。
 8. **ACL 主体 = position；Authority 是唯一的注册与布线设备
    （2026-08-24 收敛；2026-08-25 降权——只布线+注入，不裁决）**：
@@ -152,7 +153,7 @@
   #   在设备/agent 的缓冲里（IngressBuffer、pending 结果槽、收件
   #   箱）——它们是 S 的一部分，不是 K 的额外输入；Ingest 阶段
   #   只消费缓冲（§3.1 阶段 1）
-  # K 确定；Journal 记录缓冲内容与 effect ⇒ 投影/审计成立
+  # K 确定；Journal 记录缓冲内容与 effect ⇒ 审计成立
 ```
 
 - **内核（§3）**：纯逻辑——**不持有状态**，每 tick 从设备与 agent
@@ -210,7 +211,7 @@
 | Journal（世界记忆设备） | §3.2/§5.9 |
 | 权限：position / Authority / Grant | §1.8/§3.5/§5.1 |
 | 执行器分级 / 沙箱 / 受限解释器 | §3.4 |
-| 记忆 / 注入 / 整理模式 / 可重建 | §4.2–4.4/§3.6 |
+| 记忆 / 注入 / 整理模式（记录入 Journal） | §4.2–4.4/§3.6 |
 | Agent | §4.1；岗位/边语义（Authority 子类） | §5.8；ACL/Authority | §3.5/§5.1 |
 | 设备清单与协议 | §5 |
 | 任务 / 委派 / 审批 | §6 |
@@ -277,7 +278,7 @@
 - Commit 成功后 Journal 提交；rollback 时 Journal 标记 aborted。
 - Journal 是 append-only 账本，记录一切，是单一事实源；不设「确定
   性重放」这一设计不变量（向人类社会学习：记录而非重放）。审计/
-  对账/重放/恢复/KPI 等**派生视图（投影）暂缓实现**（见 OPEN_ISSUE
+  对账/重放/恢复/KPI 等**派生视图（投影）暂缓或裁撤**（见 OPEN_ISSUE
   journal-projections）。
 - 持久化：Journal 落 SQLite（或后续的追加文件）。
 
@@ -297,14 +298,15 @@
   effect 照常提交，不回滚世界。group 原子性在局部失败时同样成立：
   成员整体 FAILED，已应用的成员逐个逆操作撤销。
 - 外部副作用不可回滚：LLM 成本、平台 API 已生效写入。此类操作
-  必须声明 `reversible=false` 并走补偿/对账路径（§6.4）。
+  必须声明 `reversible=false`，如实记 FAILED 并审计（幂等键防
+  重复，§3.4）。
 
 ### 3.4 执行真理：执行器分级、沙箱与受限解释器
 
 执行器分级：TRUSTED_IN_PROCESS / UNTRUSTED_OUT_OF_PROCESS /
 SANDBOXED_OUT_OF_PROCESS；并增加：
 
-- 出站工具（EXTERNAL_IRREVERSIBLE）必须提供幂等键与状态回查；
+- 出站工具（EXTERNAL_IRREVERSIBLE）必须提供幂等键（防重复执行）；
 - 平台级 Admission：按 Integration 的 rate_limit 与健康状态背压；
 - **受限执行器族**：受限 python 模组（与谓词 L1 同边界：无网络/
   无时钟/无随机/固定 I/O，§6 谓词体系见 legacy §8 注；bash 脚本
@@ -357,7 +359,7 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
   设备职责（§5.1）；Agent 写作范围无身份字段——不可伪造是结构性
   保证（§9）。
 
-### 3.6 认知真理：注入状态空间（可重建，Journal 投影）
+### 3.6 认知真理：注入状态空间（记录入 Journal）
 
 ```text
 状态 S   = (注入布局, 召回策略配置含可控查询词, 条目状态快照)
@@ -365,11 +367,11 @@ SANDBOXED_OUT_OF_PROCESS；并增加：
 ```
 
 - T 是确定函数；策略调整、主动回忆、条目写入/整理均为 Journal effect
-  ⇒ **注入序列可从 Journal 重建**（"当时它看到了什么"可审计）；
+  ⇒ **注入序列完整入 Journal**（"当时它看到了什么"可审计复盘）；
 - 控制面 = 三类 effect：调默认召回策略（持久）、主动回忆（临时）、
   条目管理（写/迁移/触发器/整理）。记忆本体见 §4.2–4.4。
 - **注（2026-08-25 重放降级）**：「可重建」是 append-only Journal 的
-  派生视图，**暂缓实现**（见 OPEN_ISSUE journal-projections），不是
+  派生视图，**暂缓或裁撤**（见 OPEN_ISSUE journal-projections），不是
   「确定性重放」这一设计不变量。现实世界不可两次踏入同一条河流——
   My-Team 记录（账本），不承诺重放（时间机），向人类社会学习（§3.2）。
 
@@ -582,7 +584,7 @@ Agent 进入**记忆整理模式**——取代 harness 的固定总结提示词�
 - 凭证经 CredentialStore（§5.5），密钥不进 Journal/审计/prompt；
 - 调用非阻塞：SubmitLLMRequest → pending op → 结果续延（§3.1）；
 - 真实 LLM API 接入验证 = v0.12（§12 路线图）；`fake_llm` 保留为
-  单元/回放后端。
+  单元测试后端。
 
 ---
 
@@ -599,7 +601,7 @@ Agent 进入**记忆整理模式**——取代 harness 的固定总结提示词�
   Ingress/Integration 设备（§5.11）。
 
 - **设备不维护账本**：设备只持当前状态（effect 应用直接改状态），
-  投影/重建源唯一 = Journal（§3.2/§5.9）；设备构建轻便，不涉及账本
+  Journal 是唯一事实源（§3.2/§5.9）；设备构建轻便，不涉及账本
   维护；
 - **身份落字段是设备职责**：设备工具把调用上下文身份（agent_id +
   position_ref，由内核构造的 ToolContext 绑定）落为自己的数据字段
@@ -671,8 +673,8 @@ sim.register_tool(
 - 所有变更走 effect；CommitValidate 检查记录级不变量
   （库存非负、单号唯一、金额合法、到期日合法）。
 - **不维护设备账本**：设备只持当前状态（effect 应用直接改状态）；
-  投影/重建源唯一 = Journal（§3.2/§5.9）；审计/对账/重建从 Journal
-  推导（重建一致性由重建测试把关，v0.11 N6）。
+  审计从 Journal 推导（§3.2/§5.9）；派生视图（对账/重建等）暂缓或
+  裁撤，见 OPEN_ISSUE journal-projections。
 - **外部联系人 Contact**：服务对象不是 Agent——客户、会员、粉丝、
   供应商；`contact_id`、`platform`、`external_id`、`display_name`、
   `tags`、`segments`、`metadata`；与 Ticket/Post/Order 等 Record
@@ -777,7 +779,9 @@ Authority（不经组织架构、直接给 agent 指派 position），不改变
 ### 5.9 世界记忆设备（Journal）
 
 - Journal 的持久化与查询（§3.2 契约）；内核只含写入/回滚逻辑；
-- 审计/对账/重放/恢复/KPI 等派生视图暂缓（见 OPEN_ISSUE
+  **2026-08-25：设备接口层不做**，Journal 保持内核侧 append-only
+  记录（恢复/重放机制裁撤，见 DONE pending-outbox-recovery）；
+- 审计/对账/重放/恢复/KPI 等派生视图暂缓或裁撤（见 OPEN_ISSUE
   journal-projections）。
 
 ### 5.10 配置设备
@@ -810,7 +814,7 @@ IngressEvent:
 
 **EgressRequest**：
 - 出站请求统一为 pending op（`EXTERNAL_IRREVERSIBLE` 或
-  `EXTERNAL_SAFE` 工具），带幂等键、状态回查、补偿工具；
+  `EXTERNAL_SAFE` 工具），带幂等键（防重复执行）；
 - 出站执行器可运行在独立 worker；结果 ingest 与工具结果同路径。
 
 **Integration（外部平台适配器）**：
@@ -843,8 +847,7 @@ Integration:
 - `resources` 可映射为 KB 或 AssetStore 的只读引用；
 - **安装框架（审计制）**：Adapter 是可执行能力包，经
   `INSTALL_PACKAGE` 审计安装（§8.2：如实申报 + 安装审计 + 审计员
-  通知）；远程 HTTP 执行器的 unknown/对账语义挂接恢复与对账
-  （§6.4 注）。
+  通知）。
 
 ---
 
@@ -936,13 +939,15 @@ assigner/assignee 与（可选）deadline/验收；原任务书不变。责任�
   CredentialStore（§5.5）；HumanTask 标准化与 Authority 接入属
   v0.11（任务治理绑定）。
 
-### 6.4 知识/策略快照戳与对账
+### 6.4 知识/策略快照戳
 
-- **快照戳**：任务与决策记录其生效的 skill/tool/policy 版本（与
-  注入可重建 §3.6 联测）；新 PackageVersion 只影响新任务与新实例
-  （运行中任务不换绑），见 §8.2 版本绑定；
-- **补偿/对账**：外部不可逆副作用（§3.3）经补偿工具 + unknown/对账
-  状态闭合（v0.11 恢复与对账；幂等键稳定化）。
+- **快照戳**：任务与决策记录其生效的 skill/tool/policy 版本；新
+  PackageVersion 只影响新任务与新实例（运行中任务不换绑），见
+  §8.2 版本绑定。
+- **注（2026-08-25）**：补偿/对账（外部不可逆副作用的 unknown 状态
+  机、补偿工具、与外部平台对账）**裁撤**——日志可复盘，不做时间机
+  （§3.2/OPEN_ISSUE journal-projections）。不可逆副作用只如实记
+  FAILED + 审计，幂等键防重复（§3.3/§3.4）。
 
 ---
 
@@ -1206,8 +1211,8 @@ GET  /audit?tick=...          审计查询
       且仅人工 resume；业务失败（局部 FAILED）不计为崩溃。
 - [ ] 权限 = Grant(position) 两层授予 ∧ 锁；不存在按业务标签授权
       的路径（§1.8/§3.5/§5.1）。
-- [ ] 任一 Agent 的注入记忆序列（工作记忆布局 + 版本戳）可从 Journal
-      重建（§3.6 可重建性）。
+- [ ] 任一 Agent 的注入记忆序列（工作记忆布局 + 版本戳）完整入
+      Journal，可审计复盘（§3.6：记录而非重建）。
 - [ ] 组织架构声明的边语义不违反四条治理不变量（静态校验）。
 
 **已落地注记（2026-08-24，T16a/b/c）**：
@@ -1229,10 +1234,10 @@ GET  /audit?tick=...          审计查询
 - **v0.10 — 边界能力**：Ingress/Egress、RecordStore、AssetStore、
   ToolPlugin API、KB 读取与附件、Calendar/WorkerPool、Human Worker。
 - **v0.11 — 扩展表面 P0 语义闭合 + 场景资产**：设备化与单层授权
-  （基础设备归位 + Task 设备 + 世界记忆设备 + 配置设备 +
+  （基础设备归位 + Task 设备 + 配置设备 +
   position/Authority ACL）、岗位模型（positions/边语义/组织架构设备）、记忆与注入
   系统、任务治理绑定（HumanTask/Authority/escalation 归一）、
-  恢复与对账、资产边界（审计制）、谓词分级、静态校验器；场景包/
+  资产边界（审计制）、谓词分级、静态校验器；场景包/
   Skill/MCP 在语义闭合后交付（最小测试向量端到端闭合，内核零改动）。
 - **v0.12 — 真实 LLM API 接入验证**：llm_gateway 对接真实供应商
   （OpenAI 兼容 / Anthropic / DeepSeek 等），端到端验证
@@ -1241,7 +1246,7 @@ GET  /audit?tick=...          审计查询
 - **v0.13 — 沙箱脚本执行器（bash）**：受限执行器族扩展
   （python 模组 + bash 脚本，同 T16a 沙箱，§3.4）；脚本执行模型 +
   长驻会话复用 + max_processes 约束；v1.0 前必做。
-- **v1.0 — 一人公司可用**：成本/预算、审计与 Journal 投影重建、
+- **v1.0 — 一人公司可用**：成本/预算、审计复盘、
   五场景端到端验收；README 面向个体户的安装/托管路径。
 
 ---

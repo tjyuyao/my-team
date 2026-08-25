@@ -2,8 +2,10 @@
 
 > 2026-08-25 定稿。设计草案由设计 agent 产出，主 agent 审阅定案。
 > 对应卡：`KANBAN/TODO/2026-08-24-device-registration-adaptation.md`。
-> 目标：现有 store 归位为设备 + simulation 工具处理器拆域 + 世界记忆
-> 设备接口 + 预算/Admission/日历数据归位 + Task 设备公共数据层。
+> 目标：现有 store 归位为设备 + simulation 工具处理器拆域 + 预算/
+> Admission/日历数据归位 + Task 设备公共数据层。
+> **2026-08-25 修订**：世界记忆设备接口层**裁撤**（见 §3 注）；
+> 原 N1c-3/4/5 顺延为 N1c-3/4。
 
 ## 1. 设备归位方式（定案：改造 store 为 Device 子类）
 
@@ -35,23 +37,22 @@ manifest_hash 每次运行变化，重建/审计链断裂（test_tool_protocol �
 | 邮箱设备（§5.6） | send_email | MailDevice；mail 范围 DATA 实体 |
 | Task 设备（§5.7） | delegate（TASK_CREATE+EMAIL_SEND 组原子） | TaskDevice；EMAIL_SEND 是 effect 声明非直连 MailDevice（无跨设备直连） |
 | 资产设备（§5.4）/凭证设备（§5.5） | 无 agent 工具 | 注册设备 + DATA 实体；工具面预留 |
-| 世界记忆设备（§5.9）/Ingress（§5.11） | 无 agent 工具 | 注册设备 + DATA 实体 |
+| Journal（§3.2）/Ingress（§5.11） | 无 agent 工具 | Journal 留内核（世界记忆设备接口层裁撤，见 §3 注）；Ingress 注册设备 + DATA 实体 |
 | Integration 设备（§5.11） | 外部 EXTERNAL 工具 | IntegrationDevice 持有 rate_limits/health；admit 变设备接口 |
 | 日历设备（§7.1） | 无 agent 工具 | CalendarDevice（数据面）；算法留内核 |
 
-## 3. 世界记忆设备接口（§5.9）
+## 3. Journal 保持现状（世界记忆设备接口层裁撤）
 
-`WorldMemoryDevice(Device)` 持有 TickJournal 实例（组合）：
-- **写入/回滚逻辑留内核**（TickJournal.start_tick/finalize/AuditLog 写入不动，§3.2）；
-- 设备接口：`append(record)` / `query`/`last`/`for_tick`（只读）/ `replay()`
-  （重建入口 = Journal 投影）；`audit_projection`/`kpi_projection` 暂缓
-  （见 OPEN_ISSUE journal-projections）；`snapshot`/`restore` 过渡保留；
-- `attach_backend(backend)`：`PersistenceBackend` protocol —— N1c 实现
-  `MemoryBackend`（默认），**N6 实现 SQLiteBackend**（保存/恢复从 Journal 投影）；
-- 分界判定（验收"内核无数据直连"）：内核只做写入逻辑；**一切读**经设备
-  接口；`_collect_state/_restore_state` 不得摸 `_journal._records`（过渡：
-  入口换 `world_memory.snapshot()/restore()`，格式不变保 test_snapshot_matrix）；
-- 顺带接线：`OrgStructure.journal_sink` → 世界记忆设备（组织调整入 Journal）。
+> **2026-08-25 裁撤**：原「世界记忆设备接口」整节（WorldMemoryDevice、
+> `replay()`、SQLiteBackend、org.journal_sink 接线）**不做**——恢复/
+> 重放/对账机制随 N6 一起裁撤（见 `KANBAN/DONE/2026-08-25-pending-
+> outbox-recovery.md`）。原则：日志可复盘，不做时间机（§3.2）。
+
+Journal 现状即终态：TickJournal 在 simulation 层（内存 + `_collect_state/
+_restore_state` 状态快照持久化），append-only 记录、Commit/rollback
+标记、AuditLog 委托写入（§3.2 契约的写入/回滚逻辑本就留内核）。不设
+设备接口、不落 SQLite、不改名（`journal.py` 保留，对齐 structure-reorg
+卡）。`OrgStructure.journal_sink` 维持预留接口（测试中接线，生产未接）。
 
 ## 4. Task 设备公共数据层
 
@@ -84,18 +85,20 @@ manifest_hash 每次运行变化，重建/审计链断裂（test_tool_protocol �
 |---|---|---|---|---|
 | N1c-1 设备适配层 | store 子类化 Device + 注册受控 uuid/InjectionDecl + adopt_entity 机制 | 每设备注册 + 注入 content（测试）；存量 store 测试全绿 | N1a | 前置单独 |
 | N1c-2 工具拆域（分批） | 17 handler 按 §2 移入设备/引擎模块；`_register_tool_handlers` 瘦身 | 工具行为不变（全量绿）；manifest device_id/capability 绑定正确 | N1c-1 | **独占 simulation 该区域** |
-| N1c-3 世界记忆设备接口 | WorldMemoryDevice + collect/restore 入口替换 + org.journal_sink | 内核无数据直连；snapshot matrix 绿 | N1c-1（弱） | 与 N1c-4 并行 |
-| N1c-4 预算+Admission+日历数据 | 容量字段归位（值不变）+ IntegrationDevice + CalendarDevice | 预算拆分生效；日历数据在设备；test_budget/sla_capacity/calendar 绿 | N1c-1（弱） | 与 N1c-3 并行；与 N1c-2 错开构造区 |
-| N1c-5 Task 公共数据层 | TaskDevice + delegate 归位 | Task 树归设备；回滚语义不变（test_commit_rollback 绿） | N1c-1/2 | 建议在 3/4 之后 |
+| N1c-3 预算+Admission+日历数据 | 容量字段归位（值不变）+ IntegrationDevice + CalendarDevice | 预算拆分生效；日历数据在设备；test_budget/sla_capacity/calendar 绿 | N1c-1（弱） | 与 N1c-2 错开构造区 |
+| N1c-4 Task 公共数据层 | TaskDevice + delegate 归位 | Task 树归设备；回滚语义不变（test_commit_rollback 绿） | N1c-1/2 | 建议在 3 之后 |
 
-> **注（2026-08-25）**：原 N1c-5 的「RecordStore 删 ledger」**暂缓**——
-> 删 ledger 属 Journal 投影层（见 OPEN_ISSUE journal-projections），
-> RecordStore 现持当前状态即可，回滚维持 invert_data + ledger_ids 现状。
+> **注（2026-08-25）**：
+> - 原 N1c-3 世界记忆设备接口层**裁撤**（§3），原 N1c-4/5 顺延为
+>   N1c-3/4；
+> - 原 N1c-5 的「RecordStore 删 ledger」**暂缓**——删 ledger 属 Journal
+>   投影层（见 OPEN_ISSUE journal-projections），RecordStore 现持当前
+>   状态即可，回滚维持 invert_data + ledger_ids 现状。
 
 **simulation.py 共享文件分区**：构造区（1/4）、`_register_tool_handlers`
-（2 独占）、`_collect_state/_restore_state`（3/5）、`_phase_commit`（5）、
-`_phase_dispatch`（4）。推荐顺序：N1c-1 → N1c-2 → {N1c-3 ‖ N1c-4} →
-N1c-5；每步全量回归再放行。
+（2 独占）、`_collect_state/_restore_state`（4 保持现状）、`_phase_commit`
+（4）、`_phase_dispatch`（3）。推荐顺序：N1c-1 → N1c-2 → N1c-3 →
+N1c-4；每步全量回归再放行。
 
 ## 7. 风险清单（要点）
 
@@ -116,6 +119,8 @@ N1c-5；每步全量回归再放行。
   钩子已就绪，N1c 填好声明即被 N4 消费；
 - **N5**：Task 细粒度求值 + delegate 边语义校验 + 旧 authority.py（8 域
   裁决）集成——N1c 只铺数据/接口面；
-- **N6**：PersistenceBackend SQLite + `_collect_state` blob 换 replay()；
 - **T13**：设备注册 → org 初始化 register_to + ConfigDevice.apply_to
   （引导路径已存在）。
+- **（2026-08-25）N6 已裁撤**：原「PersistenceBackend SQLite + 
+  `_collect_state` blob 换 replay()」不再发生；`_collect_state/
+  _restore_state` 状态快照持久化即为终态。

@@ -137,14 +137,15 @@ Agent 私有态分两层：
   MEMORY_RECALL（主动回忆）/ MEMORY_ENTRY_WRITE、EVICT、FOLD（条目管理）；
 - **布局 stamp**：每 tick 每 agent 写 MEMORY_INJECTION_STAMP（紧凑格式：
   entry 引用列表 + 版本戳 = 版本元组/content hash，非内容快照）；
-  Journal 通道：N1c 世界记忆设备落地前走现有 TickJournal/audit，N6 随迁；
-- **重建函数 + 测试**：`reconstruct_injection(journal, agent_id, tick)`
-  —— 断言"Journal 重建的注入序列 == 运行时实际注入序列"（§11 验收不变
-  量直接落位）；
+  Journal 通道：走现有 TickJournal/audit（世界记忆设备接口层裁撤，
+  2026-08-25，见 DONE pending-outbox-recovery）；
+- **审计复盘**：注入序列完整入 Journal，可复盘"当时它看到了什么"
+  （§11 验收项直接落位）；**不做** `reconstruct_injection` 重建断言
+  （重建是投影层，随 N6 裁撤，2026-08-25）；
 - **重放降级（v2）**：「可重建」是 append-only Journal 的**投影**（谁
   需要谁投影），**不是「确定性重放」这一设计不变量/保证**。现实世界不可
   两次踏入同一条河流——My-Team 记录（账本），不承诺重放（时间机）。
-  派生视图（审计/对账/重放/恢复/KPI）暂缓，见 OPEN_ISSUE
+  派生视图（审计/对账/重放/恢复/KPI）暂缓或裁撤，见 OPEN_ISSUE
   journal-projections；
 - **DeterministicReplay 删除**：零使用者 + 快照式与 effect 式投影冲突；
   随迁删除 test_reliability 7 测试；RetryManager/TimeoutChecker/CrashGuard
@@ -209,11 +210,12 @@ Agent 私有态分两层：
    下 tick 生效；设备注入内容无显式版本 → stamp 记 content hash；
 3. **与 N1b 衔接**：AgentConfig.role/prompt_templates role 参数保留字段
    停止读取（兼容桥，N8 收尾拆除）；
-4. **与 N5 衔接**：§6.4 快照戳与 §3.6 注入可重建是同一族机制两面（agent
-   侧 stamp vs 业务侧版本绑定）；联测 = 快照戳 + 注入序列一起重建"当时
+4. **与 N5 衔接**：§6.4 快照戳与 §3.6 注入记录是同一族机制两面（agent
+   侧 stamp vs 业务侧版本绑定）；联测 = 快照戳 + 注入序列一起复盘"当时
    它知道什么"；
-5. **Journal 通道未定型**：N1c/N6 迁移（先走 TickJournal/audit）；派生
-   视图投影层暂缓（journal-projections）；
+5. **Journal 通道已定型**：走现有 TickJournal/audit（世界记忆设备接口
+   层裁撤，N6 裁撤，2026-08-25）；派生视图投影层暂缓/裁撤
+   （journal-projections）；
 6. **Assigner JUDGE 闭环**：Assigner 评判结果如何进入 CONSOLIDATING 输入，
    需要 N5 的任务结果状态机配合（completed/failed/escalated 标签）；
 7. **原始层体积**：conversation JSONL 会持续增长，定期归档（Owner 审批）

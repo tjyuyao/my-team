@@ -9,7 +9,7 @@ priority: medium
 
 ## 目标
 
-N1c-2/3/4/5 + N4 落地后，做一次**机械性**目录重排 + 重命名，让
+N1c-2/3/4 + N4 落地后，做一次**机械性**目录重排 + 重命名，让
 src/my_team 的结构反映三态（内核/设备/Agent）+ 模型/契约族。
 
 ## 已定决策（2026-08-25）
@@ -19,13 +19,15 @@ src/my_team 的结构反映三态（内核/设备/Agent）+ 模型/契约族。
    `agent/`（引擎）+ `models/`+`protocols/`（数据模型与契约）。
 3. **命名修正**（重排时执行）：
    - `file_ops.py` → `models/`（它是审计数据模型，不是文件操作逻辑）
-   - `journal.py` → `world_memory.py`（世界记忆设备，对齐 SPEC §5.9）
    - `shared_kb.py`/`mailbox.py`/`record_store.py`/`asset_store.py`/
      `credential_store.py`/`task_tree.py` → `kb.py`/`mail.py`/
      `records.py`/`assets.py`/`credentials.py`/`tasks.py`
    - `agent_runtime.py` → `contract.py`（它是协议/接口）
    - `context_compiler.py` → `injection.py`（N4 重写时直接起新名）
-4. **现在不动**：约 79% 文件在途（会被 N1c/N4/N5/N6 大动），现在挪 =
+   - **`journal.py` 不改名**（2026-08-25 定：不做世界记忆设备接口层，
+     恢复/重放机制裁撤，Journal 保持 append-only 记录现状；改名
+     会名不副实）
+4. **现在不动**：约 79% 文件在途（会被 N1c/N4/N5 大动），现在挪 =
    文件被碰两次，且改名会跟 N4/N5 的重写打架。
 
 ## 交付
@@ -41,5 +43,5 @@ src/my_team 的结构反映三态（内核/设备/Agent）+ 模型/契约族。
 
 ## 依赖
 
-- N1c-2/3/4/5 + N4 落地（文件最终形态定了）
+- N1c-2/3/4 + N4 落地（文件最终形态定了）
 - 本卡应是 v0.11 收尾步骤（在 post-agent 末尾）
