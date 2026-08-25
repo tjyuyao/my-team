@@ -17,15 +17,12 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
-
 from my_team.asset_store import AssetStore
 from my_team.credential_store import CredentialStore
 from my_team.devices import (
     Authority,
     EntityKind,
     GrantEffect,
-    InjectionDecl,
     new_team_id,
 )
 from my_team.devices.base import Device
@@ -33,7 +30,6 @@ from my_team.mailbox import MailSystem
 from my_team.record_store import RecordStore
 from my_team.shared_kb import SharedKB
 from my_team.tool_manifest import builtin_manifests
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,6 +89,7 @@ def test_shared_kb_compat_construction():
         PermissionEngine,
         VersionControl,
     )
+
     permissions = PermissionEngine()
     lock_manager = LockManager()
     version_control = VersionControl()
@@ -325,8 +322,7 @@ def test_shared_kb_injection_flows_through_authority():
     auth.grant_capability("pos-1", kb.kb_scope_id, priority=5)
     injections = auth.injection_for("agent.1")
     assert any(
-        inj.entity_id == kb.kb_scope_id
-        and "[KB_INSTRUCTION]" in inj.source_tag
+        inj.entity_id == kb.kb_scope_id and "[KB_INSTRUCTION]" in inj.source_tag
         for inj in injections
     ), "KB InjectionDecl not found in injections"
 
@@ -339,8 +335,7 @@ def test_mail_system_injection_flows_through_authority():
     auth.grant_capability("pos-1", ms.mail_scope_id, priority=5)
     injections = auth.injection_for("agent.1")
     assert any(
-        inj.entity_id == ms.mail_scope_id
-        and "[MAIL_INSTRUCTION]" in inj.source_tag
+        inj.entity_id == ms.mail_scope_id and "[MAIL_INSTRUCTION]" in inj.source_tag
         for inj in injections
     ), "Mail InjectionDecl not found in injections"
 
@@ -352,9 +347,7 @@ def test_record_store_injection_flows_through_authority():
     auth.grant_membership("agent.1", "pos-1")
     auth.grant_capability("pos-1", rs.records_scope_id, priority=5)
     injections = auth.injection_for("agent.1")
-    assert any(
-        inj.entity_id == rs.records_scope_id for inj in injections
-    )
+    assert any(inj.entity_id == rs.records_scope_id for inj in injections)
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +388,15 @@ def test_adopt_uuid5_matches_manifest_capability():
 
 def test_shared_kb_business_still_works():
     from my_team.shared_kb import PermissionEngine, PermissionRule
+
     permissions = PermissionEngine()
-    permissions.add_rule(PermissionRule(scope="*", principal="agent.1", allow=["list", "read", "create", "write"]))
+    permissions.add_rule(
+        PermissionRule(
+            scope="*",
+            principal="agent.1",
+            allow=["list", "read", "create", "write"],
+        )
+    )
     kb = SharedKB(permissions=permissions)
     kb.create("notes/hello.md", "agent.1", content="hello", tick=1)
     res = kb.read("notes/hello.md", "agent.1")
@@ -404,7 +404,8 @@ def test_shared_kb_business_still_works():
 
 
 def test_record_store_business_still_works():
-    from my_team.record_store import RecordSchema, FieldSpec
+    from my_team.record_store import FieldSpec, RecordSchema
+
     rs = RecordStore()
     schema = RecordSchema(
         record_type="item",
@@ -426,7 +427,7 @@ def test_mail_system_business_still_works():
     ms = MailSystem()
     ms.register_agent("agent.1")
     ms.register_agent("agent.2")
-    email = ms.create_email(
+    ms.create_email(
         from_agent="agent.1",
         to=["agent.2"],
         subject="Test",

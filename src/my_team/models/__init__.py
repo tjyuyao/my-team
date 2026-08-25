@@ -17,6 +17,22 @@ from my_team.models.agent import (
     PoolStrategy,
     SharedKBPermission,
 )
+from my_team.models.memory import (
+    EntryOrigin,
+    EntryProvenance,
+    InjectionRef,
+    MemoryEntry,
+    MemoryEntryType,
+    PersonContent,
+    SkillContent,
+    TaskContent,
+    TaskResultRef,
+    ToolContent,
+    make_person_entry,
+    make_skill_entry,
+    make_task_entry,
+    make_tool_entry,
+)
 from my_team.models.position import (
     DEFAULT_EDGE_SEMANTICS,
     PRIORITY_THRESHOLD,
@@ -65,4 +81,19 @@ __all__ = [
     "priority_class",
     "validate_edge_semantics",
     "validate_governance_invariants",
+    # N4-1 记忆模型
+    "EntryOrigin",
+    "EntryProvenance",
+    "InjectionRef",
+    "MemoryEntry",
+    "MemoryEntryType",
+    "PersonContent",
+    "SkillContent",
+    "TaskContent",
+    "TaskResultRef",
+    "ToolContent",
+    "make_person_entry",
+    "make_skill_entry",
+    "make_task_entry",
+    "make_tool_entry",
 ]

@@ -10,9 +10,13 @@ Per SPEC §4.4, §11.2:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from my_team.models.task import TASK_TRANSITIONS, Task, TaskPriority, TaskStatus
+
+if TYPE_CHECKING:
+    from my_team.agent_runtime import ToolContext
+    from my_team.transaction import TransactionBuffer
 
 
 class TaskTreeError(Exception):
@@ -35,8 +39,7 @@ class InvalidTransitionError(TaskTreeError):
         self.from_status = from_status
         self.to_status = to_status
         super().__init__(
-            f"Invalid transition for '{task_id}': "
-            f"{from_status.value} → {to_status.value}"
+            f"Invalid transition for '{task_id}': {from_status.value} → {to_status.value}"
         )
 
 
@@ -47,11 +50,13 @@ class TaskTree:
     and deadline checking.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, transaction_buffer: TransactionBuffer | None = None) -> None:
         self._tasks: dict[str, Task] = {}
         self._children_map: dict[str, list[str]] = {}  # derived_from → [child_ids]
-        self._parent_map: dict[str, str | None] = {}   # task_id → derived_from
-        self._assignee_map: dict[str, list[str]] = {}      # agent_id → [task_ids]
+        self._parent_map: dict[str, str | None] = {}  # task_id → derived_from
+        self._assignee_map: dict[str, list[str]] = {}  # agent_id → [task_ids]
+        # N1c-2: injected kernel services for tool handlers
+        self._transaction_buffer = transaction_buffer
 
     def create(
         self,
@@ -154,10 +159,9 @@ class TaskTree:
 
         # Walk the transition graph to find a path to the target
         from collections import deque
+
         visited = {task.status}
-        queue: deque[tuple[TaskStatus, list[TaskStatus]]] = deque(
-            [(task.status, [])]
-        )
+        queue: deque[tuple[TaskStatus, list[TaskStatus]]] = deque([(task.status, [])])
         while queue:
             current, path = queue.popleft()
             for nxt in TASK_TRANSITIONS.get(current, set()):
@@ -225,11 +229,7 @@ class TaskTree:
         """
         expired: list[Task] = []
         for task in self._tasks.values():
-            if (
-                task.deadline is not None
-                and now > task.deadline
-                and not task.is_terminal
-            ):
+            if task.deadline is not None and now > task.deadline and not task.is_terminal:
                 expired.append(task)
         return expired
 
@@ -323,3 +323,71 @@ class TaskTree:
 
     def __repr__(self) -> str:
         return f"TaskTree({len(self._tasks)} tasks)"
+
+    # -----------------------------------------------------------------------
+    # N1c-2: Tool handler factory (delegate)
+    # -----------------------------------------------------------------------
+
+    def make_handle_delegate(self) -> Callable[..., Any]:
+        """Return the ``delegate`` tool handler bound to this task tree.
+
+        Creates task + sends delegation email — staged as two effects in
+        ONE atomic group (task fails → email must not be sent).
+        """
+        from my_team.agent_runtime import ToolResult
+
+        transaction_buffer = self._transaction_buffer
+
+        def handle_delegate(
+            context: ToolContext,
+            recipient_agent_id: str = "",
+            task_title: str = "",
+            task_description: str = "",
+            **_kw: Any,
+        ) -> Any:
+            from uuid import uuid4
+
+            task_id = f"task.{context.tick}.{uuid4().hex[:8]}"
+            group_id = f"group.{uuid4().hex[:8]}"
+            if transaction_buffer is not None:
+                from my_team.transaction import EffectType
+
+                transaction_buffer.stage(
+                    effect_type=EffectType.TASK_CREATE,
+                    agent_id=context.agent_id,
+                    resource=task_id,
+                    data={
+                        "task_id": task_id,
+                        "title": task_title,
+                        "description": task_description,
+                        "assigner_agent_id": context.agent_id,
+                        "assignee_agent_id": recipient_agent_id,
+                        "derived_from": None,
+                    },
+                    group_id=group_id,
+                    atomicity="group",
+                )
+                transaction_buffer.stage(
+                    effect_type=EffectType.EMAIL_SEND,
+                    agent_id=context.agent_id,
+                    resource=f"email:{context.agent_id}",
+                    data={
+                        "from_agent": context.agent_id,
+                        "to": [recipient_agent_id],
+                        "subject": f"[DELEGATE] {task_title}",
+                        "body": task_description,
+                        "email_type": "delegation",
+                        "task_id": task_id,
+                    },
+                    group_id=group_id,
+                    atomicity="group",
+                )
+            return ToolResult(
+                success=True,
+                data={"task_id": task_id, "staged": True},
+                agent_id=context.agent_id,
+                tool_name="delegate",
+                tick=context.tick,
+            )
+
+        return handle_delegate

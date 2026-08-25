@@ -29,7 +29,6 @@ import hashlib
 import json
 import os
 import signal
-import sys
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -49,7 +48,6 @@ from my_team.agent_runtime import (
     SubAgent,
     ToolContext,
     ToolRegistry,
-    ToolResult,
 )
 from my_team.agent_state import AgentState, AgentStateMachine
 from my_team.agent_tree import AgentTree
@@ -120,7 +118,6 @@ from my_team.models.intent import (
 )
 from my_team.models.task import Task, TaskPriority, TaskStatus
 from my_team.outbox import Outbox, OutboxEntry, OutboxStatus
-from my_team.patch_ops import PatchError, apply_patch
 from my_team.pending_ops import (
     CancellationResult,
     OpStatus,
@@ -134,24 +131,16 @@ from my_team.private_store import (
     PrivateStore,
     PrivateStoreConfig,
 )
-from my_team.python_worker import (
-    DEFAULT_ALLOWED_MODULES,
-    run_python_compute,
-    run_python_transform,
-)
 from my_team.record_store import RecordInvariantError, RecordStore
 from my_team.reliability import CrashGuard, CrashReport, TimeoutChecker
-from my_team.sandbox_tools import make_workspace_copy, run_sandboxed_process
 from my_team.scheduler import AgentScheduler, QueuedEvent
 from my_team.shared_kb import (
-    LockConflictError,
     LockInfo,
     LockManager,
     PermissionEngine,
     PermissionRule,
     SharedKB,
     SharedKBResource,
-    SharedKBWriteError,
     VersionInfo,
 )
 from my_team.task_tree import InvalidTransitionError, TaskTree
@@ -190,7 +179,7 @@ class SimulationConfig(BaseModel):
         default=4,
         ge=1,
         description="Per-agent cap on in-flight LLM requests "
-                    "(defense-in-depth; agents naturally wait while one is pending)",
+        "(defense-in-depth; agents naturally wait while one is pending)",
     )
     private_storage_limit_mb: int = Field(default=512)
     # T16c: LLM usage budget (SPEC §14) — pricing table + per-agent /
@@ -327,36 +316,53 @@ class Simulation:
         self._config = config or SimulationConfig()
         self._agent_tree = agent_tree
 
-        # Initialize core subsystems
-        self._mail_system = MailSystem()
-        self._task_tree = TaskTree()
+        # Initialize core subsystems — NOTE: TransactionBuffer and
+        # AuditLog are created first so they can be injected into
+        # device constructors (N1c-2 tool handler wiring).
         self._journal = TickJournal()
         self._audit_log = AuditLog(journal=self._journal)
         self._file_ops_audit = FileOpsAuditLog()
+        # Transaction buffer for staged-effect commit (created early
+        # for injection into device handlers via N1c-2 wiring).
+        self._transaction_buffer = TransactionBuffer()
+
         # T16c: LLM usage budget accounting (per agent/task/simulation).
         # Persisted with the rest of the state — restart keeps the
         # accumulated counts (模拟重启不丢累计).
         self._budget = BudgetTracker(config=self._config.budget)
-        self._private_store = PrivateStore(PrivateStoreConfig(
-            base_path="private",
-            max_storage_bytes=self._config.private_storage_limit_mb * 1024 * 1024,
-        ))
+        self._private_store = PrivateStore(
+            PrivateStoreConfig(
+                base_path="private",
+                max_storage_bytes=self._config.private_storage_limit_mb * 1024 * 1024,
+            )
+        )
 
         # Shared KB with permissions
         self._permission_engine = PermissionEngine()
         self._lock_manager = LockManager(
             default_lease_ticks=self._config.default_lock_lease_ticks,
         )
+        # N1c-2: inject TransactionBuffer, AuditLog, and lock-tick
+        # registration callback into SharedKB so its handler factories
+        # have the kernel services they need.
         self._shared_kb = SharedKB(
             permissions=self._permission_engine,
             lock_manager=self._lock_manager,
+            transaction_buffer=self._transaction_buffer,
+            audit_log=self._audit_log,
+            on_lock_acquired=self._register_tick_lock,
         )
 
         # T10: RecordStore (typed records) & AssetStore
         # (content-addressed binaries) — in-memory; SQLite persistence
         # is future work.
-        self._record_store = RecordStore()
+        # N1c-2: inject TransactionBuffer into RecordStore for handler factories.
+        self._record_store = RecordStore(transaction_buffer=self._transaction_buffer)
         self._asset_store = AssetStore()
+
+        # N1c-2: inject TransactionBuffer into MailSystem and TaskTree.
+        self._mail_system = MailSystem(transaction_buffer=self._transaction_buffer)
+        self._task_tree = TaskTree(transaction_buffer=self._transaction_buffer)
 
         # N1b（§5.1）：Authority（注册中心 + 布线中心，每 Team 仅一个）。
         # 一人公司 = 一实例一 Team（new_team_id）；Owner = 树根 agent。
@@ -373,9 +379,6 @@ class Simulation:
         # Tool registry (N1b: attached to the Authority — authorization
         # goes through two-layer Grants, §3.5/§5.1)
         self._tool_registry = ToolRegistry(authority=self._authority)
-
-        # Transaction buffer for staged-effect commit
-        self._transaction_buffer = TransactionBuffer()
 
         # Pending operation registry (v0.6.0 — async LLM/tool tracking)
         self._pending_ops = PendingOperationRegistry()
@@ -439,14 +442,16 @@ class Simulation:
         self._pause_reason: str = ""
 
         # Tick engine
-        self._tick_engine = TickEngine(TickConfig(
-            tick_duration_value=self._config.tick_duration_value,
-            tick_duration_unit=self._config.tick_duration_unit,
-            simulation_time_per_tick_value=self._config.simulation_time_per_tick_value,
-            simulation_time_per_tick_unit=self._config.simulation_time_per_tick_unit,
-            start_paused=self._config.start_paused,
-            deterministic_mode=self._config.deterministic_mode,
-        ))
+        self._tick_engine = TickEngine(
+            TickConfig(
+                tick_duration_value=self._config.tick_duration_value,
+                tick_duration_unit=self._config.tick_duration_unit,
+                simulation_time_per_tick_value=self._config.simulation_time_per_tick_value,
+                simulation_time_per_tick_unit=self._config.simulation_time_per_tick_unit,
+                start_paused=self._config.start_paused,
+                deterministic_mode=self._config.deterministic_mode,
+            )
+        )
 
         # Human control (pause/resume/view; tick duration apply is NOT
         # wired — see dead-module-cleanup TODO)
@@ -501,9 +506,7 @@ class Simulation:
         # through the normal transaction path. Consumed actions are
         # recorded so a rolled-back tick restores them (no lost action).
         self._pending_human_actions: dict[str, list[dict[str, Any]]] = {}
-        self._human_actions_consumed_this_tick: list[
-            tuple[str, dict[str, Any]]
-        ] = []
+        self._human_actions_consumed_this_tick: list[tuple[str, dict[str, Any]]] = []
 
         # Agent runtimes
         self._runtimes: dict[str, AgentRuntime] = {}
@@ -554,13 +557,15 @@ class Simulation:
             if is_bootstrap:
                 wake_types.add(WakeEventType.BOOTSTRAP)
             # All agents can be woken by emails and human messages
-            wake_types.update({
-                WakeEventType.NEW_EMAIL,
-                WakeEventType.HUMAN_MESSAGE,
-                WakeEventType.TOOL_RESULT,
-                WakeEventType.CHILD_TASK_CHANGE,
-                WakeEventType.DEADLINE_APPROACHING,
-            })
+            wake_types.update(
+                {
+                    WakeEventType.NEW_EMAIL,
+                    WakeEventType.HUMAN_MESSAGE,
+                    WakeEventType.TOOL_RESULT,
+                    WakeEventType.CHILD_TASK_CHANGE,
+                    WakeEventType.DEADLINE_APPROACHING,
+                }
+            )
             # T12a: kind=human workers wake on their own UI actions
             # (accept/complete/fail) — routed by _consume_ingress.
             if agent_config.kind == "human":
@@ -592,9 +597,25 @@ class Simulation:
         if path.startswith("/"):
             return f"absolute path rejected: {path}"
         from os.path import normpath
+
         parts = normpath(path).split("/")
         if ".." in parts:
             return f"path traversal rejected: {path}"
+        return None
+
+    def _register_tick_lock(
+        self,
+        resource: str,
+        agent_id: str,
+        lock_token: str,
+    ) -> None:
+        """Register a lock acquired during this tick's Act phase.
+
+        Called by SharedKB.make_handle_kb_write's handler via the
+        on_lock_acquired callback (N1c-2 injection).  The tuple is
+        consumed by _phase_commit (Phase 8) when releasing locks.
+        """
+        self._tick_acquired_locks.append((resource, agent_id, lock_token))
         return None
 
     def _staged_private_effects(self, agent_id: str) -> dict[str, str]:
@@ -616,7 +637,9 @@ class Simulation:
         return merged
 
     def _read_private_file(
-        self, agent_id: str, path: str,
+        self,
+        agent_id: str,
+        path: str,
     ) -> tuple[bool, str]:
         """Read a private file as the agent sees it: committed state
         (disk) overlaid with this agent's own staged writes.
@@ -633,7 +656,9 @@ class Simulation:
         return True, target.read_text(encoding="utf-8")
 
     def _read_private_file_bytes(
-        self, agent_id: str, path: str,
+        self,
+        agent_id: str,
+        path: str,
     ) -> tuple[bool, bytes]:
         """Read a private file's raw BYTES (committed state on disk).
 
@@ -658,7 +683,8 @@ class Simulation:
             if e.resource != path:
                 continue
             if e.effect_type is EffectType.FILE_WRITE and e.data.get(
-                "is_binary", False,
+                "is_binary",
+                False,
             ):
                 return base64.b64decode(e.data.get("content_bytes_b64", ""))
         return b""
@@ -666,809 +692,85 @@ class Simulation:
     def _register_tool_handlers(self) -> None:
         """Register tool handlers that connect ToolRegistry to subsystems.
 
+        N1c-2: handlers are now generated by device method factories
+        (SharedKB / RecordStore / MailSystem / TaskTree) and agent_tools
+        factories (private-workspace file tools + executor tools).
+        simulation._register_tool_handlers is reduced to a thin wiring
+        layer: it calls each factory, collects the handler callables, and
+        registers them with the tool registry.
+
         Write tools (write, send_email, delegate) stage effects in the
-        TransactionBuffer. Read tools (read, ls) execute directly.
+        TransactionBuffer. grep tools (read, ls) execute directly.
+        Kernel services (TransactionBuffer / AuditLog / LockManager etc.)
+        were injected into devices at construction time.
         """
-        # Read-only tools — read on demand: committed state (disk)
-        # overlaid with the agent's own staged writes (SPEC §3.1 冻结
-        # 视图按需化 — no full-content snapshot is built).
-        def handle_read(context: ToolContext, path: str = "", **_kw: Any) -> Any:
-            try:
-                found, content = self._read_private_file(
-                    context.agent_id, path,
-                )
-            except AccessDeniedError as exc:
-                return ToolResult(
-                    success=False, error=str(exc),
-                    agent_id=context.agent_id, tool_name="read",
-                    tick=context.tick,
-                )
-            if not found:
-                return ToolResult(
-                    success=False, error=f"File not found: {path}",
-                    agent_id=context.agent_id, tool_name="read",
-                    tick=context.tick,
-                )
-            return ToolResult(
-                success=True, data={"content": content},
-                agent_id=context.agent_id, tool_name="read",
-                tick=context.tick,
-            )
+        from my_team.agent_tools import (
+            make_handle_apply_patch,
+            make_handle_git_diff,
+            make_handle_git_status,
+            make_handle_ls,
+            make_handle_python_compute,
+            make_handle_python_transform,
+            make_handle_read,
+            make_handle_run_tests,
+            make_handle_write,
+        )
 
-        def handle_ls(context: ToolContext, path: str = "", **_kw: Any) -> Any:
-            # Committed listing (disk, metadata only) merged with the
-            # agent's own staged paths — same semantics as the old
-            # frozen view, without copying any file content.
-            try:
-                target = self._private_store.resolve_path(
-                    context.agent_id, path,
-                ) if path else self._private_store.agent_home(
-                    context.agent_id,
-                )
-                home = self._private_store.agent_home(context.agent_id)
-            except AccessDeniedError as exc:
-                return ToolResult(
-                    success=False, error=str(exc),
-                    agent_id=context.agent_id, tool_name="ls",
-                    tick=context.tick,
-                )
-            if not target.exists():
-                return ToolResult(
-                    success=False, error=f"Directory not found: {path}",
-                    agent_id=context.agent_id, tool_name="ls",
-                    tick=context.tick,
-                )
-            prefix = f"{path.rstrip('/')}/" if path else ""
-            entries: set[str] = set()
-            for p in home.rglob("*"):
-                rel = p.relative_to(home).as_posix()
-                if rel.startswith(prefix):
-                    rest = rel[len(prefix):]
-                    if rest and "/" not in rest:
-                        entries.add(rest)
-            for rel in self._staged_private_effects(context.agent_id):
-                if rel.startswith(prefix):
-                    rest = rel[len(prefix):]
-                    if rest and "/" not in rest:
-                        entries.add(rest)
-            return ToolResult(
-                success=True, data={"entries": sorted(entries)},
-                agent_id=context.agent_id, tool_name="ls",
-                tick=context.tick,
-            )
-
-        def handle_write(
-            context: ToolContext, path: str = "", content: str = "", **_kw: Any,
-        ) -> Any:
-            # Path safety: reject traversal / absolute / empty before staging
-            err = self._validate_write_path(path)
-            if err is not None:
-                return ToolResult(
-                    success=False, error=err,
-                    error_code="INVALID_ARGUMENT",
-                    agent_id=context.agent_id, tool_name="write",
-                    tick=context.tick,
-                )
-            # Stage as a file write effect — committed in Phase 8
-            self._transaction_buffer.stage(
-                effect_type=EffectType.FILE_WRITE,
-                agent_id=context.agent_id,
-                resource=path,
-                data={"content": content},
-            )
-            return ToolResult(
-                success=True, data={"staged": True},
-                agent_id=context.agent_id, tool_name="write",
-                tick=context.tick,
-            )
-
-        def handle_kb_write(
-            context: ToolContext,
-            path: str = "",
-            content: str = "",
-            expected_version: int = 0,
-            **_kw: Any,
-        ) -> Any:
-            """Stage a shared KB write as a KB_WRITE effect with a
-            kernel-bound write lock (T20 写即自动锁).
-
-            The lock is INVISIBLE to the agent: the kernel acquires it
-            here (Act), carries the token on the effect, applies the
-            write at Commit (SharedKB._apply_committed — permission,
-            lock, version checks), and releases the lock at commit end.
-            LockConflictError (held by another agent, lease unexpired)
-            is a DETERMINISTIC failure — the agent retries next tick
-            (每 tick 一轮 semantics; lease backstop otherwise).
-            """
-            resource = path
-            if not self._permission_engine.check(
-                context.agent_id, resource, "kb_write",
-            ):
-                return ToolResult(
-                    success=False,
-                    error=f"Permission denied: {resource}",
-                    error_code="permission_denied", retryable=False,
-                    agent_id=context.agent_id, tool_name="kb_write",
-                    tick=context.tick,
-                )
-            try:
-                lock = self._lock_manager.acquire(
-                    resource, context.agent_id,
-                    current_tick=context.tick,
-                )
-            except LockConflictError as exc:
-                self._audit_log.record(
-                    AuditEventType.LOCK_CONFLICT,
-                    agent_id=context.agent_id,
-                    tick=context.tick,
-                    details={"resource": resource, "owner": exc.owner},
-                    success=False, error=str(exc),
-                )
-                return ToolResult(
-                    success=False, error=str(exc),
-                    error_code="LOCK_CONFLICT", retryable=True,
-                    agent_id=context.agent_id, tool_name="kb_write",
-                    tick=context.tick,
-                )
-            # Lock held until this tick's commit ends (released in
-            # _phase_commit) — the lease is only a backstop.
-            self._tick_acquired_locks.append(
-                (resource, context.agent_id, lock.lock_token)
-            )
-            self._audit_log.record(
-                AuditEventType.LOCK_ACQUIRED,
-                agent_id=context.agent_id,
-                tick=context.tick,
-                details={
-                    "resource": resource,
-                    "lease_until_tick": lock.lease_until_tick,
-                },
-            )
-            self._transaction_buffer.stage(
-                effect_type=EffectType.KB_WRITE,
-                agent_id=context.agent_id,
-                resource=resource,
-                data={
-                    "content": content,
-                    "expected_version": expected_version,
-                },
-                expected_version=expected_version,
-                lock_token=lock.lock_token,
-            )
-            return ToolResult(
-                success=True, data={"staged": True},
-                agent_id=context.agent_id, tool_name="kb_write",
-                tick=context.tick,
-            )
-
-        # v0.10 T8a: KB read side — every read goes through
-        # PermissionEngine (inside SharedKB.read/list_dir/search); the
-        # handlers only wrap results + record read audit (no content).
-        def handle_kb_read(
-            context: ToolContext, path: str = "", **_kw: Any,
-        ) -> Any:
-            if not path:
-                return ToolResult(
-                    success=False, error="kb_read requires 'path'",
-                    error_code="INVALID_ARGUMENT", retryable=False,
-                    agent_id=context.agent_id, tool_name="kb_read",
-                    tick=context.tick,
-                )
-            try:
-                resource = self._shared_kb.read(path, context.agent_id)
-            except SharedKBWriteError as exc:
-                return ToolResult(
-                    success=False, error=str(exc),
-                    error_code=(
-                        "permission_denied"
-                        if exc.reason.startswith("Permission denied")
-                        else "not_found"
-                    ),
-                    retryable=False,
-                    agent_id=context.agent_id, tool_name="kb_read",
-                    tick=context.tick,
-                )
-            self._audit_log.record(
-                AuditEventType.SHARED_KB_READ,
-                agent_id=context.agent_id,
-                tick=context.tick,
-                details={"path": path},
-            )
-            return ToolResult(
-                success=True,
-                data={
-                    "content": resource.content,
-                    "version": resource.version,
-                    "last_modified_by": resource.last_modified_by,
-                    "last_modified_at_tick": resource.last_modified_at_tick,
-                },
-                agent_id=context.agent_id, tool_name="kb_read",
-                tick=context.tick,
-            )
-
-        def handle_kb_list(
-            context: ToolContext, base_path: str = "", **_kw: Any,
-        ) -> Any:
-            try:
-                paths = self._shared_kb.list_dir(
-                    base_path, context.agent_id,
-                )
-            except SharedKBWriteError as exc:
-                return ToolResult(
-                    success=False, error=str(exc),
-                    error_code="permission_denied", retryable=False,
-                    agent_id=context.agent_id, tool_name="kb_list",
-                    tick=context.tick,
-                )
-            return ToolResult(
-                success=True, data={"paths": paths},
-                agent_id=context.agent_id, tool_name="kb_list",
-                tick=context.tick,
-            )
-
-        def handle_kb_search(
-            context: ToolContext,
-            query: str = "",
-            base_path: str = "",
-            limit: int = 20,
-            **_kw: Any,
-        ) -> Any:
-            if not query or not query.strip():
-                return ToolResult(
-                    success=False,
-                    error="kb_search requires non-empty 'query'",
-                    error_code="INVALID_ARGUMENT", retryable=False,
-                    agent_id=context.agent_id, tool_name="kb_search",
-                    tick=context.tick,
-                )
-            try:
-                limit_n = min(max(int(limit), 1), 100)
-            except (TypeError, ValueError):
-                limit_n = 20
-            hits = self._shared_kb.search(
-                query, context.agent_id,
-                base_path=base_path or "", limit=limit_n,
-            )
-            for hit in hits:
-                self._audit_log.record(
-                    AuditEventType.SHARED_KB_READ,
-                    agent_id=context.agent_id,
-                    tick=context.tick,
-                    details={"path": hit["path"], "search": query},
-                )
-            return ToolResult(
-                success=True, data={"results": hits},
-                agent_id=context.agent_id, tool_name="kb_search",
-                tick=context.tick,
-            )
-
-        # T10: typed record mutations — staged as RECORD_UPSERT /
-        # RECORD_DELTA effects; applied (invariant-checked) at Commit;
-        # an invariant violation is a DETERMINISTIC business failure.
-        def handle_record_upsert(
-            context: ToolContext,
-            record_type: str = "",
-            key: str = "",
-            record: dict[str, Any] | None = None,
-            **_kw: Any,
-        ) -> Any:
-            if not record_type or not key:
-                return ToolResult(
-                    success=False,
-                    error="record_upsert requires 'record_type' and 'key'",
-                    error_code="INVALID_ARGUMENT", retryable=False,
-                    agent_id=context.agent_id,
-                    tool_name="record_upsert", tick=context.tick,
-                )
-            if not self._record_store.has_schema(record_type):
-                return ToolResult(
-                    success=False,
-                    error=f"record type '{record_type}' not registered",
-                    error_code="SCHEMA_NOT_REGISTERED", retryable=False,
-                    agent_id=context.agent_id,
-                    tool_name="record_upsert", tick=context.tick,
-                )
-            self._transaction_buffer.stage(
-                effect_type=EffectType.RECORD_UPSERT,
-                agent_id=context.agent_id,
-                resource=f"{record_type}:{key}",
-                data={
-                    "record_type": record_type,
-                    "key": key,
-                    "record": record or {},
-                },
-            )
-            return ToolResult(
-                success=True, data={"staged": True},
-                agent_id=context.agent_id,
-                tool_name="record_upsert", tick=context.tick,
-            )
-
-        def handle_record_delta(
-            context: ToolContext,
-            record_type: str = "",
-            key: str = "",
-            field: str = "",
-            delta: float = 0.0,
-            **_kw: Any,
-        ) -> Any:
-            if not record_type or not key or not field:
-                return ToolResult(
-                    success=False,
-                    error="record_delta requires 'record_type', 'key' and 'field'",
-                    error_code="INVALID_ARGUMENT", retryable=False,
-                    agent_id=context.agent_id,
-                    tool_name="record_delta", tick=context.tick,
-                )
-            if not self._record_store.has_schema(record_type):
-                return ToolResult(
-                    success=False,
-                    error=f"record type '{record_type}' not registered",
-                    error_code="SCHEMA_NOT_REGISTERED", retryable=False,
-                    agent_id=context.agent_id,
-                    tool_name="record_delta", tick=context.tick,
-                )
-            self._transaction_buffer.stage(
-                effect_type=EffectType.RECORD_DELTA,
-                agent_id=context.agent_id,
-                resource=f"{record_type}:{key}",
-                data={
-                    "record_type": record_type,
-                    "key": key,
-                    "field": field,
-                    "delta": float(delta),
-                },
-            )
-            return ToolResult(
-                success=True, data={"staged": True},
-                agent_id=context.agent_id,
-                tool_name="record_delta", tick=context.tick,
-            )
-        def handle_send_email(
-            context: ToolContext,
-            to: list[str] | None = None,
-            subject: str = "",
-            body: str = "",
-            attachments: list[dict[str, Any]] | None = None,
-            **_kw: Any,
-        ) -> Any:
-            # v0.10 T8b: attachments = list of structured refs
-            # ({ref_type, path, version, hash, size, mime}) — carried on
-            # the email, never copied.
-            self._transaction_buffer.stage(
-                effect_type=EffectType.EMAIL_SEND,
-                agent_id=context.agent_id,
-                resource=f"email:{context.agent_id}",
-                data={
-                    "from_agent": context.agent_id,
-                    "to": to or [],
-                    "subject": subject,
-                    "body": body,
-                    "attachments": [
-                        AttachmentRef.model_validate(a)
-                        for a in (attachments or [])
-                    ],
-                },
-            )
-            return ToolResult(
-                success=True, data={"staged": True},
-                agent_id=context.agent_id, tool_name="send_email",
-                tick=context.tick,
-            )
-
-        def handle_delegate(
-            context: ToolContext,
-            recipient_agent_id: str = "",
-            task_title: str = "",
-            task_description: str = "",
-            **_kw: Any,
-        ) -> Any:
-            # Create task + send delegation email — staged as two
-            # effects in ONE atomic group (task fails → email must not
-            # be sent).
-            from uuid import uuid4
-            task_id = f"task.{context.tick}.{uuid4().hex[:8]}"
-            group_id = f"group.{uuid4().hex[:8]}"
-            self._transaction_buffer.stage(
-                effect_type=EffectType.TASK_CREATE,
-                agent_id=context.agent_id,
-                resource=task_id,
-                data={
-                    "task_id": task_id,
-                    "title": task_title,
-                    "description": task_description,
-                    "assigner_agent_id": context.agent_id,
-                    "assignee_agent_id": recipient_agent_id,
-                    "derived_from": None,
-                },
-                group_id=group_id,
-                atomicity="group",
-            )
-            self._transaction_buffer.stage(
-                effect_type=EffectType.EMAIL_SEND,
-                agent_id=context.agent_id,
-                resource=f"email:{context.agent_id}",
-                data={
-                    "from_agent": context.agent_id,
-                    "to": [recipient_agent_id],
-                    "subject": f"[DELEGATE] {task_title}",
-                    "body": task_description,
-                    "email_type": "delegation",
-                    "task_id": task_id,
-                },
-                group_id=group_id,
-                atomicity="group",
-            )
-            return ToolResult(
-                success=True,
-                data={"task_id": task_id, "staged": True},
-                agent_id=context.agent_id, tool_name="delegate",
-                tick=context.tick,
-            )
-
-        def handle_apply_patch(
-            context: ToolContext, path: str = "", patch: str = "", **_kw: Any,
-        ) -> Any:
-            """Apply a unified diff to a private-workspace file.
-
-            Format validation + conflict detection happen HERE (Act),
-            against the agent's frozen view; the parsed result is staged
-            as a FILE_PATCH effect and applied at Commit (rollback via
-            the same file_previous mechanism as FILE_WRITE).
-            """
-            if not path:
-                return ToolResult(
-                    success=False, error="apply_patch requires 'path'",
-                    error_code="invalid_patch", retryable=False,
-                    agent_id=context.agent_id, tool_name="apply_patch",
-                    tick=context.tick,
-                )
-            err = self._validate_write_path(path)
-            if err is not None:
-                return ToolResult(
-                    success=False, error=err,
-                    error_code="INVALID_ARGUMENT", retryable=False,
-                    agent_id=context.agent_id, tool_name="apply_patch",
-                    tick=context.tick,
-                )
-            if not patch:
-                return ToolResult(
-                    success=False, error="apply_patch requires 'patch'",
-                    error_code="invalid_patch", retryable=False,
-                    agent_id=context.agent_id, tool_name="apply_patch",
-                    tick=context.tick,
-                )
-            # Target content: committed state (disk) overlaid with the
-            # agent's own staged writes (SPEC §3.1 按需化). Missing file
-            # = "" (the patch may create a new file).
-            found, base_content = self._read_private_file(
-                context.agent_id, path,
-            )
-            content = base_content if found else ""
-            try:
-                new_content = apply_patch(content, patch)
-            except PatchError as e:
-                return ToolResult(
-                    success=False,
-                    error=f"patch rejected: {e}",
-                    error_code="patch_conflict" if e.conflict else "invalid_patch",
-                    retryable=False,
-                    agent_id=context.agent_id, tool_name="apply_patch",
-                    tick=context.tick,
-                )
-            # base_hash = hash of the content the patch was validated
-            # against (the frozen view). Commit re-checks the live file:
-            # if another same-tick write changed it, the patch is stale
-            # → patch_conflict at commit (never silently overwrite).
-            def _sha(text: str) -> str:
-                return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-            self._transaction_buffer.stage(
-                effect_type=EffectType.FILE_PATCH,
-                agent_id=context.agent_id,
-                resource=path,
-                data={
-                    "content": new_content,
-                    "patch": patch,
-                    "base_hash": _sha(content),
-                    "patch_hash": _sha(patch),
-                    "new_content_hash": _sha(new_content),
-                },
-            )
-            return ToolResult(
-                success=True,
-                data={
-                    "staged": True,
-                    "base_hash": _sha(content),
-                    "new_content_hash": _sha(new_content),
-                },
-                agent_id=context.agent_id, tool_name="apply_patch",
-                tick=context.tick,
-            )
-
-        def handle_run_tests(
-            context: ToolContext, test_path: str = "", **_kw: Any,
-        ) -> Any:
-            """Run pytest in a real sandbox (T16a, SANDBOXED_PROCESS).
-
-            The run happens in a TEMP WORKSPACE COPY (never the host
-            cwd — T17 by-product: pytest's .pytest_cache/__pycache__/
-            tmp writes land in the copy and die with it), under the
-            manifest's declared SandboxConstraints: resource limits
-            (CPU/memory/processes/file size), network deny-by-default
-            (netns), environment sanitisation (sitecustomize/
-            PYTHONPATH/PATH/secret stripped, GIT_* pinned). The backend
-            reports per-constraint in ``sandbox_report``. The run sees
-            the COMMITTED state (Act runs before Commit applies this
-            tick's staged writes).
-            """
-            manifest = self._tool_registry.get_manifest("run_tests")
-            assert manifest is not None  # builtin, registered at startup
-            timeout_ms = manifest.max_runtime_ms or 60_000
-            max_output = manifest.max_output_bytes or 200_000
-            constraints = manifest.sandbox_constraints
-            with make_workspace_copy() as copy:
-                target = test_path
-                if target and not os.path.isabs(target):
-                    # Relative test paths resolve inside the sandbox
-                    # copy, never against the host directory.
-                    target = str(copy / target)
-                cmd = [sys.executable, "-I", "-m", "pytest", "-q"]
-                if target:
-                    cmd.append(target)
-                res = run_sandboxed_process(
-                    cmd,
-                    timeout_ms=timeout_ms,
-                    max_output_bytes=max_output,
-                    cwd=str(copy),
-                    constraints=constraints,
-                    home=str(copy),
-                    on_start=(
-                        lambda proc: self._active_processes.__setitem__(
-                            context.request_id, proc,
-                        ) if context.request_id else None
-                    ),
-                    on_end=(
-                        lambda proc: self._active_processes.pop(
-                            context.request_id, None,
-                        ) if context.request_id else None
-                    ),
-                )
-            if res["timed_out"]:
-                self._audit_log.record(
-                    AuditEventType.TOOL_TIMEOUT,
-                    agent_id=context.agent_id,
-                    tick=context.tick,
-                    details={"tool": "run_tests", "timeout_ms": timeout_ms},
-                    success=False,
-                    error=f"run_tests timed out after {timeout_ms}ms",
-                )
-            return ToolResult(
-                success=res["success"],
-                data=res,
-                error=(
-                    None if res["success"] else
-                    f"tests failed (exit {res['exit_code']})"
-                    + (" [timed out]" if res["timed_out"] else "")
-                ),
-                error_code="tool_timeout" if res["timed_out"] else None,
-                retryable=not res["timed_out"],
-                agent_id=context.agent_id, tool_name="run_tests",
-                tick=context.tick,
-            )
-
-        def handle_python_compute(
-            context: ToolContext, code: str = "",
-            inputs: dict[str, Any] | None = None,
-            allowed_modules: list[str] | None = None,
-            **_kw: Any,
-        ) -> Any:
-            """L0 python_compute: pure computation in a subprocess.
-
-            Restricted builtins + import allowlist + `-I` isolated
-            mode. NO filesystem / network / child processes by design.
-            Honest classification (SPEC §8.7): LOCAL_PROCESS —
-            accident prevention, NOT a security boundary.
-            """
-            manifest = self._tool_registry.get_manifest("python_compute")
-            assert manifest is not None  # builtin, registered at startup
-            res = run_python_compute(
-                code=code,
-                inputs=dict(inputs or {}),
-                allowed_modules=tuple(
-                    allowed_modules or DEFAULT_ALLOWED_MODULES,
-                ),
-                timeout_ms=manifest.max_runtime_ms or 10_000,
-                max_output_bytes=manifest.max_output_bytes or 200_000,
-                on_start=(
-                    lambda proc: self._active_processes.__setitem__(
-                        context.request_id, proc,
-                    ) if context.request_id else None
-                ),
-                on_end=(
-                    lambda proc: self._active_processes.pop(
-                        context.request_id, None,
-                    ) if context.request_id else None
-                ),
-            )
-            return ToolResult(
-                success=res["success"],
-                data=res,
-                error=(
-                    None if res["success"]
-                    else res.get("error", "python_compute failed")
-                ),
-                error_code="tool_timeout" if res["timed_out"] else None,
-                retryable=not res["timed_out"],
-                agent_id=context.agent_id, tool_name="python_compute",
-                tick=context.tick,
-            )
-
-        def handle_python_transform(
-            context: ToolContext, code: str = "",
-            inputs: dict[str, Any] | None = None,
-            input_files: dict[str, str] | None = None,
-            allowed_modules: list[str] | None = None,
-            **_kw: Any,
-        ) -> Any:
-            """L1 python_transform: temp sandbox workspace.
-
-            input_files (relpath → content) are read from the FROZEN
-            view (never the live filesystem) and copied read-only into
-            the sandbox input/ dir. Outputs land in output/ and come
-            back as an artifact manifest (path/hash/size/content).
-            Artifacts enter the real workspace only through the agent's
-            own staged writes (apply_patch / write — base-hash
-            checked). No network, no child processes.
-            """
-            manifest = self._tool_registry.get_manifest("python_transform")
-            assert manifest is not None  # builtin, registered at startup
-            resolved: dict[str, str] = {}
-            missing: list[str] = []
-            for rel in (input_files or {}):
-                try:
-                    found, content = self._read_private_file(
-                        context.agent_id, rel,
-                    )
-                except AccessDeniedError:
-                    missing.append(rel)
-                    continue
-                if found:
-                    resolved[rel] = content
-                else:
-                    missing.append(rel)
-            if missing:
-                return ToolResult(
-                    success=False,
-                    data={},
-                    error=(
-                        "input_files not in frozen workspace view: "
-                        + ", ".join(sorted(missing))
-                    ),
-                    error_code="invalid_argument",
-                    agent_id=context.agent_id, tool_name="python_transform",
-                    tick=context.tick,
-                )
-            res = run_python_transform(
-                code=code,
-                inputs=dict(inputs or {}),
-                input_files=resolved,
-                allowed_modules=tuple(
-                    allowed_modules or DEFAULT_ALLOWED_MODULES,
-                ),
-                timeout_ms=manifest.max_runtime_ms or 30_000,
-                max_output_bytes=manifest.max_output_bytes or 200_000,
-                on_start=(
-                    lambda proc: self._active_processes.__setitem__(
-                        context.request_id, proc,
-                    ) if context.request_id else None
-                ),
-                on_end=(
-                    lambda proc: self._active_processes.pop(
-                        context.request_id, None,
-                    ) if context.request_id else None
-                ),
-            )
-            return ToolResult(
-                success=res["success"],
-                data=res,
-                error=(
-                    None if res["success"]
-                    else res.get("error", "python_transform failed")
-                ),
-                error_code="tool_timeout" if res["timed_out"] else None,
-                retryable=not res["timed_out"],
-                agent_id=context.agent_id, tool_name="python_transform",
-                tick=context.tick,
-            )
-
-        def handle_git_diff(
-            context: ToolContext, path: str = "", **_kw: Any,
-        ) -> Any:
-            """Read-only git diff on the workspace (committed state)."""
-            manifest = self._tool_registry.get_manifest("git_diff")
-            assert manifest is not None  # builtin, registered at startup
-            cmd = ["git", "diff", "--"]
-            if path:
-                cmd = ["git", "diff", "--", path]
-            res = run_sandboxed_process(
-                cmd,
-                timeout_ms=manifest.max_runtime_ms or 10_000,
-                max_output_bytes=manifest.max_output_bytes or 200_000,
-                cwd=str(Path.cwd()),
-            )
-            if res["timed_out"]:
-                self._audit_log.record(
-                    AuditEventType.TOOL_TIMEOUT,
-                    agent_id=context.agent_id,
-                    tick=context.tick,
-                    details={"tool": "git_diff"},
-                    success=False,
-                    error="git_diff timed out",
-                )
-            return ToolResult(
-                success=res["success"],
-                data=res,
-                error=None if res["success"] else res["stderr"],
-                error_code="tool_timeout" if res["timed_out"] else None,
-                agent_id=context.agent_id, tool_name="git_diff",
-                tick=context.tick,
-            )
-
-        def handle_git_status(
-            context: ToolContext, **_kw: Any,
-        ) -> Any:
-            """Read-only git status --short on the workspace."""
-            manifest = self._tool_registry.get_manifest("git_status")
-            assert manifest is not None  # builtin, registered at startup
-            res = run_sandboxed_process(
-                ["git", "status", "--short"],
-                timeout_ms=manifest.max_runtime_ms or 10_000,
-                max_output_bytes=manifest.max_output_bytes or 200_000,
-                cwd=str(Path.cwd()),
-            )
-            if res["timed_out"]:
-                self._audit_log.record(
-                    AuditEventType.TOOL_TIMEOUT,
-                    agent_id=context.agent_id,
-                    tick=context.tick,
-                    details={"tool": "git_status"},
-                    success=False,
-                    error="git_status timed out",
-                )
-            return ToolResult(
-                success=res["success"],
-                data=res,
-                error=None if res["success"] else res["stderr"],
-                error_code="tool_timeout" if res["timed_out"] else None,
-                agent_id=context.agent_id, tool_name="git_status",
-                tick=context.tick,
-            )
-
-        # Register handlers with their manifests (v0.7.0 — registration
-        # validates each manifest against the declarative contract).
-        # v0.10 T7: builtins go through the SAME public register_tool
-        # path as plugins (validated + unique), so the kernel's own
-        # tools exercise the plugin API.
         manifests = builtin_manifests()
         handlers = {
-            "read": handle_read,
-            "ls": handle_ls,
-            "write": handle_write,
-            "kb_write": handle_kb_write,
-            "kb_read": handle_kb_read,
-            "kb_list": handle_kb_list,
-            "kb_search": handle_kb_search,
-            "record_upsert": handle_record_upsert,
-            "record_delta": handle_record_delta,
-            "send_email": handle_send_email,
-            "delegate": handle_delegate,
-            "apply_patch": handle_apply_patch,
-            "run_tests": handle_run_tests,
-            "git_diff": handle_git_diff,
-            "git_status": handle_git_status,
-            "python_compute": handle_python_compute,
-            "python_transform": handle_python_transform,
+            # §4.5 Private-workspace file tools (agent_tools.py)
+            "read": make_handle_read(
+                private_store=self._private_store,
+                staged_private_effects=self._staged_private_effects,
+                read_private_file=self._read_private_file,
+            ),
+            "ls": make_handle_ls(
+                private_store=self._private_store,
+                staged_private_effects=self._staged_private_effects,
+            ),
+            "write": make_handle_write(
+                transaction_buffer=self._transaction_buffer,
+            ),
+            "apply_patch": make_handle_apply_patch(
+                transaction_buffer=self._transaction_buffer,
+                read_private_file=self._read_private_file,
+            ),
+            # §3.4 Executor/workspace tools (agent_tools.py)
+            "run_tests": make_handle_run_tests(
+                tool_registry=self._tool_registry,
+                audit_log=self._audit_log,
+                active_processes=self._active_processes,
+            ),
+            "python_compute": make_handle_python_compute(
+                tool_registry=self._tool_registry,
+                active_processes=self._active_processes,
+            ),
+            "python_transform": make_handle_python_transform(
+                tool_registry=self._tool_registry,
+                active_processes=self._active_processes,
+                read_private_file=self._read_private_file,
+            ),
+            "git_diff": make_handle_git_diff(
+                tool_registry=self._tool_registry,
+                audit_log=self._audit_log,
+            ),
+            "git_status": make_handle_git_status(
+                tool_registry=self._tool_registry,
+                audit_log=self._audit_log,
+            ),
+            # §5.2 SharedKB device tools
+            "kb_write": self._shared_kb.make_handle_kb_write(),
+            "kb_read": self._shared_kb.make_handle_kb_read(),
+            "kb_list": self._shared_kb.make_handle_kb_list(),
+            "kb_search": self._shared_kb.make_handle_kb_search(),
+            # §5.3 RecordStore device tools
+            "record_upsert": self._record_store.make_handle_record_upsert(),
+            "record_delta": self._record_store.make_handle_record_delta(),
+            # §5.6 MailSystem device tools
+            "send_email": self._mail_system.make_handle_send_email(),
+            # §5.7 TaskTree tool (N1c-2: handler moved here; device
+            # subclassing deferred to N1c-4)
+            "delegate": self._task_tree.make_handle_delegate(),
         }
         for name, handler in handlers.items():
             self.register_tool(manifests[name], handler)
@@ -1623,22 +925,24 @@ class Simulation:
         MappingProxyType so plugins cannot smuggle in mutable aliases
         from the kernel side.
         """
-        return MappingProxyType({
-            "private_store": self._private_store,
-            "shared_kb": self._shared_kb,
-            "record_store": self._record_store,  # T10
-            "asset_store": self._asset_store,     # T10
-            "mail_system": self._mail_system,
-            "task_tree": self._task_tree,
-            "agent_tree": self._agent_tree,
-            "scheduler": self._scheduler,
-            "outbox": self._outbox,
-            "human_control": self._human_control,
-            "audit_log": self._audit_log,
-            "integrations": self._integrations,   # T9
-            "ingress": self._ingress,             # T9
-            "credential_store": self._credential_store,  # T12b §7.5
-        })
+        return MappingProxyType(
+            {
+                "private_store": self._private_store,
+                "shared_kb": self._shared_kb,
+                "record_store": self._record_store,  # T10
+                "asset_store": self._asset_store,  # T10
+                "mail_system": self._mail_system,
+                "task_tree": self._task_tree,
+                "agent_tree": self._agent_tree,
+                "scheduler": self._scheduler,
+                "outbox": self._outbox,
+                "human_control": self._human_control,
+                "audit_log": self._audit_log,
+                "integrations": self._integrations,  # T9
+                "ingress": self._ingress,  # T9
+                "credential_store": self._credential_store,  # T12b §7.5
+            }
+        )
 
     def _wrap_plugin_handler(self, handler: Any) -> Any:
         """Inject subsystem handles into the ToolContext of a handler."""
@@ -1800,12 +1104,14 @@ class Simulation:
         op = self._pending_ops.get_by_id(request_id)
         if op is None:
             return CancellationResult(
-                accepted=False, request_id=request_id,
+                accepted=False,
+                request_id=request_id,
                 reason="operation not found",
             )
         if agent_id is not None and op.agent_id != agent_id:
             return CancellationResult(
-                accepted=False, request_id=request_id,
+                accepted=False,
+                request_id=request_id,
                 op_type=op.op_type,
                 reason=f"operation belongs to '{op.agent_id}', not '{agent_id}'",
             )
@@ -1814,21 +1120,19 @@ class Simulation:
             manifest = self._tool_registry.get_manifest(tool_name)
             if manifest is None or not manifest.supports_cancel:
                 return CancellationResult(
-                    accepted=False, request_id=request_id,
+                    accepted=False,
+                    request_id=request_id,
                     op_type=op.op_type,
-                    reason=(
-                        f"tool '{tool_name}' does not declare "
-                        "supports_cancel"
-                    ),
+                    reason=(f"tool '{tool_name}' does not declare supports_cancel"),
                 )
 
         cancelled = self._pending_ops.cancel(request_id)
         if cancelled is None:
             return CancellationResult(
-                accepted=False, request_id=request_id,
+                accepted=False,
+                request_id=request_id,
                 op_type=op.op_type,
-                reason="operation is no longer in flight "
-                       "(terminal/completed)",
+                reason="operation is no longer in flight (terminal/completed)",
             )
 
         # PHYSICAL cancel (v0.8.0 P2-10): if an in-process executor is
@@ -1857,9 +1161,7 @@ class Simulation:
                 "op_type": op.op_type.value,
                 "tool_name": op.metadata.get("tool_name", ""),
                 "reason": (
-                    "manifest supports_cancel"
-                    if op.op_type == OpType.TOOL_REQUEST
-                    else "system"
+                    "manifest supports_cancel" if op.op_type == OpType.TOOL_REQUEST else "system"
                 ),
             },
             success=True,
@@ -1962,22 +1264,17 @@ class Simulation:
         """Serialize all subsystem state into JSON-safe component blobs."""
         return {
             "config": self._config.model_dump(mode="json"),
-            "agent_tree": [
-                c.model_dump(mode="json") for c in self._agent_tree
-            ],
+            "agent_tree": [c.model_dump(mode="json") for c in self._agent_tree],
             "tick_engine": {
                 "current_tick": self._tick_engine.current_tick,
                 "state": self._tick_engine.state.value,
             },
             "state_epoch": self._state_epoch,
             "pause_reason": self._pause_reason,
-            "private_store_base_path": str(
-                self._private_store._config.base_path
-            ),
+            "private_store_base_path": str(self._private_store._config.base_path),
             "tasks": {
                 "tasks": {
-                    tid: t.model_dump(mode="json")
-                    for tid, t in self._task_tree._tasks.items()
+                    tid: t.model_dump(mode="json") for tid, t in self._task_tree._tasks.items()
                 },
                 "parent_map": self._task_tree._parent_map,
                 "children_map": self._task_tree._children_map,
@@ -2002,81 +1299,54 @@ class Simulation:
                     aid: c.model_dump(mode="json")
                     for aid, c in self._scheduler._wake_conditions.items()
                 },
-                "events": [
-                    qe.model_dump(mode="json") for qe in self._scheduler._events
-                ],
+                "events": [qe.model_dump(mode="json") for qe in self._scheduler._events],
                 "activation_history": [
-                    a.model_dump(mode="json")
-                    for a in self._scheduler._activation_history
+                    a.model_dump(mode="json") for a in self._scheduler._activation_history
                 ],
                 "activation_counter": self._scheduler._activation_counter,
             },
             "outbox": {
-                "entries": [
-                    e.model_dump(mode="json")
-                    for e in self._outbox._entries.values()
-                ],
+                "entries": [e.model_dump(mode="json") for e in self._outbox._entries.values()],
                 "max_retries": self._outbox._max_retries,
             },
             "pending_ops": {
                 "operations": [
-                    op.model_dump(mode="json")
-                    for op in self._pending_ops._operations.values()
+                    op.model_dump(mode="json") for op in self._pending_ops._operations.values()
                 ],
                 "seen_requests": self._pending_ops.seen_requests_snapshot(),
             },
             "ingress": snapshot_ingress_buffer(self._ingress),
             "kb": {
                 "resources": [
-                    r.model_dump(mode="json")
-                    for r in self._shared_kb._resources.values()
+                    r.model_dump(mode="json") for r in self._shared_kb._resources.values()
                 ],
                 "versions": [
-                    v.model_dump(mode="json")
-                    for v in self._shared_kb.versions._versions.values()
+                    v.model_dump(mode="json") for v in self._shared_kb.versions._versions.values()
                 ],
-                "permissions": [
-                    r.model_dump(mode="json")
-                    for r in self._permission_engine._rules
-                ],
+                "permissions": [r.model_dump(mode="json") for r in self._permission_engine._rules],
             },
             "record_store": {
                 "schemas": [
-                    s.model_dump(mode="json")
-                    for s in self._record_store._schemas.values()
+                    s.model_dump(mode="json") for s in self._record_store._schemas.values()
                 ],
-                "records": {
-                    k: dict(r)
-                    for k, r in self._record_store._records.items()
-                },
-                "ledger": [
-                    e.model_dump(mode="json")
-                    for e in self._record_store._ledger
-                ],
+                "records": {k: dict(r) for k, r in self._record_store._records.items()},
+                "ledger": [e.model_dump(mode="json") for e in self._record_store._ledger],
             },
             "asset_store": self._asset_store.snapshot(),
             "locks": {
                 "locks": [
-                    lock.model_dump(mode="json")
-                    for lock in self._lock_manager._locks.values()
+                    lock.model_dump(mode="json") for lock in self._lock_manager._locks.values()
                 ],
                 "lock_counter": self._lock_manager._lock_counter,
             },
             "audit": {
-                "entries": [
-                    e.model_dump(mode="json") for e in self._audit_log._entries
-                ],
+                "entries": [e.model_dump(mode="json") for e in self._audit_log._entries],
                 "next_event_id": self._audit_log._counter,
             },
             "tick_journal": {
-                "records": [
-                    r.model_dump(mode="json")
-                    for r in self._journal.records
-                ],
+                "records": [r.model_dump(mode="json") for r in self._journal.records],
             },
-            "file_ops_audit": [
-                e.model_dump(mode="json") for e in self._file_ops_audit._entries
-            ],
+            "file_ops_audit": [e.model_dump(mode="json") for e in self._file_ops_audit._entries],
             "agent_states": {
                 aid: {
                     "state": rs.state_machine.state.value,
@@ -2115,33 +1385,27 @@ class Simulation:
 
         # Private store (files live on disk under the saved base path)
         base = state.get("private_store_base_path", "private")
-        self._private_store = PrivateStore(PrivateStoreConfig(
-            base_path=base,
-            max_storage_bytes=self._config.private_storage_limit_mb * 1024 * 1024,
-        ))
+        self._private_store = PrivateStore(
+            PrivateStoreConfig(
+                base_path=base,
+                max_storage_bytes=self._config.private_storage_limit_mb * 1024 * 1024,
+            )
+        )
         for agent_config in self._agent_tree:
             self._private_store.initialize_agent(agent_config.agent_id)
 
         # Tasks
         task_state = state["tasks"]
         self._task_tree._tasks = {
-            tid: Task.model_validate(d)
-            for tid, d in task_state["tasks"].items()
+            tid: Task.model_validate(d) for tid, d in task_state["tasks"].items()
         }
         self._task_tree._parent_map = dict(task_state["parent_map"])
-        self._task_tree._children_map = {
-            k: list(v) for k, v in task_state["children_map"].items()
-        }
-        self._task_tree._assignee_map = {
-            k: list(v) for k, v in task_state["assignee_map"].items()
-        }
+        self._task_tree._children_map = {k: list(v) for k, v in task_state["children_map"].items()}
+        self._task_tree._assignee_map = {k: list(v) for k, v in task_state["assignee_map"].items()}
 
         # Emails
         email_state = state["emails"]
-        all_emails = {
-            eid: Email.model_validate(d)
-            for eid, d in email_state["all"].items()
-        }
+        all_emails = {eid: Email.model_validate(d) for eid, d in email_state["all"].items()}
         ms = self._mail_system
         ms._all_emails = all_emails
         ms._pending = [all_emails[eid] for eid in email_state["pending"]]
@@ -2149,39 +1413,26 @@ class Simulation:
             mb = ms._mailboxes.get(aid)
             if mb is None:
                 continue
-            mb._inbox = {
-                eid: all_emails[eid]
-                for eid in mb_state["inbox"] if eid in all_emails
-            }
-            mb._outbox = {
-                eid: all_emails[eid]
-                for eid in mb_state["outbox"] if eid in all_emails
-            }
+            mb._inbox = {eid: all_emails[eid] for eid in mb_state["inbox"] if eid in all_emails}
+            mb._outbox = {eid: all_emails[eid] for eid in mb_state["outbox"] if eid in all_emails}
 
         # Scheduler
         sched = state["scheduler"]
         self._scheduler._wake_conditions = {
-            aid: WakeCondition.model_validate(d)
-            for aid, d in sched["wake_conditions"].items()
+            aid: WakeCondition.model_validate(d) for aid, d in sched["wake_conditions"].items()
         }
-        self._scheduler._events = [
-            QueuedEvent.model_validate(d) for d in sched["events"]
-        ]
+        self._scheduler._events = [QueuedEvent.model_validate(d) for d in sched["events"]]
         self._scheduler._activation_history = [
-            AgentActivation.model_validate(d)
-            for d in sched["activation_history"]
+            AgentActivation.model_validate(d) for d in sched["activation_history"]
         ]
         self._scheduler._activation_counter = sched["activation_counter"]
 
         # Outbox
         ob = state["outbox"]
         self._outbox._entries = {
-            e["entry_id"]: OutboxEntry.model_validate(e)
-            for e in ob["entries"]
+            e["entry_id"]: OutboxEntry.model_validate(e) for e in ob["entries"]
         }
-        self._outbox._idempotency_keys = {
-            e.idempotency_key for e in self._outbox._entries.values()
-        }
+        self._outbox._idempotency_keys = {e.idempotency_key for e in self._outbox._entries.values()}
         self._outbox._max_retries = ob["max_retries"]
 
         # Pending operations (+ request_id history for replay dedupe)
@@ -2212,12 +1463,10 @@ class Simulation:
         # Shared KB (resources + versions + permissions)
         kb = state["kb"]
         self._shared_kb._resources = {
-            r["path"]: SharedKBResource.model_validate(r)
-            for r in kb["resources"]
+            r["path"]: SharedKBResource.model_validate(r) for r in kb["resources"]
         }
         self._shared_kb.versions._versions = {
-            v["path"]: VersionInfo.model_validate(v)
-            for v in kb["versions"]
+            v["path"]: VersionInfo.model_validate(v) for v in kb["versions"]
         }
         self._permission_engine._rules = [
             PermissionRule.model_validate(r) for r in kb["permissions"]
@@ -2227,26 +1476,23 @@ class Simulation:
         rs = state.get("record_store")
         if rs:
             from my_team.record_store import LedgerEntry, RecordSchema
+
             self._record_store._schemas = {
-                s["record_type"]: RecordSchema.model_validate(s)
-                for s in rs.get("schemas", [])
+                s["record_type"]: RecordSchema.model_validate(s) for s in rs.get("schemas", [])
             }
             self._record_store._records = {
-                key: dict(rec)
-                for key, rec in rs.get("records", {}).items()
+                key: dict(rec) for key, rec in rs.get("records", {}).items()
             }
             self._record_store._ledger = [
-                LedgerEntry.model_validate(e)
-                for e in rs.get("ledger", [])
+                LedgerEntry.model_validate(e) for e in rs.get("ledger", [])
             ]
-            self._record_store._ledger_counter = (
-                max((e.ledger_id for e in self._record_store._ledger), default=0)
+            self._record_store._ledger_counter = max(
+                (e.ledger_id for e in self._record_store._ledger), default=0
             )
             self._record_store._version_counter = {
-                key: len([
-                    e for e in self._record_store._ledger
-                    if f"{e.record_type}:{e.key}" == key
-                ])
+                key: len(
+                    [e for e in self._record_store._ledger if f"{e.record_type}:{e.key}" == key]
+                )
                 for key in self._record_store._records
             }
         asset_state = state.get("asset_store")
@@ -2256,8 +1502,7 @@ class Simulation:
         # Locks
         locks = state["locks"]
         self._lock_manager._locks = {
-            lock["resource"]: LockInfo.model_validate(lock)
-            for lock in locks["locks"]
+            lock["resource"]: LockInfo.model_validate(lock) for lock in locks["locks"]
         }
         self._lock_manager._lock_counter = locks["lock_counter"]
 
@@ -2265,9 +1510,9 @@ class Simulation:
         journal_state = state.get("tick_journal", {})
         if journal_state.get("records"):
             from my_team.journal import TickRecord
+
             self._journal._records = [
-                TickRecord.model_validate(r)
-                for r in journal_state["records"]
+                TickRecord.model_validate(r) for r in journal_state["records"]
             ]
         # Always restore audit from the direct blob (includes init events
         # that happen before any TickRecord).  The Journal is the
@@ -2275,15 +1520,12 @@ class Simulation:
         # source for pre-tick events.  During execution, both are kept
         # in sync via AuditLog.record() → Journal delegation.
         audit = state["audit"]
-        self._audit_log._entries = [
-            AuditEntry.model_validate(e) for e in audit["entries"]
-        ]
+        self._audit_log._entries = [AuditEntry.model_validate(e) for e in audit["entries"]]
         self._audit_log._counter = audit["next_event_id"]
 
         # File ops audit
         self._file_ops_audit._entries = [
-            FileOpsAuditEntry.model_validate(e)
-            for e in state.get("file_ops_audit", [])
+            FileOpsAuditEntry.model_validate(e) for e in state.get("file_ops_audit", [])
         ]
 
         # Agent runtime states (state machine + continuation)
@@ -2296,9 +1538,7 @@ class Simulation:
                 initial_state=AgentState(rs_state["state"]),
             )
             rs.state_machine._transition_count = rs_state["transition_count"]
-            rs.continuation = AgentContinuation.model_validate(
-                rs_state["continuation"]
-            )
+            rs.continuation = AgentContinuation.model_validate(rs_state["continuation"])
             rs.active_activation_id = rs_state["active_activation_id"]
             rs.last_activation_tick = rs_state["last_activation_tick"]
 
@@ -2318,7 +1558,9 @@ class Simulation:
         except Exception as e:  # noqa: BLE001 — crash guard hooks every crash
             if not self.is_paused:
                 self._crash_guard.record_crash(
-                    self._tick_engine.current_tick, str(e), self._state_epoch,
+                    self._tick_engine.current_tick,
+                    str(e),
+                    self._state_epoch,
                 )
             raise
 
@@ -2361,8 +1603,16 @@ class Simulation:
 
         tick = self._tick_engine.current_tick
         self._last_tick_phases = [
-            "ingest", "freeze", "schedule", "observe", "decide",
-            "validate", "act", "commit", "publish", "audit",
+            "ingest",
+            "freeze",
+            "schedule",
+            "observe",
+            "decide",
+            "validate",
+            "act",
+            "commit",
+            "publish",
+            "audit",
         ]
 
         # T4: start journal record for this tick
@@ -2413,6 +1663,7 @@ class Simulation:
         current_rec = self._journal.current_record
         if current_rec is not None:
             from my_team.tool_protocol import hash_payload
+
             current_rec.snapshot_hash = hash_payload(self._last_snapshot or {})
             if self._last_tick_rolled_back:
                 self._journal.finalize(
@@ -2454,9 +1705,7 @@ class Simulation:
                     candidate.agent_id,
                 )
                 if activation:
-                    self._scheduler.requeue_events(
-                        [e.event_id for e in activation.wake_events]
-                    )
+                    self._scheduler.requeue_events([e.event_id for e in activation.wake_events])
         self._scheduler.end_tick()
 
         # Advance the clock — unless this tick paused the system
@@ -2471,9 +1720,7 @@ class Simulation:
             tick=tick,
             phases_completed=list(self._last_tick_phases),
             committed=not rolled_back,
-            errors=[
-                {"phase": "commit", "error": "tick rolled back"}
-            ] if rolled_back else [],
+            errors=[{"phase": "commit", "error": "tick rolled back"}] if rolled_back else [],
         )
 
     def run(self, max_ticks: int = 100) -> list[TickResult]:
@@ -2545,8 +1792,7 @@ class Simulation:
         # can retry / fail / escalate. FAILED is terminal: the op is
         # removed after the wake.
         failed = [
-            op for op in self._pending_ops._operations.values()
-            if op.status == OpStatus.FAILED
+            op for op in self._pending_ops._operations.values() if op.status == OpStatus.FAILED
         ]
         for op in failed:
             self._audit_log.record(
@@ -2625,8 +1871,7 @@ class Simulation:
                         "op_type": op.op_type.value,
                         "reason": "superseded",
                         "pending_request_id": (
-                            runtime_state.continuation.pending_request_id
-                            if runtime_state else ""
+                            runtime_state.continuation.pending_request_id if runtime_state else ""
                         ),
                     },
                     success=False,
@@ -2658,8 +1903,7 @@ class Simulation:
                 details: dict[str, Any] = {
                     "request_id": op.request_id,
                     "tool_name": (
-                        tr.tool_name if tr is not None
-                        else op.metadata.get("tool_name", "")
+                        tr.tool_name if tr is not None else op.metadata.get("tool_name", "")
                     ),
                     "state_epoch": op.state_epoch,
                 }
@@ -2671,7 +1915,8 @@ class Simulation:
                     details["output_hash"] = contract.get("output_hash", "")
                     details["result_status"] = contract.get("status", "")
                     details["executor_cancel_confirmed"] = contract.get(
-                        "executor_cancel_confirmed", False,
+                        "executor_cancel_confirmed",
+                        False,
                     )
                 self._audit_log.record(
                     AuditEventType.TOOL_RESULT,
@@ -2708,12 +1953,15 @@ class Simulation:
                 ext_id = ev.payload.get(integration.receipt.external_id_field, "")
                 if isinstance(ext_id, str) and ext_id:
                     op_id = self._integrations.resolve_op_id(
-                        integration.name, ext_id, ev.payload,
+                        integration.name,
+                        ext_id,
+                        ev.payload,
                     )
                     if op_id is not None:
                         op = self._pending_ops.get_by_id(op_id)
                         if op is not None and op.status in {
-                            OpStatus.SUBMITTED, OpStatus.PENDING,
+                            OpStatus.SUBMITTED,
+                            OpStatus.PENDING,
                         }:
                             op.result = {
                                 "external_id": ext_id,
@@ -2754,33 +2002,36 @@ class Simulation:
                 ):
                     task = self._task_tree.get(task_id)
                     assignee = task.assignee_agent_id
-                    cfg = (
-                        self._agent_tree.get(assignee)
-                        if assignee in self._agent_tree else None
-                    )
+                    cfg = self._agent_tree.get(assignee) if assignee in self._agent_tree else None
                     if cfg is not None and cfg.kind == "human":
                         self._pending_human_actions.setdefault(
-                            assignee, [],
-                        ).append({
-                            "action": action,
-                            "task_id": task_id,
-                            **{
-                                k: v for k, v in ev.payload.items()
-                                if k not in ("action", "task_id")
-                            },
-                        })
-                        self._scheduler.enqueue_event(WakeupEvent(
-                            event_type=WakeEventType.HUMAN_ACTION,
-                            target_agent_id=assignee,
-                            tick=tick,
-                            visible_at_tick=tick,  # Ingest→Schedule same tick
-                            source_agent_id="human",
-                            task_id=task_id,
-                            details={
+                            assignee,
+                            [],
+                        ).append(
+                            {
                                 "action": action,
-                                "external_id": ev.external_id,
-                            },
-                        ))
+                                "task_id": task_id,
+                                **{
+                                    k: v
+                                    for k, v in ev.payload.items()
+                                    if k not in ("action", "task_id")
+                                },
+                            }
+                        )
+                        self._scheduler.enqueue_event(
+                            WakeupEvent(
+                                event_type=WakeEventType.HUMAN_ACTION,
+                                target_agent_id=assignee,
+                                tick=tick,
+                                visible_at_tick=tick,  # Ingest→Schedule same tick
+                                source_agent_id="human",
+                                task_id=task_id,
+                                details={
+                                    "action": action,
+                                    "external_id": ev.external_id,
+                                },
+                            )
+                        )
                         self._audit_log.record(
                             AuditEventType.HUMAN_ACTION,
                             agent_id=assignee,
@@ -2826,34 +2077,30 @@ class Simulation:
                 cond = self._scheduler.get_wake_condition(agent_id)
                 if cond is None:
                     continue
-                matching = [
-                    t for t in cond.event_types
-                    if t == WakeEventType.EXTERNAL_RESULT
-                ]
+                matching = [t for t in cond.event_types if t == WakeEventType.EXTERNAL_RESULT]
                 if not matching:
                     continue
-                self._scheduler.enqueue_event(WakeupEvent(
-                    event_type=WakeEventType.EXTERNAL_RESULT,
-                    target_agent_id=agent_id,
-                    tick=tick,
-                    visible_at_tick=tick,  # Ingest→Schedule same tick
-                    source_agent_id=ev.source,
-                    task_id="",
-                    details={
-                        "external_id": ev.external_id,
-                        "event_type": ev.event_type,
-                        "source": ev.source,
-                        "result": ev.payload,
-                    },
-                ))
+                self._scheduler.enqueue_event(
+                    WakeupEvent(
+                        event_type=WakeEventType.EXTERNAL_RESULT,
+                        target_agent_id=agent_id,
+                        tick=tick,
+                        visible_at_tick=tick,  # Ingest→Schedule same tick
+                        source_agent_id=ev.source,
+                        task_id="",
+                        details={
+                            "external_id": ev.external_id,
+                            "event_type": ev.event_type,
+                            "source": ev.source,
+                            "result": ev.payload,
+                        },
+                    )
+                )
 
         # Deliver any external ops that were just completed by receipts.
         for op in self._pending_ops.collect_completed(tick):
             rs2 = self._agent_runtime_states.get(op.agent_id)
-            if (
-                rs2 is not None
-                and rs2.continuation.pending_request_id == op.request_id
-            ):
+            if rs2 is not None and rs2.continuation.pending_request_id == op.request_id:
                 if op.op_type == OpType.TOOL_REQUEST:
                     if op.metadata.get("external_tool"):
                         rs2.receive_external_result(op.result, tick)
@@ -2897,10 +2144,7 @@ class Simulation:
         if not child_ids:
             return None
         if strategy == PoolStrategy.SKILL_MATCH and skill:
-            matched = [
-                cid for cid in child_ids
-                if self._child_has_skill(cid, skill)
-            ]
+            matched = [cid for cid in child_ids if self._child_has_skill(cid, skill)]
             if matched:
                 child_ids = matched
             # No match → fall through to least_busy over all children.
@@ -2912,11 +2156,7 @@ class Simulation:
         return min(
             child_ids,
             key=lambda cid: (
-                sum(
-                    1
-                    for t in self._task_tree.get_assignee_tasks(cid)
-                    if t.is_active
-                ),
+                sum(1 for t in self._task_tree.get_assignee_tasks(cid) if t.is_active),
                 cid,
             ),
         )
@@ -2946,24 +2186,18 @@ class Simulation:
                 continue
             manager_id = config.agent_id
             owned = self._task_tree.get_assignee_tasks(manager_id)
-            dispatched = {
-                t.derived_from for t in self._task_tree
-                if t.derived_from is not None
-            }
+            dispatched = {t.derived_from for t in self._task_tree if t.derived_from is not None}
             pending = [
-                t for t in owned
-                if t.status == TaskStatus.ASSIGNED
-                and t.task_id not in dispatched
+                t for t in owned if t.status == TaskStatus.ASSIGNED and t.task_id not in dispatched
             ]
             idle_children = [
-                cid for cid in sorted(self._agent_tree.child_ids(manager_id))
-                if not any(
-                    t.is_active
-                    for t in self._task_tree.get_assignee_tasks(cid)
-                )
+                cid
+                for cid in sorted(self._agent_tree.child_ids(manager_id))
+                if not any(t.is_active for t in self._task_tree.get_assignee_tasks(cid))
             ]
             for task, child in zip(pending, idle_children):
                 from uuid import uuid4
+
                 copy_id = f"task.{tick}.{uuid4().hex[:8]}"
                 group_id = f"pool.{manager_id}.{tick}.{copy_id}"
                 self._transaction_buffer.stage(
@@ -3005,8 +2239,7 @@ class Simulation:
         first cron fire is the next occurrence strictly after it."""
         if rule.target_agent_id not in self._agent_tree:
             raise ValueError(
-                f"Schedule rule '{rule.rule_id}' targets unknown agent "
-                f"'{rule.target_agent_id}'",
+                f"Schedule rule '{rule.rule_id}' targets unknown agent '{rule.target_agent_id}'",
             )
         rule.registered_at = self._tick_engine.wall_now()
         return self._calendar_store.register(rule)
@@ -3058,11 +2291,9 @@ class Simulation:
                 group_id=group_id,
                 atomicity="group",
             )
-            if (
-                rule.action == ScheduleAction.CREATE_TASK
-                and rule.task_template is not None
-            ):
+            if rule.action == ScheduleAction.CREATE_TASK and rule.task_template is not None:
                 from uuid import uuid4
+
                 task_id = f"task.{tick}.{uuid4().hex[:8]}"
                 template = rule.task_template
                 deadline = (
@@ -3120,23 +2351,25 @@ class Simulation:
             runtime_state = self._agent_runtime_states.get(assignee)
             if runtime_state is None:
                 continue  # human/service targets without runtime state
-            self._scheduler.enqueue_event(WakeupEvent(
-                event_type=(
-                    WakeEventType.TIMER_EXPIRY
-                    if kind == "expired"
-                    else WakeEventType.DEADLINE_APPROACHING
-                ),
-                target_agent_id=assignee,
-                tick=tick,
-                visible_at_tick=tick,  # Ingest→Schedule same tick
-                source_agent_id="system",
-                task_id=task.task_id,
-                details={
-                    "deadline": task.deadline.isoformat(),
-                    "now": now.isoformat(),
-                    "kind": kind,
-                },
-            ))
+            self._scheduler.enqueue_event(
+                WakeupEvent(
+                    event_type=(
+                        WakeEventType.TIMER_EXPIRY
+                        if kind == "expired"
+                        else WakeEventType.DEADLINE_APPROACHING
+                    ),
+                    target_agent_id=assignee,
+                    tick=tick,
+                    visible_at_tick=tick,  # Ingest→Schedule same tick
+                    source_agent_id="system",
+                    task_id=task.task_id,
+                    details={
+                        "deadline": task.deadline.isoformat(),
+                        "now": now.isoformat(),
+                        "kind": kind,
+                    },
+                )
+            )
             self._audit_log.record(
                 AuditEventType.AGENT_WOKEN,
                 agent_id=assignee,
@@ -3166,61 +2399,64 @@ class Simulation:
     ) -> None:
         """Publish a TOOL_RESULT wake event for a delivered op result."""
         if op.op_type == OpType.LLM_REQUEST:
-            self._scheduler.enqueue_event(WakeupEvent(
-                event_type=WakeEventType.TOOL_RESULT,  # reuse TOOL_RESULT
-                target_agent_id=op.agent_id,
-                tick=tick,
-                visible_at_tick=tick,  # Ingest→Schedule same tick
-                source_agent_id="llm_gateway",
-                task_id=op.task_id,
-                details={
-                    "request_id": op.request_id,
-                    "result_type": "llm_result",
-                    "result": result,
-                },
-            ))
+            self._scheduler.enqueue_event(
+                WakeupEvent(
+                    event_type=WakeEventType.TOOL_RESULT,  # reuse TOOL_RESULT
+                    target_agent_id=op.agent_id,
+                    tick=tick,
+                    visible_at_tick=tick,  # Ingest→Schedule same tick
+                    source_agent_id="llm_gateway",
+                    task_id=op.task_id,
+                    details={
+                        "request_id": op.request_id,
+                        "result_type": "llm_result",
+                        "result": result,
+                    },
+                )
+            )
         elif op.op_type == OpType.TOOL_REQUEST:
             # T9: an external-owned outbound op wakes the agent with an
             # EXTERNAL_RESULT event (决策3 — 纯事件). Non-external tools
             # keep the existing TOOL_RESULT path.
             if op.metadata.get("external_tool"):
-                self._scheduler.enqueue_event(WakeupEvent(
-                    event_type=WakeEventType.EXTERNAL_RESULT,
+                self._scheduler.enqueue_event(
+                    WakeupEvent(
+                        event_type=WakeEventType.EXTERNAL_RESULT,
+                        target_agent_id=op.agent_id,
+                        tick=tick,
+                        visible_at_tick=tick,  # Ingest→Schedule same tick
+                        source_agent_id=op.metadata.get("provider", "external"),
+                        task_id=op.task_id,
+                        details={
+                            "request_id": op.request_id,
+                            "result_type": "external_result",
+                            "result": result,
+                        },
+                    )
+                )
+                return
+            self._scheduler.enqueue_event(
+                WakeupEvent(
+                    event_type=WakeEventType.TOOL_RESULT,
                     target_agent_id=op.agent_id,
                     tick=tick,
                     visible_at_tick=tick,  # Ingest→Schedule same tick
-                    source_agent_id=op.metadata.get("provider", "external"),
+                    source_agent_id="tool_executor",
                     task_id=op.task_id,
                     details={
                         "request_id": op.request_id,
-                        "result_type": "external_result",
+                        "result_type": "tool_result",
                         "result": result,
                     },
-                ))
-                return
-            self._scheduler.enqueue_event(WakeupEvent(
-                event_type=WakeEventType.TOOL_RESULT,
-                target_agent_id=op.agent_id,
-                tick=tick,
-                visible_at_tick=tick,  # Ingest→Schedule same tick
-                source_agent_id="tool_executor",
-                task_id=op.task_id,
-                details={
-                    "request_id": op.request_id,
-                    "result_type": "tool_result",
-                    "result": result,
-                },
-            ))
+                )
+            )
 
     def _get_agent_states(self) -> dict[str, AgentState]:
         """Get current state of all agents for scheduler.
 
         Uses AgentRuntimeState as the authoritative source.
         """
-        return {
-            aid: rs.state
-            for aid, rs in self._agent_runtime_states.items()
-        }
+        return {aid: rs.state for aid, rs in self._agent_runtime_states.items()}
 
     def _agent_urgency(self, agent_id: str) -> tuple[int, Any]:
         """Most urgent active task of an agent — SLA sort key
@@ -3251,17 +2487,21 @@ class Simulation:
             for agent_config in self._agent_tree:
                 is_bootstrap = agent_config.metadata.get("bootstrap", False)
                 if is_bootstrap:
-                    self._scheduler.enqueue_event(WakeupEvent(
-                        event_type=WakeEventType.BOOTSTRAP,
-                        target_agent_id=agent_config.agent_id,
-                        tick=tick,
-                        visible_at_tick=tick,  # immediate visibility
-                        source_agent_id="system",
-                    ))
+                    self._scheduler.enqueue_event(
+                        WakeupEvent(
+                            event_type=WakeEventType.BOOTSTRAP,
+                            target_agent_id=agent_config.agent_id,
+                            tick=tick,
+                            visible_at_tick=tick,  # immediate visibility
+                            source_agent_id="system",
+                        )
+                    )
 
         agent_states = self._get_agent_states()
         ready = self._scheduler.compute_ready_set(
-            tick, agent_states, urgency=self._agent_urgency,
+            tick,
+            agent_states,
+            urgency=self._agent_urgency,
         )
 
         # Capacity-deferred agents (T11 决策 2): explainable per
@@ -3360,28 +2600,30 @@ class Simulation:
             if mailbox:
                 for email in mailbox.inbox:
                     if email.status.value == "delivered":
-                        pending_emails.append({
-                            "email_id": email.email_id,
-                            "from": email.from_agent,
-                            "to": email.to,
-                            "subject": email.subject,
-                            "email_type": email.email_type.value,
-                            "task_id": email.task_id,
-                            "body": email.body,
-                            # v0.10 T8b: attachment refs visible to the
-                            # recipient's context (清单, not payload)
-                            "attachments": [
-                                {
-                                    "ref_type": a.ref_type,
-                                    "path": a.path,
-                                    "version": a.version,
-                                    "hash": a.hash,
-                                    "size": a.size,
-                                    "mime": a.mime,
-                                }
-                                for a in email.attachments
-                            ],
-                        })
+                        pending_emails.append(
+                            {
+                                "email_id": email.email_id,
+                                "from": email.from_agent,
+                                "to": email.to,
+                                "subject": email.subject,
+                                "email_type": email.email_type.value,
+                                "task_id": email.task_id,
+                                "body": email.body,
+                                # v0.10 T8b: attachment refs visible to the
+                                # recipient's context (清单, not payload)
+                                "attachments": [
+                                    {
+                                        "ref_type": a.ref_type,
+                                        "path": a.path,
+                                        "version": a.version,
+                                        "hash": a.hash,
+                                        "size": a.size,
+                                        "mime": a.mime,
+                                    }
+                                    for a in email.attachments
+                                ],
+                            }
+                        )
 
         return {
             "tick": tick,
@@ -3391,8 +2633,7 @@ class Simulation:
             "shared_kb": {
                 "paths": self._shared_kb.all_paths(),
                 "versions": {
-                    p: v.version
-                    for p, v in self._shared_kb.versions.all_versions().items()
+                    p: v.version for p, v in self._shared_kb.versions.all_versions().items()
                 },
             },
             "locks": {
@@ -3403,8 +2644,7 @@ class Simulation:
                 for lock in self._lock_manager.active_locks()
             },
             "lock_tokens": {
-                lock.resource: lock.lock_token
-                for lock in self._lock_manager.active_locks()
+                lock.resource: lock.lock_token for lock in self._lock_manager.active_locks()
             },
             "tasks": {
                 t.task_id: {
@@ -3428,16 +2668,18 @@ class Simulation:
         # Generate wake events for recipients — visible this tick
         for email in delivered:
             for recipient in email.to:
-                self._scheduler.enqueue_event(WakeupEvent(
-                    event_type=WakeEventType.NEW_EMAIL,
-                    target_agent_id=recipient,
-                    tick=tick,
-                    visible_at_tick=tick,  # same-tick visibility
-                    source_agent_id=email.from_agent,
-                    task_id=email.task_id or "",
-                    thread_id=email.thread_id or "",
-                    details={"email_id": email.email_id},
-                ))
+                self._scheduler.enqueue_event(
+                    WakeupEvent(
+                        event_type=WakeEventType.NEW_EMAIL,
+                        target_agent_id=recipient,
+                        tick=tick,
+                        visible_at_tick=tick,  # same-tick visibility
+                        source_agent_id=email.from_agent,
+                        task_id=email.task_id or "",
+                        thread_id=email.thread_id or "",
+                        details={"email_id": email.email_id},
+                    )
+                )
         return delivered
 
     def _phase_observe(
@@ -3474,7 +2716,9 @@ class Simulation:
             # T6: Use ContextCompiler for role-aware observation
             continuation = self._agent_runtime_states[agent_id].continuation
             compiled = self._context_compiler.compile(
-                agent_config, snapshot, continuation,
+                agent_config,
+                snapshot,
+                continuation,
             )
 
             # Wrap in AgentObservation (backward compatible)
@@ -3488,9 +2732,7 @@ class Simulation:
                 shared_kb_snapshot=compiled.get("shared_kb_snapshot", {}),
                 lock_states=compiled.get("lock_states", {}),
                 private_workspace_path=compiled.get("private_workspace_path", ""),
-                pending_human_actions=list(
-                    self._pending_human_actions.get(agent_id, [])
-                ),
+                pending_human_actions=list(self._pending_human_actions.get(agent_id, [])),
             )
         return observations
 
@@ -3519,7 +2761,8 @@ class Simulation:
             if obs:
                 continuation = self._agent_runtime_states[agent_id].continuation
                 intents[agent_id] = runtime.decide_intents(
-                    obs, continuation=continuation,
+                    obs,
+                    continuation=continuation,
                 )
                 # If the agent just processed a pending result, finalize
                 if continuation.phase == ContinuationPhase.PROCESSING_RESULT:
@@ -3599,27 +2842,25 @@ class Simulation:
                 if isinstance(intent, SubmitLLMRequest):
                     # Commit-time budget re-check (配额仍够): registry
                     # in-flight + this tick's submissions for this agent
-                    in_flight = (
-                        self._pending_ops.count_in_flight(
-                            agent_id, op_type=OpType.LLM_REQUEST,
-                        )
-                        + submitted_llm.get(agent_id, 0)
-                    )
+                    in_flight = self._pending_ops.count_in_flight(
+                        agent_id,
+                        op_type=OpType.LLM_REQUEST,
+                    ) + submitted_llm.get(agent_id, 0)
                     if in_flight >= self._config.max_concurrent_llm_requests:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"LLM budget exceeded for '{agent_id}' "
-                                f"at commit time ({in_flight} in flight, "
-                                f"max "
-                                f"{self._config.max_concurrent_llm_requests})"
-                            ),
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(
+                                    f"LLM budget exceeded for '{agent_id}' "
+                                    f"at commit time ({in_flight} in flight, "
+                                    f"max "
+                                    f"{self._config.max_concurrent_llm_requests})"
+                                ),
+                            )
+                        )
                         continue
-                    submitted_llm[agent_id] = (
-                        submitted_llm.get(agent_id, 0) + 1
-                    )
+                    submitted_llm[agent_id] = submitted_llm.get(agent_id, 0) + 1
                     op = self._pending_ops.submit(
                         op_type=OpType.LLM_REQUEST,
                         agent_id=agent_id,
@@ -3647,23 +2888,27 @@ class Simulation:
                         # P0-2: snapshot continuation before mutation
                         c = runtime_state.continuation
                         self._tick_continuations[agent_id] = (
-                            c.phase, c.pending_request_id,
+                            c.phase,
+                            c.pending_request_id,
                             c.pending_request_type,
                         )
                         c.advance_to_waiting_llm(op.request_id, tick)
                         runtime_state.transition_to_waiting(
-                            AgentState.WAITING_FOR_LLM, tick,
+                            AgentState.WAITING_FOR_LLM,
+                            tick,
                         )
                     # P0-2: track op for rollback
                     self._tick_pending_ops.append((agent_id, op))
-                    results.append(ActionResult(
-                        action=action,
-                        success=True,
-                        result_data={
-                            "request_id": op.request_id,
-                            "status": "pending",
-                        },
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={
+                                "request_id": op.request_id,
+                                "status": "pending",
+                            },
+                        )
+                    )
                     continue
 
                 # SubmitToolRequest → local tools execute, remote register
@@ -3677,9 +2922,8 @@ class Simulation:
                     manifest = self._tool_registry.get_manifest(
                         intent.tool_name,
                     )
-                    kernel_executed = (
-                        manifest is not None
-                        and not requires_executor(manifest.execution_class)
+                    kernel_executed = manifest is not None and not requires_executor(
+                        manifest.execution_class
                     )
                     if kernel_executed:
                         # Local tools execute synchronously; file tools
@@ -3698,17 +2942,22 @@ class Simulation:
                                 tool_name=intent.tool_name,
                                 **intent.arguments,
                             )
-                            results.append(ActionResult(
-                                action=action,
-                                success=tr.success,
-                                result_data=tr.data,
-                                error=tr.error,
-                            ))
+                            results.append(
+                                ActionResult(
+                                    action=action,
+                                    success=tr.success,
+                                    result_data=tr.data,
+                                    error=tr.error,
+                                )
+                            )
                         else:
-                            results.append(ActionResult(
-                                action=action, success=False,
-                                error=f"No runtime for '{agent_id}'",
-                            ))
+                            results.append(
+                                ActionResult(
+                                    action=action,
+                                    success=False,
+                                    error=f"No runtime for '{agent_id}'",
+                                )
+                            )
                     else:
                         # Remote tool → register pending operation with
                         # a system-built ToolRequest (v0.8.0 P1-3). All
@@ -3758,7 +3007,8 @@ class Simulation:
                             # P0-2: snapshot continuation before mutation
                             c = runtime_state.continuation
                             self._tick_continuations[agent_id] = (
-                                c.phase, c.pending_request_id,
+                                c.phase,
+                                c.pending_request_id,
                                 c.pending_request_type,
                             )
                             # T9: an outbound tool owned by an Integration
@@ -3766,35 +3016,42 @@ class Simulation:
                             # 纯事件等待，不乐观回查) until the external op
                             # completes or times out. Kernel-internal remote
                             # tools keep the existing WAITING_FOR_TOOL path.
-                            if self._integrations.get_by_tool(
-                                intent.tool_name,
-                            ) is not None:
+                            if (
+                                self._integrations.get_by_tool(
+                                    intent.tool_name,
+                                )
+                                is not None
+                            ):
                                 op.metadata["external_tool"] = True
-                                op.metadata["provider"] = (
-                                    self._integrations
-                                    .provider_for_tool(intent.tool_name)
+                                op.metadata["provider"] = self._integrations.provider_for_tool(
+                                    intent.tool_name
                                 )
                                 c.advance_to_waiting_external(
-                                    op.request_id, tick,
+                                    op.request_id,
+                                    tick,
                                 )
                                 runtime_state.transition_to_waiting(
-                                    AgentState.WAITING_FOR_EXTERNAL, tick,
+                                    AgentState.WAITING_FOR_EXTERNAL,
+                                    tick,
                                 )
                             else:
                                 c.advance_to_waiting_tool(op.request_id, tick)
                                 runtime_state.transition_to_waiting(
-                                    AgentState.WAITING_FOR_TOOL, tick,
+                                    AgentState.WAITING_FOR_TOOL,
+                                    tick,
                                 )
                         # P0-2: track op for rollback
                         self._tick_pending_ops.append((agent_id, op))
-                        results.append(ActionResult(
-                            action=action,
-                            success=True,
-                            result_data={
-                                "request_id": op.request_id,
-                                "status": "pending",
-                            },
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=True,
+                                result_data={
+                                    "request_id": op.request_id,
+                                    "status": "pending",
+                                },
+                            )
+                        )
                     continue
 
                 # SendEmailIntent → stage EMAIL_SEND
@@ -3813,15 +3070,17 @@ class Simulation:
                             # v0.10 T8b: attachment refs carried on the
                             # email (never copied)
                             "attachments": [
-                                AttachmentRef.model_validate(a)
-                                for a in intent.attachments
+                                AttachmentRef.model_validate(a) for a in intent.attachments
                             ],
                         },
                     )
-                    results.append(ActionResult(
-                        action=action, success=True,
-                        result_data={"staged": True},
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={"staged": True},
+                        )
+                    )
                     continue
 
                 # DelegateIntent → stage TASK_CREATE + EMAIL_SEND.
@@ -3831,6 +3090,7 @@ class Simulation:
                 # versa). Members share group_id = the intent's id.
                 if isinstance(intent, DelegateIntent):
                     from uuid import uuid4
+
                     task_id = f"task.{tick}.{uuid4().hex[:8]}"
                     recipient = self._agent_tree.get(
                         intent.recipient_agent_id,
@@ -3853,14 +3113,16 @@ class Simulation:
                             skill=intent.skill,
                         )
                         if pool_child is None:
-                            results.append(ActionResult(
-                                action=action, success=False,
-                                error=(
-                                    f"WorkerPool '{intent.recipient_agent_id}'"
-                                    " has no workers"
-                                ),
-                                error_code="INVALID_ARGUMENT",
-                            ))
+                            results.append(
+                                ActionResult(
+                                    action=action,
+                                    success=False,
+                                    error=(
+                                        f"WorkerPool '{intent.recipient_agent_id}' has no workers"
+                                    ),
+                                    error_code="INVALID_ARGUMENT",
+                                )
+                            )
                             continue
                         pool_copy_id = f"task.{tick}.{uuid4().hex[:8]}"
                     self._transaction_buffer.stage(
@@ -3889,9 +3151,7 @@ class Simulation:
                                 "task_id": pool_copy_id,
                                 "title": intent.task_title,
                                 "description": intent.task_description,
-                                "assigner_agent_id": (
-                                    intent.recipient_agent_id
-                                ),
+                                "assigner_agent_id": (intent.recipient_agent_id),
                                 "assignee_agent_id": pool_child,
                                 "derived_from": task_id,
                                 "priority": "normal",
@@ -3915,20 +3175,27 @@ class Simulation:
                         group_id=intent.intent_id,
                         atomicity="group",
                     )
-                    results.append(ActionResult(
-                        action=action, success=True,
-                        result_data={"task_id": task_id, "staged": True},
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={"task_id": task_id, "staged": True},
+                        )
+                    )
                     continue
 
                 # WritePrivateFileIntent → stage FILE_WRITE
                 if isinstance(intent, WritePrivateFileIntent):
                     err = self._validate_write_path(intent.path)
                     if err is not None:
-                        results.append(ActionResult(
-                            action=action, success=False,
-                            error=err, error_code="INVALID_ARGUMENT",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=err,
+                                error_code="INVALID_ARGUMENT",
+                            )
+                        )
                         continue
                     self._transaction_buffer.stage(
                         effect_type=EffectType.FILE_WRITE,
@@ -3936,10 +3203,13 @@ class Simulation:
                         resource=intent.path,
                         data={"content": intent.content},
                     )
-                    results.append(ActionResult(
-                        action=action, success=True,
-                        result_data={"staged": True},
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={"staged": True},
+                        )
+                    )
                     continue
 
                 # WaitForEventIntent → agent waits for specific event
@@ -3947,10 +3217,13 @@ class Simulation:
                     if runtime_state:
                         waiting_state = AgentState(intent.waiting_state)
                         runtime_state.transition_to_waiting(waiting_state, tick)
-                    results.append(ActionResult(
-                        action=action, success=True,
-                        result_data={"waiting": intent.waiting_state},
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={"waiting": intent.waiting_state},
+                        )
+                    )
                     continue
 
                 # AcceptTaskIntent → stage TASK_UPDATE (accepted).
@@ -3963,10 +3236,13 @@ class Simulation:
                         resource=intent.task_id,
                         data={"status": "accepted"},
                     )
-                    results.append(ActionResult(
-                        action=action, success=True,
-                        result_data={"task_id": intent.task_id, "staged": True},
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={"task_id": intent.task_id, "staged": True},
+                        )
+                    )
                     continue
 
                 # CompleteTaskIntent → stage TASK_UPDATE (completed)
@@ -3981,10 +3257,13 @@ class Simulation:
                             "artifacts": intent.artifacts,
                         },
                     )
-                    results.append(ActionResult(
-                        action=action, success=True,
-                        result_data={"task_id": intent.task_id, "staged": True},
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={"task_id": intent.task_id, "staged": True},
+                        )
+                    )
                     continue
 
                 # FailTaskIntent → stage TASK_UPDATE (failed)
@@ -3999,18 +3278,23 @@ class Simulation:
                             "retryable": intent.retryable,
                         },
                     )
-                    results.append(ActionResult(
-                        action=action, success=True,
-                        result_data={"task_id": intent.task_id, "staged": True},
-                    ))
+                    results.append(
+                        ActionResult(
+                            action=action,
+                            success=True,
+                            result_data={"task_id": intent.task_id, "staged": True},
+                        )
+                    )
                     continue
 
                 # Unknown intent — record as failure
-                results.append(ActionResult(
-                    action=action,
-                    success=False,
-                    error=f"Unsupported intent type: {intent.intent_type}",
-                ))
+                results.append(
+                    ActionResult(
+                        action=action,
+                        success=False,
+                        error=f"Unsupported intent type: {intent.intent_type}",
+                    )
+                )
 
             all_results[agent_id] = results
 
@@ -4061,10 +3345,7 @@ class Simulation:
             # PreValidate failure == the round's validation failed ==
             # nothing executes, nothing commits (事务原子性 — no partial
             # LLM call happens). Judgment: 累计 + 本次请求估算.
-            llm_intents = [
-                i for i in intent_list
-                if isinstance(i, SubmitLLMRequest)
-            ]
+            llm_intents = [i for i in intent_list if isinstance(i, SubmitLLMRequest)]
             if llm_intents:
                 rejection = self._budget_rejection(agent_id, llm_intents)
                 if rejection is not None:
@@ -4074,12 +3355,14 @@ class Simulation:
                             tool_name=getattr(intent, "tool_name", ""),
                             payload=dict(intent.payload),
                         )
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=rejection.reason,
-                            error_code="BUDGET_EXCEEDED",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=rejection.reason,
+                                error_code="BUDGET_EXCEEDED",
+                            )
+                        )
                     validated[agent_id] = results
                     self._audit_budget_rejection(agent_id, rejection)
                     continue
@@ -4104,27 +3387,28 @@ class Simulation:
                 # 之前：重放的 request_id 无论当前 manifest/能力状态如何
                 # 一律拒绝（身份去重优先于能力，§3.1 Ingest 去重语义）。
                 if isinstance(intent, (SubmitLLMRequest, SubmitToolRequest)):
-                    if (
-                        intent.request_id
-                        and (
-                            intent.request_id in seen_request_ids
-                            or self._pending_ops.find_in_flight_request_id(
-                                agent_id, intent.request_id,
-                            ) is not None
-                            or self._pending_ops.is_seen(
-                                agent_id, intent.request_id,
-                            )
+                    if intent.request_id and (
+                        intent.request_id in seen_request_ids
+                        or self._pending_ops.find_in_flight_request_id(
+                            agent_id,
+                            intent.request_id,
+                        )
+                        is not None
+                        or self._pending_ops.is_seen(
+                            agent_id,
+                            intent.request_id,
                         )
                     ):
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"Duplicate request_id '{intent.request_id}' "
-                                f"for '{agent_id}'"
-                            ),
-                            error_code="DUPLICATE_REQUEST_ID",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(
+                                    f"Duplicate request_id '{intent.request_id}' for '{agent_id}'"
+                                ),
+                                error_code="DUPLICATE_REQUEST_ID",
+                            )
+                        )
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
                             agent_id=agent_id,
@@ -4151,15 +3435,14 @@ class Simulation:
                         intent.tool_name,
                     )
                     if manifest is None:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"Tool '{intent.tool_name}' has no "
-                                "registered manifest"
-                            ),
-                            error_code="TOOL_MANIFEST_MISSING",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(f"Tool '{intent.tool_name}' has no registered manifest"),
+                                error_code="TOOL_MANIFEST_MISSING",
+                            )
+                        )
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
                             agent_id=agent_id,
@@ -4174,18 +3457,20 @@ class Simulation:
                         )
                         continue
                     capability = self._authority.authorize(
-                        agent_id, manifest.capability,
+                        agent_id,
+                        manifest.capability,
                     )
                     if not capability.allowed:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"Tool '{intent.tool_name}' not authorized "
-                                f"for '{agent_id}'"
-                            ),
-                            error_code="CAPABILITY_DENIED",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(
+                                    f"Tool '{intent.tool_name}' not authorized for '{agent_id}'"
+                                ),
+                                error_code="CAPABILITY_DENIED",
+                            )
+                        )
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
                             agent_id=agent_id,
@@ -4210,12 +3495,14 @@ class Simulation:
                         intent.tool_name,
                     )
                     if not decision.allowed:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=decision.reason,
-                            error_code="POLICY_DENIED",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=decision.reason,
+                                error_code="POLICY_DENIED",
+                            )
+                        )
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
                             agent_id=agent_id,
@@ -4230,15 +3517,14 @@ class Simulation:
                         )
                         continue
                     if decision.requires_approval:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"Tool '{intent.tool_name}' requires "
-                                "human approval"
-                            ),
-                            error_code="APPROVAL_REQUIRED",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(f"Tool '{intent.tool_name}' requires human approval"),
+                                error_code="APPROVAL_REQUIRED",
+                            )
+                        )
                         self._audit_log.record(
                             AuditEventType.PERMISSION_DENIED,
                             agent_id=agent_id,
@@ -4259,102 +3545,112 @@ class Simulation:
                 # on further (the TimeoutChecker expires it at Publish).
                 if intent.task_id:
                     if not self._task_tree.exists(intent.task_id):
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"Task '{intent.task_id}' not found"
-                            ),
-                            error_code="TASK_NOT_FOUND",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(f"Task '{intent.task_id}' not found"),
+                                error_code="TASK_NOT_FOUND",
+                            )
+                        )
                         continue
                     task = self._task_tree.get(intent.task_id)
                     now = self._tick_engine.wall_now()
                     if task.deadline is not None and task.deadline < now:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"Task '{intent.task_id}' deadline passed "
-                                f"(deadline={task.deadline.isoformat()} < "
-                                f"now={now.isoformat()})"
-                            ),
-                            error_code="DEADLINE_EXCEEDED",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(
+                                    f"Task '{intent.task_id}' deadline passed "
+                                    f"(deadline={task.deadline.isoformat()} < "
+                                    f"now={now.isoformat()})"
+                                ),
+                                error_code="DEADLINE_EXCEEDED",
+                            )
+                        )
                         continue
 
                 # Check 2: delegation target validation
                 if isinstance(intent, DelegateIntent):
                     target_id = intent.recipient_agent_id
                     if not self._agent_tree.can_delegate_to(agent_id, target_id):
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"'{agent_id}' cannot delegate to '{target_id}'"
-                                " (not a direct child)"
-                            ),
-                            error_code="INVALID_ARGUMENT",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(
+                                    f"'{agent_id}' cannot delegate to '{target_id}'"
+                                    " (not a direct child)"
+                                ),
+                                error_code="INVALID_ARGUMENT",
+                            )
+                        )
                         continue
                     # T11 决策 3: a bare kind=service proxy takes no
                     # delegated work — it must declare pool config.
                     target_cfg = self._agent_tree.get(target_id)
-                    if (
-                        target_cfg.kind == "service"
-                        and target_cfg.pool is None
-                    ):
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                f"'{target_id}' is a service agent without "
-                                "WorkerPool config"
-                            ),
-                            error_code="INVALID_ARGUMENT",
-                        ))
+                    if target_cfg.kind == "service" and target_cfg.pool is None:
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(
+                                    f"'{target_id}' is a service agent without WorkerPool config"
+                                ),
+                                error_code="INVALID_ARGUMENT",
+                            )
+                        )
                         continue
 
                 # Check 3: required payload fields
                 if isinstance(intent, WritePrivateFileIntent):
                     if not intent.path:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error="write intent requires 'path' field",
-                            error_code="INVALID_ARGUMENT",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error="write intent requires 'path' field",
+                                error_code="INVALID_ARGUMENT",
+                            )
+                        )
                         continue
 
                 if isinstance(intent, SendEmailIntent):
                     if not intent.to:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error="send_email intent requires 'to' field",
-                            error_code="INVALID_ARGUMENT",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error="send_email intent requires 'to' field",
+                                error_code="INVALID_ARGUMENT",
+                            )
+                        )
                         continue
 
                 if isinstance(intent, DelegateIntent):
                     if not intent.recipient_agent_id or not intent.task_title:
-                        results.append(ActionResult(
-                            action=action,
-                            success=False,
-                            error=(
-                                "delegate intent requires 'recipient_agent_id' "
-                                "and 'task_title' fields"
-                            ),
-                            error_code="INVALID_ARGUMENT",
-                        ))
+                        results.append(
+                            ActionResult(
+                                action=action,
+                                success=False,
+                                error=(
+                                    "delegate intent requires 'recipient_agent_id' "
+                                    "and 'task_title' fields"
+                                ),
+                                error_code="INVALID_ARGUMENT",
+                            )
+                        )
                         continue
 
                 # Passed validation — will be staged in Act phase
-                results.append(ActionResult(
-                    action=action,
-                    success=True,
-                    result_data={"validated": True},
-                ))
+                results.append(
+                    ActionResult(
+                        action=action,
+                        success=True,
+                        result_data={"validated": True},
+                    )
+                )
 
             validated[agent_id] = results
 
@@ -4375,7 +3671,8 @@ class Simulation:
             if op.op_type != OpType.LLM_REQUEST:
                 continue
             if op.status not in {
-                OpStatus.SUBMITTED, OpStatus.PENDING,
+                OpStatus.SUBMITTED,
+                OpStatus.PENDING,
             }:
                 continue
             total_c += 1
@@ -4398,22 +3695,23 @@ class Simulation:
         ``max_concurrent_llm_requests`` when the budget config leaves it
         at 0.
         """
-        tick_duration_seconds = (
-            self._tick_engine.config.tick_duration_timedelta.total_seconds()
-        )
+        tick_duration_seconds = self._tick_engine.config.tick_duration_timedelta.total_seconds()
         task_id = next(
-            (i.task_id for i in llm_intents if i.task_id), "",
+            (i.task_id for i in llm_intents if i.task_id),
+            "",
         )
         estimate = BudgetUsage()
         for intent in llm_intents:
-            estimate = estimate.add(estimate_llm_usage(
-                model=intent.model,
-                messages=intent.messages,
-                max_tokens=intent.max_tokens,
-                timeout_ticks=intent.timeout_ticks,
-                tick_duration_seconds=tick_duration_seconds,
-                pricing=self._config.budget.pricing,
-            ))
+            estimate = estimate.add(
+                estimate_llm_usage(
+                    model=intent.model,
+                    messages=intent.messages,
+                    max_tokens=intent.max_tokens,
+                    timeout_ticks=intent.timeout_ticks,
+                    tick_duration_seconds=tick_duration_seconds,
+                    pricing=self._config.budget.pricing,
+                )
+            )
         in_flight = self._llm_in_flight_counts(agent_id, task_id)
         return self._budget.check(
             agent_id=agent_id,
@@ -4487,9 +3785,7 @@ class Simulation:
         tick duration).
         """
         model = op.metadata.get("model", "") or ""
-        tick_duration_seconds = (
-            self._tick_engine.config.tick_duration_timedelta.total_seconds()
-        )
+        tick_duration_seconds = self._tick_engine.config.tick_duration_timedelta.total_seconds()
         wall_time_seconds = max(0, tick - op.created_tick) * tick_duration_seconds
         usage = op.result if isinstance(op.result, dict) else {}
         usage_dict = usage.get("usage") if isinstance(usage, dict) else None
@@ -4528,12 +3824,14 @@ class Simulation:
             return
         for agent_id, intent_list in plans.items():
             for intent in intent_list:
-                record.intents.append(IntentSummary(
-                    intent_id=getattr(intent, "intent_id", ""),
-                    intent_type=getattr(intent, "intent_type", type(intent).__name__),
-                    agent_id=agent_id,
-                    task_id=getattr(intent, "task_id", ""),
-                ))
+                record.intents.append(
+                    IntentSummary(
+                        intent_id=getattr(intent, "intent_id", ""),
+                        intent_type=getattr(intent, "intent_type", type(intent).__name__),
+                        agent_id=agent_id,
+                        task_id=getattr(intent, "task_id", ""),
+                    )
+                )
 
     def _capture_validation(
         self,
@@ -4552,14 +3850,16 @@ class Simulation:
                 if i < len(results):
                     success = results[i].success
                     error = results[i].error
-                record.validation.append(IntentSummary(
-                    intent_id=getattr(intent, "intent_id", ""),
-                    intent_type=getattr(intent, "intent_type", type(intent).__name__),
-                    agent_id=agent_id,
-                    task_id=getattr(intent, "task_id", ""),
-                    success=success,
-                    error=error,
-                ))
+                record.validation.append(
+                    IntentSummary(
+                        intent_id=getattr(intent, "intent_id", ""),
+                        intent_type=getattr(intent, "intent_type", type(intent).__name__),
+                        agent_id=agent_id,
+                        task_id=getattr(intent, "task_id", ""),
+                        success=success,
+                        error=error,
+                    )
+                )
 
     def _phase_publish(
         self,
@@ -4589,19 +3889,22 @@ class Simulation:
                 )
                 if runtime_state is None:
                     continue
-                self._scheduler.enqueue_event(WakeupEvent(
-                    event_type=WakeEventType.SCHEDULE_TRIGGER,
-                    target_agent_id=rule.target_agent_id,
-                    tick=tick,
-                    visible_at_tick=tick + 1,
-                    source_agent_id="system:calendar",
-                    details={"rule_id": rule.rule_id},
-                ))
+                self._scheduler.enqueue_event(
+                    WakeupEvent(
+                        event_type=WakeEventType.SCHEDULE_TRIGGER,
+                        target_agent_id=rule.target_agent_id,
+                        tick=tick,
+                        visible_at_tick=tick + 1,
+                        source_agent_id="system:calendar",
+                        details={"rule_id": rule.rule_id},
+                    )
+                )
         self._calendar_fires_this_tick = []
 
         # Timeout checks
         expired_ids = self._timeout_checker.check_task_timeouts(
-            self._tick_engine.wall_now(), tick,
+            self._tick_engine.wall_now(),
+            tick,
         )
         self._timeout_checker.check_lock_timeouts(tick)
 
@@ -4614,7 +3917,8 @@ class Simulation:
                 task = self._task_tree.get(tid)
                 assignee_cfg = (
                     self._agent_tree.get(task.assignee_agent_id)
-                    if task.assignee_agent_id in self._agent_tree else None
+                    if task.assignee_agent_id in self._agent_tree
+                    else None
                 )
                 if assignee_cfg is None or assignee_cfg.kind != "human":
                     continue
@@ -4653,10 +3957,7 @@ class Simulation:
                         "assignee": task.assignee_agent_id,
                     },
                     success=False,
-                    error=(
-                        f"Human task '{tid}' expired — escalated to "
-                        f"'{task.assigner_agent_id}'"
-                    ),
+                    error=(f"Human task '{tid}' expired — escalated to '{task.assigner_agent_id}'"),
                 )
 
     def _phase_dispatch(self, tick: int) -> None:
@@ -4692,13 +3993,15 @@ class Simulation:
             # SUBMITTED ops are still queued and charge nothing. The
             # op being admitted is not yet counted.
             in_flight = sum(
-                1 for o in registry._operations.values()
+                1
+                for o in registry._operations.values()
                 if o.op_type == OpType.TOOL_REQUEST
                 and o.status is OpStatus.PENDING
                 and (
                     (o.tool_request.tool_name if o.tool_request is not None else "")
                     or o.metadata.get("tool_name", "")
-                ) == tool_name
+                )
+                == tool_name
             )
             manifest = self._tool_registry.get_manifest(tool_name)
             # T9: provider-level admission for outbound (Integration-owned)
@@ -4721,10 +4024,7 @@ class Simulation:
                     if not self._credential_store.has(
                         provider.credential_ref,
                     ):
-                        reason = (
-                            f"credential_ref '{provider.credential_ref}' "
-                            "is not resolvable"
-                        )
+                        reason = f"credential_ref '{provider.credential_ref}' is not resolvable"
                         self._audit_log.record(
                             AuditEventType.TOOL_DISPATCHED,
                             agent_id=op.agent_id,
@@ -4768,12 +4068,17 @@ class Simulation:
                     )
                     registry.complete(
                         op.request_id,
-                        result={"success": False, "error": preason,
-                                "error_code": "provider_denied"},
+                        result={
+                            "success": False,
+                            "error": preason,
+                            "error_code": "provider_denied",
+                        },
                     )
                     continue
             admitted, reason, retryable = self._executors.admit(
-                tool_name, manifest, in_flight,
+                tool_name,
+                manifest,
+                in_flight,
             )
             if not admitted:
                 if retryable:
@@ -4881,9 +4186,7 @@ class Simulation:
                     },
                 )
 
-    def _phase_commit(
-        self, tick: int, all_results: dict[str, list[ActionResult]]
-    ) -> list[Email]:
+    def _phase_commit(self, tick: int, all_results: dict[str, list[ActionResult]]) -> list[Email]:
         """Phase 8: Commit staged effects atomically.
 
         1. Validate effects (version, lock, permission, task checks)
@@ -4900,6 +4203,7 @@ class Simulation:
         buffer = self._transaction_buffer
         self._last_tick_rolled_back = False
         self._last_tick_rollback_error = None
+
         def check_task(effect: StagedEffect) -> str | None:
             """TASK_UPDATE must target an existing, live task.
 
@@ -4917,10 +4221,7 @@ class Simulation:
             if task.status == TaskStatus.CANCELLED:
                 return f"Task '{task_id}' is cancelled"
             if task.is_terminal:
-                return (
-                    f"Task '{task_id}' is already terminal "
-                    f"({task.status.value})"
-                )
+                return f"Task '{task_id}' is already terminal ({task.status.value})"
             now = self._tick_engine.wall_now()
             if task.deadline is not None and task.deadline < now:
                 return (
@@ -4935,7 +4236,9 @@ class Simulation:
             return current == expected
 
         def check_lock(
-            resource: str, agent_id: str, lock_token: str | None = None,
+            resource: str,
+            agent_id: str,
+            lock_token: str | None = None,
         ) -> bool:
             # Private workspace writes don't need locks.
             # Only enforce lock checks for shared KB resources.
@@ -4954,7 +4257,9 @@ class Simulation:
             # Only check permissions for shared KB operations.
             if op in {"kb_write", "kb_create", "kb_delete"}:
                 return self._permission_engine.check(
-                    principal=agent_id, path=resource, operation=op,
+                    principal=agent_id,
+                    path=resource,
+                    operation=op,
                 )
             return True
 
@@ -5031,14 +4336,13 @@ class Simulation:
                         siblings = self._task_tree._children_map.get(parent)
                         if siblings and task_id in siblings:
                             siblings.remove(task_id)
-                    for owner, ids in list(
-                        self._task_tree._assignee_map.items()
-                    ):
+                    for owner, ids in list(self._task_tree._assignee_map.items()):
                         if task_id in ids:
                             ids.remove(task_id)
                 elif kind == InvertKind.RESTORE_PREVIOUS:
                     if effect.effect_type in {
-                        EffectType.FILE_WRITE, EffectType.FILE_PATCH,
+                        EffectType.FILE_WRITE,
+                        EffectType.FILE_PATCH,
                         EffectType.FILE_DELETE,
                     }:
                         target = Path(data["target_path"])
@@ -5050,7 +4354,8 @@ class Simulation:
                         else:
                             target.write_text(prev, encoding="utf-8")
                     elif effect.effect_type in {
-                        EffectType.RECORD_UPSERT, EffectType.RECORD_DELTA,
+                        EffectType.RECORD_UPSERT,
+                        EffectType.RECORD_DELTA,
                     }:
                         # T10: undo the mutation — remove its ledger
                         # entries and restore the prior record (the
@@ -5062,25 +4367,26 @@ class Simulation:
                             ledger_ids=data.get("ledger_ids", []),
                         )
                     elif effect.effect_type in {
-                        EffectType.KB_WRITE, EffectType.KB_CREATE,
+                        EffectType.KB_WRITE,
+                        EffectType.KB_CREATE,
                         EffectType.KB_DELETE,
                     }:
                         res = data.get("kb_resource")
                         ver = data.get("kb_version")
                         if res is None:
                             self._shared_kb._resources.pop(
-                                effect.resource, None,
+                                effect.resource,
+                                None,
                             )
                         else:
                             self._shared_kb._resources[effect.resource] = res
                         if ver is None:
                             self._shared_kb.versions._versions.pop(
-                                effect.resource, None,
+                                effect.resource,
+                                None,
                             )
                         else:
-                            self._shared_kb.versions._versions[
-                                effect.resource
-                            ] = ver
+                            self._shared_kb.versions._versions[effect.resource] = ver
                     elif effect.effect_type == EffectType.TASK_UPDATE:
                         prior = data.get("task_state_before")
                         if prior is not None:
@@ -5089,7 +4395,8 @@ class Simulation:
                         self._calendar_store.restore(
                             effect.resource,
                             prev_next_run_tick=data.get(
-                                "prev_next_run_tick", 0,
+                                "prev_next_run_tick",
+                                0,
                             ),
                             prev_last_fired_at=data.get(
                                 "prev_last_fired_at",
@@ -5125,9 +4432,7 @@ class Simulation:
                 if member.status == EffectStatus.COMMITTED:
                     _invert_one(member)
                 member.status = EffectStatus.FAILED
-                member.error = (
-                    f"group member failed (group {effect.group_id})"
-                )
+                member.error = f"group member failed (group {effect.group_id})"
 
         def _rollback() -> None:
             """Single rollback entry (SPEC §3.3 / T18): release this
@@ -5151,9 +4456,7 @@ class Simulation:
                     pass
 
             # P0-2: restore agent continuations to pre-tick state
-            for aid, (phase, req_id, req_type) in (
-                self._tick_continuations.items()
-            ):
+            for aid, (phase, req_id, req_type) in self._tick_continuations.items():
                 try:
                     rs = self._agent_runtime_states.get(aid)
                     if rs:
@@ -5176,7 +4479,8 @@ class Simulation:
                     continue
 
                 if effect.effect_type in {
-                    EffectType.FILE_WRITE, EffectType.FILE_PATCH,
+                    EffectType.FILE_WRITE,
+                    EffectType.FILE_PATCH,
                 }:
                     # Write to private workspace. invert_data captures
                     # file_previous (old content / None) so the single
@@ -5194,7 +4498,8 @@ class Simulation:
                     # are defense-in-depth.
                     try:
                         target = self._private_store.resolve_path(
-                            agent_id, path,
+                            agent_id,
+                            path,
                         )
                     except AccessDeniedError as exc:
                         _fail_locally(effect, f"path denied: {exc}")
@@ -5227,9 +4532,12 @@ class Simulation:
                                 continue
 
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    is_binary = bool(effect.data.get(
-                        "is_binary", False,
-                    ))
+                    is_binary = bool(
+                        effect.data.get(
+                            "is_binary",
+                            False,
+                        )
+                    )
                     if is_binary:
                         # T10: binary private-file write — content is
                         # base64 in content_bytes_b64; prior content is
@@ -5248,7 +4556,8 @@ class Simulation:
                             )
                         except Exception:  # noqa: BLE001 — malformed b64
                             _fail_locally(
-                                effect, "invalid base64 content_bytes_b64",
+                                effect,
+                                "invalid base64 content_bytes_b64",
                             )
                             continue
                         target.write_bytes(payload)
@@ -5296,14 +4605,12 @@ class Simulation:
                     # FAILED locally, NO tick rollback.
                     if self._task_tree.exists(task_id):
                         _fail_locally(
-                            effect, f"Task '{task_id}' already exists",
+                            effect,
+                            f"Task '{task_id}' already exists",
                         )
                         continue
                     derived_from = data.get("derived_from")
-                    if (
-                        derived_from is not None
-                        and not self._task_tree.exists(derived_from)
-                    ):
+                    if derived_from is not None and not self._task_tree.exists(derived_from):
                         _fail_locally(
                             effect,
                             f"Derived-from task '{derived_from}' not found",
@@ -5321,7 +4628,8 @@ class Simulation:
                         title=data.get("title", ""),
                         description=data.get("description", ""),
                         assigner_agent_id=data.get(
-                            "assigner_agent_id", effect.agent_id,
+                            "assigner_agent_id",
+                            effect.agent_id,
                         ),
                         assignee_agent_id=data.get("assignee_agent_id", ""),
                         derived_from=derived_from,
@@ -5344,12 +4652,8 @@ class Simulation:
                         )
                         continue
                     rule = self._calendar_store.get(rule_id)
-                    effect.invert_data["prev_next_run_tick"] = (
-                        rule.next_run_tick
-                    )
-                    effect.invert_data["prev_last_fired_at"] = (
-                        rule.last_fired_at
-                    )
+                    effect.invert_data["prev_next_run_tick"] = rule.next_run_tick
+                    effect.invert_data["prev_last_fired_at"] = rule.last_fired_at
                     self._calendar_store.advance(
                         rule_id,
                         next_run_tick=data.get("next_run_tick"),
@@ -5373,12 +4677,13 @@ class Simulation:
                         )
                         continue
                     prior = self._task_tree.get(task_id)
-                    effect.invert_data["task_state_before"] = (
-                        prior.model_copy(deep=True)
-                    )
+                    effect.invert_data["task_state_before"] = prior.model_copy(deep=True)
                     try:
                         self._task_tree.update_status(
-                            task_id, new_status, tick=tick, allow_walk=True,
+                            task_id,
+                            new_status,
+                            tick=tick,
+                            allow_walk=True,
                         )
                     except InvalidTransitionError as exc:
                         _fail_locally(effect, str(exc))
@@ -5392,7 +4697,9 @@ class Simulation:
                         task.metadata["reason"] = data["reason"]
 
                 elif effect.effect_type in {
-                    EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
+                    EffectType.KB_WRITE,
+                    EffectType.KB_CREATE,
+                    EffectType.KB_DELETE,
                 }:
                     # Apply shared KB write via the internal commit path
                     # (permission/lock/version already validated in
@@ -5432,7 +4739,8 @@ class Simulation:
                         )
 
                 elif effect.effect_type in {
-                    EffectType.RECORD_UPSERT, EffectType.RECORD_DELTA,
+                    EffectType.RECORD_UPSERT,
+                    EffectType.RECORD_DELTA,
                 }:
                     # T10: typed record mutation via the store (invariant
                     # checks inside). An invariant violation is a
@@ -5448,8 +4756,7 @@ class Simulation:
                     effect.invert_data["record_type"] = record_type
                     effect.invert_data["record_key"] = key
                     effect.invert_data["record_before"] = (
-                        dict(prior_record)
-                        if prior_record is not None else None
+                        dict(prior_record) if prior_record is not None else None
                     )
                     try:
                         if effect.effect_type == EffectType.RECORD_UPSERT:
@@ -5499,7 +4806,9 @@ class Simulation:
             # crash guard (repeated crashes → emergency callbacks +
             # auto-pause). Deterministic failures never reach here.
             self._crash_guard.record_crash(
-                tick, str(e), self._state_epoch,
+                tick,
+                str(e),
+                self._state_epoch,
             )
             self._audit_log.record(
                 AuditEventType.TRANSACTION_ROLLBACK,
@@ -5516,14 +4825,16 @@ class Simulation:
             record = self._journal.current_record
             if record is not None:
                 for effect in committed:
-                    record.effects.append(EffectSummary(
-                        effect_id=effect.effect_id,
-                        effect_type=effect.effect_type.value,
-                        agent_id=effect.agent_id,
-                        resource=effect.resource,
-                        status=effect.status.value,
-                        error=effect.error,
-                    ))
+                    record.effects.append(
+                        EffectSummary(
+                            effect_id=effect.effect_id,
+                            effect_type=effect.effect_type.value,
+                            agent_id=effect.agent_id,
+                            resource=effect.resource,
+                            status=effect.status.value,
+                            error=effect.error,
+                        )
+                    )
             return []
 
         # T20: every lock acquired this tick is released at commit end
@@ -5547,11 +4858,11 @@ class Simulation:
                 body=entry.body,
                 email_type=EmailType(entry.email_type),
                 tick=tick,
-                deliver_at_tick=tick
-                + self._config.email_delivery_latency_ticks,
+                deliver_at_tick=tick + self._config.email_delivery_latency_ticks,
                 task_id=entry.task_id,
                 attachments=list(entry.attachments),
             )
+
         self._outbox.dispatch(_deliver, current_tick=tick)
 
         # Record audit for committed effects (apply-time failures such
@@ -5575,34 +4886,37 @@ class Simulation:
         record = self._journal.current_record
         if record is not None:
             for effect in committed:
-                record.effects.append(EffectSummary(
-                    effect_id=effect.effect_id,
-                    effect_type=effect.effect_type.value,
-                    agent_id=effect.agent_id,
-                    resource=effect.resource,
-                    status=effect.status.value,
-                    error=effect.error,
-                ))
+                record.effects.append(
+                    EffectSummary(
+                        effect_id=effect.effect_id,
+                        effect_type=effect.effect_type.value,
+                        agent_id=effect.agent_id,
+                        resource=effect.resource,
+                        status=effect.status.value,
+                        error=effect.error,
+                    )
+                )
             for _aid, op in self._tick_pending_ops:
-                record.pending_ops.append(PendingOpSummary(
-                    request_id=op.request_id,
-                    op_type=op.op_type.value,
-                    agent_id=op.agent_id,
-                    created_tick=op.created_tick,
-                ))
+                record.pending_ops.append(
+                    PendingOpSummary(
+                        request_id=op.request_id,
+                        op_type=op.op_type.value,
+                        agent_id=op.agent_id,
+                        created_tick=op.created_tick,
+                    )
+                )
             # Capture outbox entries created this tick
             for entry in self._outbox.entries_by_status(OutboxStatus.COMMITTED):
-                if (
-                    entry.effect_id
-                    and any(e.effect_id == entry.effect_id for e in committed)
-                ):
-                    record.outbox.append(OutboxSummary(
-                        entry_id=entry.entry_id,
-                        effect_id=entry.effect_id,
-                        from_agent=entry.from_agent,
-                        to=entry.to,
-                        subject=entry.subject,
-                    ))
+                if entry.effect_id and any(e.effect_id == entry.effect_id for e in committed):
+                    record.outbox.append(
+                        OutboxSummary(
+                            entry_id=entry.entry_id,
+                            effect_id=entry.effect_id,
+                            from_agent=entry.from_agent,
+                            to=entry.to,
+                            subject=entry.subject,
+                        )
+                    )
 
         return []
 

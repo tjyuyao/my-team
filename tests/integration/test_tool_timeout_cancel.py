@@ -112,7 +112,7 @@ class TestLocalToolTimeout:
             }
 
         monkeypatch.setattr(
-            "my_team.simulation.run_sandboxed_process", _fake_run,
+            "my_team.agent_tools.run_sandboxed_process", _fake_run,
         )
         ctx = ToolContext(
             agent_id="agent.research", tick=0,

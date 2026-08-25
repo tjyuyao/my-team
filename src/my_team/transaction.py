@@ -42,18 +42,24 @@ class EffectType(str, Enum):
     RECORD_UPSERT = "record_upsert"
     RECORD_DELTA = "record_delta"
     RULE_ADVANCE = "rule_advance"
+    # N4-1 记忆系统 effect（归 Agent 引擎数据面）
+    MEMORY_ENTRY_WRITE = "memory_entry_write"  # 新增/追加版本
+    MEMORY_ENTRY_EVICT = "memory_entry_evict"  # 撤出（从 store 中移除最新版本）
+    MEMORY_ENTRY_FOLD = "memory_entry_fold"  # 折叠（合并/压缩多版本）
 
 
 # Effect types that have external (non-in-memory) side effects.
 # These are staged in the outbox during commit and delivered after
 # the commit succeeds. On rollback, they are discarded.
-_EXTERNAL_EFFECT_TYPES: frozenset[EffectType] = frozenset({
-    EffectType.EMAIL_SEND,
-    EffectType.EMAIL_DELIVER,
-    EffectType.FILE_WRITE,
-    EffectType.FILE_PATCH,
-    EffectType.FILE_DELETE,
-})
+_EXTERNAL_EFFECT_TYPES: frozenset[EffectType] = frozenset(
+    {
+        EffectType.EMAIL_SEND,
+        EffectType.EMAIL_DELIVER,
+        EffectType.FILE_WRITE,
+        EffectType.FILE_PATCH,
+        EffectType.FILE_DELETE,
+    }
+)
 
 
 class InvertKind(str, Enum):
@@ -154,16 +160,38 @@ INVERT_CONTRACT: dict[EffectType, InvertSpec] = {
         kind=InvertKind.RESTORE_PREVIOUS,
         recorded="prior record (or None) + appended ledger entry ids → restore + remove entries",
     ),
+    # N4-1 记忆系统 effect 逆操作
+    EffectType.MEMORY_ENTRY_WRITE: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded=(
+            "memory_before: (entry_id, version_chain_before_write) — "
+            "新增条目时 version_chain_before_write=None（逆操作=移除该条目）；"
+            "追加版本时记录上一版本链（逆操作=移除最新版本）"
+        ),
+    ),
+    EffectType.MEMORY_ENTRY_EVICT: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded=(
+            "memory_before: (entry_id, evicted_version_chain) — "
+            "逆操作=将被撤出的版本链重新写回 store"
+        ),
+    ),
+    EffectType.MEMORY_ENTRY_FOLD: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded=(
+            "memory_before: (entry_id, version_chain_before_fold) — 逆操作=恢复折叠前的完整版本链"
+        ),
+    ),
 }
 
 
 class EffectStatus(str, Enum):
     """Status of a staged effect."""
 
-    STAGED = "staged"          # Waiting to be committed
-    VALIDATED = "validated"    # Preconditions checked
-    COMMITTED = "committed"    # Successfully applied
-    FAILED = "failed"          # Failed validation or commit
+    STAGED = "staged"  # Waiting to be committed
+    VALIDATED = "validated"  # Preconditions checked
+    COMMITTED = "committed"  # Successfully applied
+    FAILED = "failed"  # Failed validation or commit
     ROLLED_BACK = "rolled_back"  # Rolled back after partial failure
 
 
@@ -188,25 +216,25 @@ class StagedEffect(BaseModel):
     side_effect: bool = Field(
         default=False,
         description="True if this effect has external side effects "
-                    "(file writes, email delivery) that cannot be undone in-memory",
+        "(file writes, email delivery) that cannot be undone in-memory",
     )
     group_id: str = Field(
         default="",
         description="Effects sharing a group_id commit or fail as one "
-                    "(when atomicity='group'); '' = singleton group",
+        "(when atomicity='group'); '' = singleton group",
     )
     atomicity: str = Field(
         default="per_effect",
         description="'per_effect' = independent failure; 'group' = any "
-                    "member failure fails the whole group (no tick "
-                    "rollback — local effect-level failure)",
+        "member failure fails the whole group (no tick "
+        "rollback — local effect-level failure)",
     )
     invert_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Prior-value data captured at apply time (SPEC §3.3 "
-                    "回滚=逆操作): the minimal state this effect needs to "
-                    "undo itself. Written during apply, read by the "
-                    "single rollback entry.",
+        "回滚=逆操作): the minimal state this effect needs to "
+        "undo itself. Written during apply, read by the "
+        "single rollback entry.",
     )
 
 
@@ -321,21 +349,25 @@ class TransactionBuffer:
             if effect.expected_version is not None and check_version:
                 if not check_version(effect.resource, effect.expected_version):
                     effect.status = EffectStatus.FAILED
-                    effect.error = (
-                        f"Version conflict: expected {effect.expected_version}"
-                    )
+                    effect.error = f"Version conflict: expected {effect.expected_version}"
                     failures.append(effect)
                     continue
 
             # Lock check (for write operations) — verifies both ownership
             # and lock_token of the staged effect
-            if effect.effect_type in {
-                EffectType.KB_WRITE, EffectType.KB_CREATE, EffectType.KB_DELETE,
-                EffectType.FILE_WRITE, EffectType.FILE_PATCH, EffectType.FILE_DELETE,
-            } and check_lock:
-                if not check_lock(
-                    effect.resource, effect.agent_id, effect.lock_token
-                ):
+            if (
+                effect.effect_type
+                in {
+                    EffectType.KB_WRITE,
+                    EffectType.KB_CREATE,
+                    EffectType.KB_DELETE,
+                    EffectType.FILE_WRITE,
+                    EffectType.FILE_PATCH,
+                    EffectType.FILE_DELETE,
+                }
+                and check_lock
+            ):
+                if not check_lock(effect.resource, effect.agent_id, effect.lock_token):
                     effect.status = EffectStatus.FAILED
                     effect.error = "Must hold lock to write"
                     failures.append(effect)
@@ -363,9 +395,7 @@ class TransactionBuffer:
                 for member in members:
                     if member.status != EffectStatus.FAILED:
                         member.status = EffectStatus.FAILED
-                        member.error = (
-                            f"group member failed (group {group_id})"
-                        )
+                        member.error = f"group member failed (group {group_id})"
                         failures.append(member)
 
         return failures
@@ -412,15 +442,11 @@ class TransactionBuffer:
             # Sort by agent_id alphabetically for determinism
             sorted_agents = sorted(by_agent.keys())
             winner_agent = sorted_agents[0]
-            winner_effects = sorted(
-                by_agent[winner_agent], key=lambda e: e.effect_id
-            )
+            winner_effects = sorted(by_agent[winner_agent], key=lambda e: e.effect_id)
 
             loser_effects = []
             for agent_id in sorted_agents[1:]:
-                loser_effects.extend(
-                    sorted(by_agent[agent_id], key=lambda e: e.effect_id)
-                )
+                loser_effects.extend(sorted(by_agent[agent_id], key=lambda e: e.effect_id))
 
             for loser in loser_effects:
                 loser.status = EffectStatus.FAILED
@@ -434,10 +460,7 @@ class TransactionBuffer:
                             and effect.status != EffectStatus.FAILED
                         ):
                             effect.status = EffectStatus.FAILED
-                            effect.error = (
-                                f"group member lost conflict "
-                                f"(group {loser.group_id})"
-                            )
+                            effect.error = f"group member lost conflict (group {loser.group_id})"
 
             resolution = ConflictResolution(
                 winner=winner_effects[0].effect_id,
@@ -531,21 +554,12 @@ class TransactionBuffer:
 
     @property
     def failed_count(self) -> int:
-        return sum(
-            1 for e in self._effects.values()
-            if e.status == EffectStatus.FAILED
-        )
+        return sum(1 for e in self._effects.values() if e.status == EffectStatus.FAILED)
 
     def summary(self) -> dict[str, Any]:
         """Get a summary of the transaction state."""
-        staged = sum(
-            1 for e in self._effects.values()
-            if e.status == EffectStatus.STAGED
-        )
-        validated = sum(
-            1 for e in self._effects.values()
-            if e.status == EffectStatus.VALIDATED
-        )
+        staged = sum(1 for e in self._effects.values() if e.status == EffectStatus.STAGED)
+        validated = sum(1 for e in self._effects.values() if e.status == EffectStatus.VALIDATED)
         return {
             "total_effects": len(self._effects),
             "staged": staged,

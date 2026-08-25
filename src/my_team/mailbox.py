@@ -14,10 +14,14 @@ N1c-1: MailSystem 归位为 Device 子类（SPEC §5.6，N1c 设备适配层）�
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from my_team.devices.base import Device, EntityKind, InjectionDecl
 from my_team.models.email import Email, EmailPriority, EmailStatus, EmailType
+
+if TYPE_CHECKING:
+    from my_team.agent_runtime import ToolContext
+    from my_team.transaction import TransactionBuffer
 
 # Email ordering priority (lower = higher priority in sort)
 _PRIORITY_ORDER = {
@@ -91,10 +95,7 @@ class Mailbox:
     @property
     def unread_count(self) -> int:
         """Number of unread emails in inbox."""
-        return sum(
-            1 for e in self._inbox.values()
-            if e.status == EmailStatus.DELIVERED
-        )
+        return sum(1 for e in self._inbox.values() if e.status == EmailStatus.DELIVERED)
 
     def receive(self, email: Email) -> None:
         """Add an email to the inbox (called by system during Deliver phase)."""
@@ -108,10 +109,7 @@ class Mailbox:
 
     def get_unread(self) -> list[Email]:
         """Get all unread emails from inbox."""
-        return [
-            e for e in self.inbox
-            if e.status == EmailStatus.DELIVERED
-        ]
+        return [e for e in self.inbox if e.status == EmailStatus.DELIVERED]
 
     def get_by_type(self, email_type: EmailType) -> list[Email]:
         """Get all emails of a specific type from inbox."""
@@ -163,10 +161,7 @@ class Mailbox:
         return len(self._inbox)
 
     def __repr__(self) -> str:
-        return (
-            f"Mailbox({self._agent_id}, "
-            f"inbox={len(self._inbox)}, outbox={len(self._outbox)})"
-        )
+        return f"Mailbox({self._agent_id}, inbox={len(self._inbox)}, outbox={len(self._outbox)})"
 
 
 class MailSystem(Device):
@@ -179,19 +174,25 @@ class MailSystem(Device):
     构造签名保持原样（simulation.py 兼容）。
     """
 
-    def __init__(self, device_id: str | None = None) -> None:
+    def __init__(
+        self,
+        device_id: str | None = None,
+        transaction_buffer: TransactionBuffer | None = None,
+    ) -> None:
         Device.__init__(self, device_id)
         self._mailboxes: dict[str, Mailbox] = {}
         self._pending: list[Email] = []  # emails waiting to be delivered
         self._all_emails: dict[str, Email] = {}  # global email registry
+        # N1c-2: injected kernel services for tool handlers
+        self._transaction_buffer = transaction_buffer
         # N1c-1：注册设备受控实体
-        # 范围级 DATA 实体 — 邮件系统整体范围，InjectionDecl 引导 bash
+        # 范围级 DATA 实体 — 邮件系统整体范围，InjectionDecl 引导 agent
         self.mail_scope_id = self.register_entity(
             EntityKind.DATA,
             "mail-system-scope",
             injection=InjectionDecl(
                 content=(
-                    "[MAIL_INSTRUCTION] 邮件系统（MailSystem）是 bash 间通信的主要渠道。\n"
+                    "[MAIL_INSTRUCTION] 邮件系统（MailSystem）是 agent 间通信的主要渠道。\n"
                     "通过 send_email 工具（STAGED_MUTATION）发送邮件，"
                     "邮件在下一 tick 送达收件人邮箱。\n"
                     "邮件按优先级和截止时间排序：system_notice > human_message > 其他；"
@@ -202,9 +203,11 @@ class MailSystem(Device):
         )
         # 工具面 TOOL 实体 — 采用 uuid5 派生值（adopt 机制）
         from my_team.tool_manifest import builtin_manifests
+
         _manifests = builtin_manifests()
         self.send_email_capability = self.register_entity(
-            EntityKind.TOOL, "send_email",
+            EntityKind.TOOL,
+            "send_email",
             entity_id=_manifests["send_email"].capability,
         )
 
@@ -312,7 +315,53 @@ class MailSystem(Device):
         return len(self._pending)
 
     def __repr__(self) -> str:
-        return (
-            f"MailSystem(mailboxes={len(self._mailboxes)}, "
-            f"pending={len(self._pending)})"
-        )
+        return f"MailSystem(mailboxes={len(self._mailboxes)}, pending={len(self._pending)})"
+
+    # -----------------------------------------------------------------------
+    # N1c-2: Tool handler factory (send_email)
+    # -----------------------------------------------------------------------
+
+    def make_handle_send_email(self) -> Callable[..., Any]:
+        """Return the ``send_email`` tool handler bound to this device."""
+        from my_team.agent_runtime import ToolResult
+
+        transaction_buffer = self._transaction_buffer
+
+        def handle_send_email(
+            context: ToolContext,
+            to: list[str] | None = None,
+            subject: str = "",
+            body: str = "",
+            attachments: list[dict[str, Any]] | None = None,
+            **_kw: Any,
+        ) -> Any:
+            # v0.10 T8b: attachments = list of structured refs
+            # ({ref_type, path, version, hash, size, mime}) — carried on
+            # the email, never copied.
+            if transaction_buffer is not None:
+                from my_team.asset_store import AttachmentRef
+                from my_team.transaction import EffectType
+
+                transaction_buffer.stage(
+                    effect_type=EffectType.EMAIL_SEND,
+                    agent_id=context.agent_id,
+                    resource=f"email:{context.agent_id}",
+                    data={
+                        "from_agent": context.agent_id,
+                        "to": to or [],
+                        "subject": subject,
+                        "body": body,
+                        "attachments": [
+                            AttachmentRef.model_validate(a) for a in (attachments or [])
+                        ],
+                    },
+                )
+            return ToolResult(
+                success=True,
+                data={"staged": True},
+                agent_id=context.agent_id,
+                tool_name="send_email",
+                tick=context.tick,
+            )
+
+        return handle_send_email

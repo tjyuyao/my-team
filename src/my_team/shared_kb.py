@@ -16,15 +16,21 @@ from __future__ import annotations
 
 import uuid
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import BaseModel, Field
 
 from my_team.devices.base import Device, EntityKind, InjectionDecl
 
+if TYPE_CHECKING:
+    from my_team.agent_runtime import ToolContext
+    from my_team.audit import AuditLog
+    from my_team.transaction import TransactionBuffer
+
 # ---------------------------------------------------------------------------
 # Permission model (§6.2)
 # ---------------------------------------------------------------------------
+
 
 class PermissionOp(str, Enum):
     """Operations that can be permitted on shared KB paths."""
@@ -122,6 +128,7 @@ class PermissionEngine:
 # Version control (§6.3)
 # ---------------------------------------------------------------------------
 
+
 class VersionInfo(BaseModel):
     """Version metadata for a shared KB resource."""
 
@@ -138,9 +145,7 @@ class VersionConflictError(Exception):
         self.path = path
         self.expected = expected
         self.actual = actual
-        super().__init__(
-            f"Version conflict for '{path}': expected {expected}, actual {actual}"
-        )
+        super().__init__(f"Version conflict for '{path}': expected {expected}, actual {actual}")
 
 
 class VersionControl:
@@ -197,6 +202,7 @@ class VersionControl:
 # Mutex lock manager (§6.3)
 # ---------------------------------------------------------------------------
 
+
 class LockStatus(str, Enum):
     ACTIVE = "active"
     EXPIRED = "expired"
@@ -225,9 +231,7 @@ class LockConflictError(Exception):
     def __init__(self, resource: str, owner: str) -> None:
         self.resource = resource
         self.owner = owner
-        super().__init__(
-            f"Cannot lock '{resource}': already held by '{owner}'"
-        )
+        super().__init__(f"Cannot lock '{resource}': already held by '{owner}'")
 
 
 class LockTokenError(Exception):
@@ -240,9 +244,7 @@ class LockTokenError(Exception):
     def __init__(self, resource: str, operation: str) -> None:
         self.resource = resource
         self.operation = operation
-        super().__init__(
-            f"Lock {operation} failed for '{resource}': invalid token"
-        )
+        super().__init__(f"Lock {operation} failed for '{resource}': invalid token")
 
 
 class LockManager:
@@ -339,10 +341,7 @@ class LockManager:
         """Find and mark expired locks."""
         expired: list[LockInfo] = []
         for lock in self._locks.values():
-            if (
-                lock.status == LockStatus.ACTIVE
-                and lock.lease_until_tick <= current_tick
-            ):
+            if lock.status == LockStatus.ACTIVE and lock.lease_until_tick <= current_tick:
                 lock.status = LockStatus.EXPIRED
                 expired.append(lock)
         return expired
@@ -372,6 +371,7 @@ class LockManager:
 # ---------------------------------------------------------------------------
 # SharedKB: the complete shared knowledge base
 # ---------------------------------------------------------------------------
+
 
 class SharedKBWriteError(Exception):
     """Raised when a shared KB write fails (permission, lock, version)."""
@@ -410,6 +410,9 @@ class SharedKB(Device):
         lock_manager: LockManager | None = None,
         version_control: VersionControl | None = None,
         device_id: str | None = None,
+        transaction_buffer: TransactionBuffer | None = None,
+        audit_log: AuditLog | None = None,
+        on_lock_acquired: Callable[[str, str, str], None] | None = None,
     ) -> None:
         # Device 基类初始化
         Device.__init__(self, device_id)
@@ -420,8 +423,15 @@ class SharedKB(Device):
         self._locks = lock_manager if lock_manager is not None else LockManager()
         self._versions = version_control if version_control is not None else VersionControl()
         self._resources: dict[str, SharedKBResource] = {}
+        # N1c-2: injected kernel services for tool handlers
+        self._transaction_buffer = transaction_buffer
+        self._audit_log = audit_log
+        # Callback: (resource, agent_id, lock_token) → registers the
+        # tick-level acquired lock in simulation._tick_acquired_locks.
+        # None means standalone use (unit tests, etc.) without lock-tick tracking.
+        self._on_lock_acquired = on_lock_acquired
         # N1c-1：注册设备受控实体
-        # 范围级 DATA 实体 — 知识库整体范围，InjectionDecl 引导 bash
+        # 范围级 DATA 实体 — 知识库整体范围，InjectionDecl 引导 agent
         self.kb_scope_id = self.register_entity(
             EntityKind.DATA,
             "shared-kb-scope",
@@ -437,21 +447,26 @@ class SharedKB(Device):
         )
         # 工具面 TOOL 实体 — 采用 uuid5 派生值（adopt 机制）
         from my_team.tool_manifest import builtin_manifests
+
         _manifests = builtin_manifests()
         self.kb_read_capability = self.register_entity(
-            EntityKind.TOOL, "kb_read",
+            EntityKind.TOOL,
+            "kb_read",
             entity_id=_manifests["kb_read"].capability,
         )
         self.kb_write_capability = self.register_entity(
-            EntityKind.TOOL, "kb_write",
+            EntityKind.TOOL,
+            "kb_write",
             entity_id=_manifests["kb_write"].capability,
         )
         self.kb_list_capability = self.register_entity(
-            EntityKind.TOOL, "kb_list",
+            EntityKind.TOOL,
+            "kb_list",
             entity_id=_manifests["kb_list"].capability,
         )
         self.kb_search_capability = self.register_entity(
-            EntityKind.TOOL, "kb_search",
+            EntityKind.TOOL,
+            "kb_search",
             entity_id=_manifests["kb_search"].capability,
         )
 
@@ -587,7 +602,8 @@ class SharedKB(Device):
 
         prefix = path.strip("/") + "/"
         return [
-            rpath for rpath, res in self._resources.items()
+            rpath
+            for rpath, res in self._resources.items()
             if res.exists and rpath.startswith(prefix)
         ]
 
@@ -626,17 +642,21 @@ class SharedKB(Device):
             # Permission filter FIRST — unauthorized entries are
             # invisible to the search (SPEC §7.2, deny-by-default).
             if not self._permissions.check(
-                agent_id, path, PermissionOp.READ.value,
+                agent_id,
+                path,
+                PermissionOp.READ.value,
             ):
                 continue
             if q in path.lower() or q in res.content.lower():
-                hits.append({
-                    "path": path,
-                    "version": res.version,
-                    "snippet": res.content[:200],
-                    "last_modified_by": res.last_modified_by,
-                    "last_modified_at_tick": res.last_modified_at_tick,
-                })
+                hits.append(
+                    {
+                        "path": path,
+                        "version": res.version,
+                        "snippet": res.content[:200],
+                        "last_modified_by": res.last_modified_by,
+                        "last_modified_at_tick": res.last_modified_at_tick,
+                    }
+                )
                 if len(hits) >= limit:
                     break
         return hits
@@ -647,3 +667,261 @@ class SharedKB(Device):
 
     def all_paths(self) -> list[str]:
         return [p for p, r in self._resources.items() if r.exists]
+
+    # -----------------------------------------------------------------------
+    # N1c-2: Tool handler factories (kb_write / kb_read / kb_list / kb_search)
+    # -----------------------------------------------------------------------
+
+    def make_handle_kb_write(self) -> Callable[..., Any]:
+        """Return the ``kb_write`` tool handler bound to this device."""
+        from my_team.agent_runtime import ToolResult
+        from my_team.audit import AuditEventType
+
+        transaction_buffer = self._transaction_buffer
+        audit_log = self._audit_log
+        on_lock_acquired = self._on_lock_acquired
+        permission_engine = self._permissions
+        lock_manager = self._locks
+
+        def handle_kb_write(
+            context: ToolContext,
+            path: str = "",
+            content: str = "",
+            expected_version: int = 0,
+            **_kw: Any,
+        ) -> Any:
+            """Stage a shared KB write as a KB_WRITE effect with a
+            kernel-bound write lock (T20 写即自动锁).
+
+            The lock is INVISIBLE to the agent: the kernel acquires it
+            here (Act), carries the token on the effect, applies the
+            write at Commit (SharedKB._apply_committed — permission,
+            lock, version checks), and releases the lock at commit end.
+            LockConflictError (held by another agent, lease unexpired)
+            is a DETERMINISTIC failure — the agent retries next tick
+            (每 tick 一轮 semantics; lease backstop otherwise).
+            """
+            resource = path
+            if not permission_engine.check(
+                context.agent_id,
+                resource,
+                "kb_write",
+            ):
+                return ToolResult(
+                    success=False,
+                    error=f"Permission denied: {resource}",
+                    error_code="permission_denied",
+                    retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="kb_write",
+                    tick=context.tick,
+                )
+            try:
+                lock = lock_manager.acquire(
+                    resource,
+                    context.agent_id,
+                    current_tick=context.tick,
+                )
+            except LockConflictError as exc:
+                if audit_log is not None:
+                    audit_log.record(
+                        AuditEventType.LOCK_CONFLICT,
+                        agent_id=context.agent_id,
+                        tick=context.tick,
+                        details={"resource": resource, "owner": exc.owner},
+                        success=False,
+                        error=str(exc),
+                    )
+                return ToolResult(
+                    success=False,
+                    error=str(exc),
+                    error_code="LOCK_CONFLICT",
+                    retryable=True,
+                    agent_id=context.agent_id,
+                    tool_name="kb_write",
+                    tick=context.tick,
+                )
+            # Lock held until this tick's commit ends (released in
+            # _phase_commit) — the lease is only a backstop.
+            if on_lock_acquired is not None:
+                on_lock_acquired(resource, context.agent_id, lock.lock_token)
+            if audit_log is not None:
+                audit_log.record(
+                    AuditEventType.LOCK_ACQUIRED,
+                    agent_id=context.agent_id,
+                    tick=context.tick,
+                    details={
+                        "resource": resource,
+                        "lease_until_tick": lock.lease_until_tick,
+                    },
+                )
+            if transaction_buffer is not None:
+                from my_team.transaction import EffectType
+
+                transaction_buffer.stage(
+                    effect_type=EffectType.KB_WRITE,
+                    agent_id=context.agent_id,
+                    resource=resource,
+                    data={
+                        "content": content,
+                        "expected_version": expected_version,
+                    },
+                    expected_version=expected_version,
+                    lock_token=lock.lock_token,
+                )
+            return ToolResult(
+                success=True,
+                data={"staged": True},
+                agent_id=context.agent_id,
+                tool_name="kb_write",
+                tick=context.tick,
+            )
+
+        return handle_kb_write
+
+    def make_handle_kb_read(self) -> Callable[..., Any]:
+        """Return the ``kb_read`` tool handler bound to this device."""
+        from my_team.agent_runtime import ToolResult
+        from my_team.audit import AuditEventType
+
+        audit_log = self._audit_log
+        kb = self
+
+        def handle_kb_read(
+            context: ToolContext,
+            path: str = "",
+            **_kw: Any,
+        ) -> Any:
+            if not path:
+                return ToolResult(
+                    success=False,
+                    error="kb_read requires 'path'",
+                    error_code="INVALID_ARGUMENT",
+                    retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="kb_read",
+                    tick=context.tick,
+                )
+            try:
+                resource = kb.read(path, context.agent_id)
+            except SharedKBWriteError as exc:
+                return ToolResult(
+                    success=False,
+                    error=str(exc),
+                    error_code=(
+                        "permission_denied"
+                        if exc.reason.startswith("Permission denied")
+                        else "not_found"
+                    ),
+                    retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="kb_read",
+                    tick=context.tick,
+                )
+            if audit_log is not None:
+                audit_log.record(
+                    AuditEventType.SHARED_KB_READ,
+                    agent_id=context.agent_id,
+                    tick=context.tick,
+                    details={"path": path},
+                )
+            return ToolResult(
+                success=True,
+                data={
+                    "content": resource.content,
+                    "version": resource.version,
+                    "last_modified_by": resource.last_modified_by,
+                    "last_modified_at_tick": resource.last_modified_at_tick,
+                },
+                agent_id=context.agent_id,
+                tool_name="kb_read",
+                tick=context.tick,
+            )
+
+        return handle_kb_read
+
+    def make_handle_kb_list(self) -> Callable[..., Any]:
+        """Return the ``kb_list`` tool handler bound to this device."""
+        from my_team.agent_runtime import ToolResult
+
+        kb = self
+
+        def handle_kb_list(
+            context: ToolContext,
+            base_path: str = "",
+            **_kw: Any,
+        ) -> Any:
+            try:
+                paths = kb.list_dir(base_path, context.agent_id)
+            except SharedKBWriteError as exc:
+                return ToolResult(
+                    success=False,
+                    error=str(exc),
+                    error_code="permission_denied",
+                    retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="kb_list",
+                    tick=context.tick,
+                )
+            return ToolResult(
+                success=True,
+                data={"paths": paths},
+                agent_id=context.agent_id,
+                tool_name="kb_list",
+                tick=context.tick,
+            )
+
+        return handle_kb_list
+
+    def make_handle_kb_search(self) -> Callable[..., Any]:
+        """Return the ``kb_search`` tool handler bound to this device."""
+        from my_team.agent_runtime import ToolResult
+        from my_team.audit import AuditEventType
+
+        audit_log = self._audit_log
+        kb = self
+
+        def handle_kb_search(
+            context: ToolContext,
+            query: str = "",
+            base_path: str = "",
+            limit: int = 20,
+            **_kw: Any,
+        ) -> Any:
+            if not query or not query.strip():
+                return ToolResult(
+                    success=False,
+                    error="kb_search requires non-empty 'query'",
+                    error_code="INVALID_ARGUMENT",
+                    retryable=False,
+                    agent_id=context.agent_id,
+                    tool_name="kb_search",
+                    tick=context.tick,
+                )
+            try:
+                limit_n = min(max(int(limit), 1), 100)
+            except (TypeError, ValueError):
+                limit_n = 20
+            hits = kb.search(
+                query,
+                context.agent_id,
+                base_path=base_path or "",
+                limit=limit_n,
+            )
+            if audit_log is not None:
+                for hit in hits:
+                    audit_log.record(
+                        AuditEventType.SHARED_KB_READ,
+                        agent_id=context.agent_id,
+                        tick=context.tick,
+                        details={"path": hit["path"], "search": query},
+                    )
+            return ToolResult(
+                success=True,
+                data={"results": hits},
+                agent_id=context.agent_id,
+                tool_name="kb_search",
+                tick=context.tick,
+            )
+
+        return handle_kb_search
