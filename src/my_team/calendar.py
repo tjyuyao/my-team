@@ -8,6 +8,9 @@ effect committed atomically with any task the rule creates, so a
 rolled-back tick neither loses nor double-fires a rule (T11 决策 1).
 
 Cron subset (T11 决策 4): structured fields, no string cron parsing.
+
+N1c-3 设备归位：CalendarStore 继承 Device，注册日历数据面受控实体；
+到期判定/RULE_ADVANCE 算法留内核（Simulation._check_calendar）。
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 from my_team.models.task import TaskPriority
 
 
@@ -137,12 +141,34 @@ class ScheduleRule(BaseModel):
         return self
 
 
-class CalendarStore:
-    """Registry of schedule rules with validation at registration
-    (SPEC §11.2 加载即校验 discipline)."""
+class CalendarStore(Device):
+    """日历规则注册表（SPEC §9.1 数据面 + N1c-3 设备归位）。
 
-    def __init__(self) -> None:
+    - 数据面：CronSpec/ScheduleRule 注册/advance/restore；
+    - 行为面（到期判定/RULE_ADVANCE 算法）留内核（Simulation._check_calendar）；
+    - 继承 Device 后注册范围级 DATA 实体（日历数据归位）。
+
+    Registry of schedule rules with validation at registration
+    (SPEC §11.2 加载即校验 discipline).
+    """
+
+    def __init__(self, device_id: str | None = None) -> None:
+        # Device 基类初始化（注册受控实体）
+        Device.__init__(self, device_id)
         self._rules: dict[str, ScheduleRule] = {}
+        # N1c-3：注册日历数据面受控实体（范围级 DATA）
+        self.calendar_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "calendar-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[CALENDAR_INSTRUCTION] 日历设备（CalendarDevice）持有调度规则数据面。\n"
+                    "CronSpec/ScheduleRule 在此注册；到期判定与 RULE_ADVANCE 效果由内核完成。\n"
+                    "调度规则支持每日/每周 cron 与 interval_ticks 两种触发方式。"
+                ),
+                source_tag="[CALENDAR_INSTRUCTION]",
+            ),
+        )
 
     def register(self, rule: ScheduleRule) -> ScheduleRule:
         if rule.rule_id in self._rules:

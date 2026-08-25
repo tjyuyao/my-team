@@ -46,6 +46,9 @@ class EffectType(str, Enum):
     MEMORY_ENTRY_WRITE = "memory_entry_write"  # 新增/追加版本
     MEMORY_ENTRY_EVICT = "memory_entry_evict"  # 撤出（从 store 中移除最新版本）
     MEMORY_ENTRY_FOLD = "memory_entry_fold"  # 折叠（合并/压缩多版本）
+    # N4-2 召回引擎 effect
+    MEMORY_RECALL_CONFIG = "memory_recall_config"  # 策略调整：更新可控查询词（持久）
+    MEMORY_RECALL = "memory_recall"  # 主动回忆：写入临时召回策略（一次性，延迟 1 tick 生效）
 
 
 # Effect types that have external (non-in-memory) side effects.
@@ -180,6 +183,21 @@ INVERT_CONTRACT: dict[EffectType, InvertSpec] = {
         kind=InvertKind.RESTORE_PREVIOUS,
         recorded=(
             "memory_before: (entry_id, version_chain_before_fold) — 逆操作=恢复折叠前的完整版本链"
+        ),
+    ),
+    # N4-2 召回引擎 effect 逆操作
+    EffectType.MEMORY_RECALL_CONFIG: InvertSpec(
+        kind=InvertKind.RESTORE_PREVIOUS,
+        recorded=(
+            "recall_config_before: 更新前的 RecallConfig 快照（可控查询词列表），"
+            "逆操作=恢复原查询词列表"
+        ),
+    ),
+    EffectType.MEMORY_RECALL: InvertSpec(
+        kind=InvertKind.REMOVE_CREATED,
+        recorded=(
+            "temp_overrides_added: 写入 recall_config.temp_overrides 的词列表；"
+            "逆操作=从 temp_overrides 移除这些词（一次性，下 tick 消费后自动清空）"
         ),
     ),
 }

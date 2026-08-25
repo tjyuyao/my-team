@@ -20,6 +20,10 @@ Per the ingress/egress transport-layer card:
   receipt into a PendingOperation is the kernel's job, but translating
   that external id into an op is done by a plugin-provided mapping
   function exposed through the assertion.
+
+N1c-3 设备归位：IntegrationRegistry 继承 Device，注册外部集成数据面
+受控实体（rate_limits/health 等外部资源限额归属此设备）；admit/
+record_dispatched 保持原接口（executor ∧ provider 放行语义不变）。
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from typing import Any, Callable, Mapping
 
 from pydantic import BaseModel, Field
 
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 from my_team.tool_manifest import ToolManifest
 
 
@@ -108,13 +113,40 @@ class _WindowState:
     calls_in_window: int = 0
 
 
-class IntegrationRegistry:
-    """Registered integrations; the kernel's single view of external platforms."""
+class IntegrationRegistry(Device):
+    """外部集成注册表 + 平台级 Admission（N1c-3 设备归位，SPEC §5.11）。
 
-    def __init__(self) -> None:
+    - 数据面（此设备持有）：Integration 注册信息、rate_limits（外部资源
+      限额）、health_check 标识——外部资源限额归属此设备（§5.11）；
+    - 行为面（内核保留）：`admit()/record_dispatched` 放行语义
+      ``executor ∧ provider`` 不变，健康背压通过 provider 层 Admission；
+    - 继承 Device 后注册范围级 DATA 实体（集成数据归位）。
+
+    Registered integrations; the kernel's single view of external platforms.
+    """
+
+    def __init__(self, device_id: str | None = None) -> None:
+        # Device 基类初始化（注册受控实体）
+        Device.__init__(self, device_id)
         self._integrations: dict[str, Integration] = {}
         self._providers_by_tool: dict[str, str] = {}
         self._windows: dict[str, _WindowState] = {}
+        # N1c-3：注册外部集成数据面受控实体（范围级 DATA）
+        self.integration_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "integration-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[INTEGRATION_INSTRUCTION] 集成设备（IntegrationDevice）"
+                    "持有外部平台适配器注册信息。\n"
+                    "外部资源速率限额（rate_limits）与健康检查标识（health_check）"
+                    "归属此设备数据面（§5.11）。\n"
+                    "平台级 Admission（provider 层）与执行器 Admission（内核层）"
+                    "是两个独立放行门，须同时通过才能分发（executor ∧ provider）。"
+                ),
+                source_tag="[INTEGRATION_INSTRUCTION]",
+            ),
+        )
 
     def register(self, integration: Integration) -> None:
         """Register (or replace) an integration and index its outbound tools.

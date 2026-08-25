@@ -40,6 +40,9 @@ class IntentType(str, Enum):
     ACCEPT_TASK = "accept_task"      # T12a: human worker accepts an assignment
     COMPLETE_TASK = "complete_task"
     FAIL_TASK = "fail_task"
+    # N4-2 召回引擎 intent
+    MEMORY_RECALL = "memory_recall"           # 主动回忆（临时召回策略，延迟 1 tick 生效）
+    MEMORY_RECALL_CONFIG = "memory_recall_config"  # 更新可控查询词（持久影响召回）
 
 
 class Intent(BaseModel):
@@ -249,3 +252,53 @@ class FailTaskIntent(Intent):
     task_id: str = Field(description="Task to fail")
     reason: str = Field(description="Failure reason")
     retryable: bool = Field(default=False, description="Can be retried")
+
+
+class MemoryRecallIntent(Intent):
+    """Intent: 主动回忆（memory_recall，N4-2）。
+
+    agent 请求对指定关键词执行一次临时召回；结果写入
+    recall_config.temp_overrides，**延迟 1 tick 生效**——因为
+    Act 在 Observe 之后，本 tick 的注入集已确定，下 tick 的
+    Observe 阶段才会消费 temp_overrides（结构性延迟，非额外等待）。
+
+    实现路径：
+    - 走 Effect（MEMORY_RECALL），非 pending op；
+    - 无外部副作用，不需要 op 生命周期；
+    - 框架在 Act → Commit 后把 temp_overrides 写入 RecallConfig；
+    - 下 tick 召回时优先合并 temp_overrides（消费后自动清空）。
+    """
+
+    intent_type: IntentType = Field(
+        default=IntentType.MEMORY_RECALL,
+        init=False,
+    )
+    # 本次主动回忆的临时覆盖词列表（补充进当前 tick 的查询词空间）
+    temp_query_terms: list[str] = Field(
+        description="临时召回词列表（一次性，下 tick 消费后清空）",
+    )
+    # 可选：限制召回类型
+    recall_types: list[str] = Field(
+        default_factory=list,
+        description="限制召回的 MemoryEntryType（空=不限制）",
+    )
+
+
+class MemoryRecallConfigIntent(Intent):
+    """Intent: 更新可控查询词（memory_recall_config，N4-2）。
+
+    agent 可显式控制可控查询词（persistent_query_terms），持久影响
+    每 tick 的触发召回。
+
+    效果：MEMORY_RECALL_CONFIG effect 写入 RecallConfig.persistent_query_terms。
+    逆操作：恢复更新前的词列表（INVERT_CONTRACT 已注册）。
+    """
+
+    intent_type: IntentType = Field(
+        default=IntentType.MEMORY_RECALL_CONFIG,
+        init=False,
+    )
+    # 新的可控查询词列表（完全替换）
+    persistent_query_terms: list[str] = Field(
+        description="新的可控查询词列表（持久，完全替换旧值）",
+    )
