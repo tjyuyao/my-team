@@ -55,3 +55,20 @@ priority: high
 - [ ] 注入布局 + 版本戳可从 Journal 重建（可重放，有测试）
 - [ ] [POLICY]/[POSITION_JD] 不可被 skill/客户内容覆盖（有测试）
 - [ ] `uv run pytest -q` 全绿；ruff/mypy 通过
+
+## 设计定稿（2026-08-25）
+
+详细设计见 `docs/N4_MEMORY_INJECTION_DESIGN.md`。关键决策：
+- **外加载条目 = 投影不入库**（结构性防改写：不在 store = 不可写）；
+  记忆写入 = Journal effect（可重放可回滚）；
+- context_compiler **保留签名重写**为三预算注入管线（固定/召回/观察）+
+  来源段 + MEMORY_INJECTION_STAMP；role 停止消费（字段保留）；
+- memory_recall 走 **effect 而非 pending op**（Act 在 Observe 后 ⇒ 延迟
+  1 tick 结构性成立）；
+- CONSOLIDATING = continuation 相位 + 授权集切换 + hysteresis；
+- **DeterministicReplay 删除**（零使用者 + 与 effect 式重放冲突）；
+- **LLM 执行器归位并入 N4 作 N4-6**（dispatcher 去私有耦合 + fake_llm
+  协议化）。
+
+**子任务**：N4-1 模型与存储 → N4-2 召回 → N4-3 组装器重写 → N4-5 可重放
+（主干串行）；N4-4 整理模式 / N4-6 LLM 执行器全程并行。

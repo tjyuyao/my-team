@@ -47,3 +47,19 @@ Task 设备细粒度 position 求值随 N5（依赖 N2）。
 - [ ] 预算拆分生效（LLM 限额 Agent 内、外部速率 Ingress）
 - [ ] 设备依赖经接口声明（无跨设备直连）
 - [ ] `uv run pytest -q` 全绿；ruff/mypy 通过
+
+## 设计定稿（2026-08-25）
+
+详细设计见 `docs/N1C_DEVICE_REFIT_DESIGN.md`。关键决策：
+- **设备归位 = 改造 store 为 Device 子类**（否决适配器：注入声明必须附着
+  数据所在处、序列化一次解决）；capability 必须 **adopt uuid5 派生值**（禁
+  随机 uuid4，防 manifest_hash 断裂）；
+- 私密区文件工具（read/ls/write/apply_patch）与执行器族（run_tests/
+  python_*/git_*）**非设备**（§4.5/§3.4），仅搬移归属；
+- 世界记忆设备：写入留内核、读经设备接口、PersistenceBackend 预留 N6；
+- Task 细粒度 position 求值留 N5；预算/容量归位**值不变只换归属**；
+- RecordStore 删 ledger：回滚改 invert_data 前值机制（§3.3）。
+
+**子任务**：N1c-1 设备适配层 → N1c-2 工具拆域（独占 simulation）→
+{N1c-3 世界记忆设备接口 ‖ N1c-4 预算+Admission+日历} → N1c-5 Task
+公共数据层 + Record ledger 删除。每步全量回归再放行。
