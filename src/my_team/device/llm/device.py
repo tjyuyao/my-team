@@ -44,6 +44,10 @@ class LLMDevice(Process):
         self._provider = None
 
     def respond(self, event: dict) -> dict:
+        if event["payload"].get("command") != LLM_REQUEST:
+            return {"target": event["source"], "kind": "application",
+                    "payload": _result_error(
+                        f"unexpected command: {event['payload'].get('command')!r}")}
         if self._provider is None:
             self._provider = self.provider_factory()
         result = asyncio.run(self._call(self._provider, event["payload"]))
@@ -60,10 +64,9 @@ class LLMDevice(Process):
             ):
                 if isinstance(ev, AssistantDoneEvent):
                     result = _result_ok(ev.message)
-                    break
-                if isinstance(ev, AssistantErrorEvent):
+                elif isinstance(ev, AssistantErrorEvent):
                     result = _result_error(ev.error.text or "provider error")
-                    break
+            # 不提前 break：耗尽流，避免提前关闭上游 async 生成器
             return result or _result_error("stream ended without a terminal event")
         except Exception as exc:
             return _result_error(str(exc))

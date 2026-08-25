@@ -53,7 +53,8 @@ class AgentOS:
             e = self.event_bus.get()
             try:
                 validate_event(e, self.rules)
-            except EventError:
+            except EventError as e:
+                print(e)
                 continue
             self.route(e)
 

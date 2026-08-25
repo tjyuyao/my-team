@@ -1,6 +1,6 @@
 # My-Team
 
-AgentOS：agent 的操作系统。
+AgentOS：agent 的操作系统，代码中如需简写统一使用 `aos` 而不是 `os` 代指。
 
 ## 架构
 
@@ -30,6 +30,10 @@ AgentOS：agent 的操作系统。
 
 事件只来自进程的产出。
 
+## LLM 设备
+
+- LLM 生成能力经设备进程提供，设备协议见 `device/llm/PROTOCOL.md`。
+
 ## 实现
 
 - `kernel/agent_os.py`：AgentOS。
@@ -37,4 +41,5 @@ AgentOS：agent 的操作系统。
 - `kernel/process_handle.py`：ProcessHandle 与 Emitter。
 - `kernel/event_protocol.py`：事件 TypedDict。
 - `kernel/event_validator.py`：校验规则集。
+- `device/llm/`：LLM 设备与请求/响应协议。
 - `main.py`：入口。

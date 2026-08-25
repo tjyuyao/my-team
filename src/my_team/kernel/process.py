@@ -20,8 +20,11 @@ class Process(mp.Process):
         self.emit = emit  # 进程 → 宿主
         self.poll_interval = poll_interval
 
-    def respond(self, event: Event):
-        """处理单个事件，返回结果（子类实现）。"""
+    def respond(self, event: Event) -> Event:
+        """处理单个事件，返回产出事件（子类实现）。
+
+        契约：必须返回合法事件（source 由宿主注入）；返回 None 属协议违规。
+        """
         raise NotImplementedError
 
     def run(self):
