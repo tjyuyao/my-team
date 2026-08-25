@@ -23,6 +23,7 @@ build/
 # Project
 tmp/
 .dsh-tmp/
+.env
 
 # Runtime
 /private/
