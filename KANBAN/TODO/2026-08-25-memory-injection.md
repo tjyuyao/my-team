@@ -10,8 +10,8 @@ priority: high
 
 ## 目标
 实现 SPEC §4 的记忆系统：长期记忆条目列表 + 工作记忆注入集 +
-触发器召回 + 记忆整理模式 + 注入状态空间可重建（Journal 投影）。
-这是 v0.11 最大的新实现块（Agent 引擎的"内心"）。
+触发器召回 + 记忆整理模式 + 注入状态空间完整入 Journal（审计复盘，
+非重放）。这是 v0.11 最大的新实现块（Agent 引擎的"内心"）。
 
 ## 要求 / 规则
 - MemoryEntry：`{entry_id uuid4, type(task|skill|tool|person),
@@ -53,9 +53,9 @@ priority: high
   感知截断 + 记 Journal 预警；无法一次处理多任务就让需求排队；
 - 注入状态空间 S = (注入布局, 召回策略配置含可控查询词, 条目状态)；
   T 确定 + 三类 effect（策略调整/主动回忆/条目管理）入 Journal
-  ⇒ 注入序列可重建（注入布局 + 版本戳入 Journal；「可重建」是
-  Journal 投影，非「确定性重放」不变量，见 OPEN_ISSUE
-  journal-projections）；
+  ⇒ 注入序列完整入 Journal（布局 + 版本戳），可审计复盘；「重建」是
+  Journal 投影，暂缓/裁撤（见 OPEN_ISSUE journal-projections；N6 恢复
+  机制裁撤，2026-08-25）；
 - 记忆/注入机制 = Agent 引擎（数据 = agent 态）；org 对 agent 的
   唯一杠杆 = `[POSITION_JD]`（N2）。
 
@@ -63,14 +63,14 @@ priority: high
 - 记忆条目存储（版本化）+ 记忆工具集；
 - ContextCompiler 改造为注入管线（召回 + 预算 + 来源段）；
 - CONSOLIDATING 相位（continuation/agent_state 扩展）+ 整理流程；
-- 注入可重建（Journal 重建注入序列，投影非重放）；
+- 注入序列完整入 Journal（布局 + 版本戳，审计复盘）；
 - PrivateStore 原始 ReAct 记录层（append-only conversation JSONL）。
 
 ## 验收标准
 - [ ] 触发召回注入 top-k（预算内）；可控查询词持久影响召回
 - [ ] 主动回忆延迟 1 tick 生效（非阻塞，复用异步基建）
 - [ ] 超预算触发整理模式；整理动作入 Journal；退出后工作立即续上
-- [ ] 注入布局 + 版本戳可从 Journal 重建（投影非重放，有测试）
+- [ ] 注入布局 + 版本戳完整入 Journal，可审计复盘（非重建，有测试）
 - [ ] CONSOLIDATING 输出含反思/经验/链接（不只压缩）；主动触发可用
 - [ ] 原始 ReAct 记录 append-only 落 PrivateStore；条目层与原始层检索
       路径区分
@@ -82,15 +82,18 @@ priority: high
 
 详细设计见 `docs/N4_MEMORY_INJECTION_DESIGN.md`。关键决策：
 - **外加载条目 = 投影不入库**（结构性防改写：不在 store = 不可写）；
-  记忆写入 = Journal effect（可重放可回滚）；
+  记忆写入 = Journal effect（可审计可回滚）；
 - context_compiler **保留签名重写**为三预算注入管线（固定/召回/观察）+
   来源段 + MEMORY_INJECTION_STAMP；role 停止消费（字段保留）；
 - memory_recall 走 **effect 而非 pending op**（Act 在 Observe 后 ⇒ 延迟
   1 tick 结构性成立）；
 - CONSOLIDATING = continuation 相位 + 授权集切换 + hysteresis；
-- **DeterministicReplay 删除**（零使用者 + 与 effect 式重放冲突）；
+- **DeterministicReplay 已删除**（2026-08-25，随恢复/重放机制裁撤，
+  commit cccd7e4）；
 - **LLM 执行器归位并入 N4 作 N4-6**（dispatcher 去私有耦合 + fake_llm
   协议化）。
 
-**子任务**：N4-1 模型与存储 → N4-2 召回 → N4-3 组装器重写 → N4-5 可重放
-（主干串行）；N4-4 整理模式 / N4-6 LLM 执行器全程并行。
+**子任务**：N4-1 模型与存储 → N4-2 召回 → N4-3 组装器重写
+（主干串行）；N4-4 整理模式 / N4-6 LLM 执行器并行。
+（2026-08-25：原 N4-5「可重放」裁撤——重建是投影层，随 N6 一起；
+N4 交付注入入 Journal + 审计复盘。）

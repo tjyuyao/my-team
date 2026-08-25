@@ -190,14 +190,15 @@ Agent 私有态分两层：
 | N4-2 召回引擎 | 触发器索引 + KeywordRecallBackend + RecallBackend 接口 + 可控查询词 + MEMORY_RECALL intent | 关键词命中 top-k、可控查询词持久、主动回忆 1 tick、召回面=触发器列表 | N4-1 | 与 N4-6 并行 |
 | N4-3 注入组装器重写 | 三预算注入管线 + 来源段 + 布局 + stamp + prompt_templates 拆分 + role 停止消费 + 量力而行截断 | `[POLICY]`/`[POSITION_JD]` 不可覆盖（测试）、固定预算不可超、stamp 入 Journal、工具返回超预算截断 | N4-1+2 接口 | 与 N4-4 并行 |
 | N4-4 整理模式 | CONSOLIDATING 相位 + resume_phase + 触发接线（预算+主动）+ 记忆工具集 handler + 结构化摘要（反思/经验/链接）+ Assigner JUDGE 接线 + 自决退出 + hysteresis | 超预算触发、主动触发、工具面收窄、动作入 Journal、退出后续上、输出含反思/经验/链接（测试） | N4-1 + N4-3 触发接口 | 与 N4-3/5 并行 |
-| N4-5 注入可重建 | 三类 effect + stamp + reconstruct_injection + 重建测试 + 删 DeterministicReplay | 注入序列可从 Journal 重建（确定性测试）；死代码移除 | N4-3 | 与 N4-4 并行 |
+| N4-5 注入审计复盘 | 三类 effect + stamp 完整入 Journal（布局 + 版本戳） | 注入序列可审计复盘（记录非重建）；DeterministicReplay 已删（commit cccd7e4） | N4-3 | 与 N4-4 并行 |
 | N4-6 LLM 执行器归位 | dispatcher 注入 registry + fake_llm 协议化 + advance 走公共接口 + 上下文感知截断 | 无 `_operations` 直接访问（grep 断言）、fake/gateway 同协议、全量绿 | 无 | **全程并行** |
 
 > **N4-7 原始 ReAct 记录层已拆分为独立卡** `raw-transcript-layer`
 > （2026-08-25），不在本卡子任务内。
 
 **主干串行链**：N4-1 → N4-2 → N4-3 → N4-5；N4-4/N4-6 并行。每子任务后
-全量回归。
+全量回归。（2026-08-25：N4-5 由「可重建」改为「审计复盘」——重建是
+投影层，随 N6 恢复机制裁撤。）
 
 ## 11. 风险清单（要点）
 
