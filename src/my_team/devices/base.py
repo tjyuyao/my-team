@@ -86,20 +86,24 @@ class Device(ABC):
         kind: EntityKind,
         label: str,
         injection: InjectionDecl | None = None,
+        entity_id: str | None = None,
     ) -> str:
         """声明一个受控实体，返回其 uuid（未注册前对 Authority 不可见）。
 
         ``injection`` 即"注册即声明注入内容"（三条之三）。
+
+        ``entity_id`` 显式给出时即 adopt 机制（N1c：设备采用
+        uuid5 派生值而非随机 uuid4，保证 manifest_hash 稳定）。
         """
-        entity_id = str(uuid.uuid4())
-        self._entities[entity_id] = RegisteredEntity(
-            entity_id=entity_id,
+        eid = entity_id if entity_id is not None else str(uuid.uuid4())
+        self._entities[eid] = RegisteredEntity(
+            entity_id=eid,
             device_id=self.device_id,
             kind=kind,
             label=label,
             injection=injection,
         )
-        return entity_id
+        return eid
 
     @property
     def entities(self) -> Mapping[str, RegisteredEntity]:

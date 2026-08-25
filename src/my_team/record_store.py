@@ -14,6 +14,10 @@ Model:
 - Rollback / group failure: the effect's invert removes exactly the
   ledger entries it appended and restores the prior record (per-effect
   undo — the ledger stays an exact replay source).
+
+N1c-1: RecordStore 归位为 Device 子类（SPEC §5.3，N1c 设备适配层）。
+注册受控 uuid（范围级 DATA + 工具面 TOOL）+ InjectionDecl。
+构造签名保持完全兼容（simulation.py 不变）。
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 
 
 class RecordInvariantError(Exception):
@@ -149,15 +155,48 @@ class MutationResult(BaseModel):
     version: int
 
 
-class RecordStore:
-    """Typed record store with invariants + append-only ledger."""
+class RecordStore(Device):
+    """Typed record store with invariants + append-only ledger.
 
-    def __init__(self) -> None:
+    N1c-1 设备归位：继承 Device，构造时注册受控 uuid
+    （范围级 DATA + 工具面 TOOL）并声明 InjectionDecl。
+    构造签名保持原样（simulation.py 兼容）。
+    """
+
+    def __init__(self, device_id: str | None = None) -> None:
+        Device.__init__(self, device_id)
         self._schemas: dict[str, RecordSchema] = {}
         self._records: dict[str, dict[str, Any]] = {}
         self._ledger: list[LedgerEntry] = []
         self._ledger_counter = 0
         self._version_counter: dict[str, int] = {}
+        # N1c-1：注册设备受控实体
+        # 范围级 DATA 实体 — 记录存储整体范围，InjectionDecl 引导 bash
+        self.records_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "record-store-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[RECORD_INSTRUCTION] 记录存储（RecordStore）管理结构化业务记录。\n"
+                    "通过 record_upsert 工具新增/更新记录，"
+                    "通过 record_delta 工具修改记录的数值字段（如库存）。\n"
+                    "所有变更经效果层（STAGED_MUTATION）提交，"
+                    "不变式违反为确定性业务失败（不触发 tick 回滚）。"
+                ),
+                source_tag="[RECORD_INSTRUCTION]",
+            ),
+        )
+        # 工具面 TOOL 实体 — 采用 uuid5 派生值（adopt 机制）
+        from my_team.tool_manifest import builtin_manifests
+        _manifests = builtin_manifests()
+        self.record_upsert_capability = self.register_entity(
+            EntityKind.TOOL, "record_upsert",
+            entity_id=_manifests["record_upsert"].capability,
+        )
+        self.record_delta_capability = self.register_entity(
+            EntityKind.TOOL, "record_delta",
+            entity_id=_manifests["record_delta"].capability,
+        )
 
     # -- schema registration -------------------------------------------------
 

@@ -25,7 +25,7 @@ from typing import Any
 
 from my_team.llm_gateway import LLMGateway
 from my_team.models.llm import LLMRequest
-from my_team.pending_ops import OpStatus, OpType
+from my_team.pending_ops import OpStatus, OpType, PendingOperationRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,11 @@ class LLMDispatcher:
 
     def __init__(
         self,
-        simulation: Any,
+        registry: PendingOperationRegistry,
         gateway: LLMGateway,
         poll_interval: float = 0.5,
     ) -> None:
-        self._sim = simulation
+        self._registry = registry
         self._gateway = gateway
         self._poll_interval = max(0.05, poll_interval)
         self._running = False
@@ -108,8 +108,7 @@ class LLMDispatcher:
 
     def _poll_once(self) -> None:
         """Single poll cycle: find and complete SUBMITTED LLM ops."""
-        registry = self._sim._pending_ops
-        for op in list(registry._operations.values()):
+        for op in self._registry.iter_ops():
             if not self._running:
                 break
             if op.op_type != OpType.LLM_REQUEST:
@@ -120,13 +119,11 @@ class LLMDispatcher:
 
     def _process_op(self, op: Any) -> None:
         """Process a single SUBMITTED LLM op."""
-        registry = self._sim._pending_ops
-
         # Build LLMRequest from op metadata
         request = self._build_request(op)
         if request is None:
             logger.warning("Cannot build LLMRequest for op %s", op.request_id)
-            registry.fail(op.request_id, error="Cannot build LLM request from op metadata")
+            self._registry.fail(op.request_id, error="Cannot build LLM request from op metadata")
             self._error_count += 1
             return
 
@@ -140,7 +137,7 @@ class LLMDispatcher:
                 "model": result.model,
                 "finish_reason": result.finish_reason,
             }
-            registry.complete(op.request_id, result=result_dict)
+            self._registry.complete(op.request_id, result=result_dict)
             self._processed_count += 1
             logger.debug("Dispatched LLM op %s for agent %s", op.request_id, op.agent_id)
 
@@ -148,7 +145,7 @@ class LLMDispatcher:
             logger.error(
                 "LLM dispatch failed for op %s: %s", op.request_id, e,
             )
-            registry.fail(op.request_id, error=f"LLM dispatch error: {e}")
+            self._registry.fail(op.request_id, error=f"LLM dispatch error: {e}")
             self._error_count += 1
 
     def _build_request(self, op: Any) -> LLMRequest | None:

@@ -1572,6 +1572,11 @@ class Simulation:
         """LLM usage budget tracker (T16c)."""
         return self._budget
 
+    @property
+    def pending_ops(self) -> PendingOperationRegistry:
+        """Public accessor for the pending operation registry (N4-6)."""
+        return self._pending_ops
+
     # -- Tool plugin API (v0.10 T7) -----------------------------------------
 
     def register_tool(

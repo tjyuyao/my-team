@@ -5,6 +5,10 @@ Per SPEC §4.5, §5.1, §13.3:
 - Emails are delivered at specified ticks
 - Email ordering follows priority rules
 - Status: queued → delivered → read
+
+N1c-1: MailSystem 归位为 Device 子类（SPEC §5.6，N1c 设备适配层）。
+注册受控 uuid（范围级 DATA + 工具面 TOOL）+ InjectionDecl。
+构造签名保持完全兼容（simulation.py 不变）。
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 from my_team.models.email import Email, EmailPriority, EmailStatus, EmailType
 
 # Email ordering priority (lower = higher priority in sort)
@@ -164,16 +169,44 @@ class Mailbox:
         )
 
 
-class MailSystem:
+class MailSystem(Device):
     """Central email system that manages all agent mailboxes.
 
     Handles email routing, delivery, and cross-agent communication.
+
+    N1c-1 设备归位：继承 Device，构造时注册受控 uuid
+    （范围级 DATA + 工具面 TOOL）并声明 InjectionDecl。
+    构造签名保持原样（simulation.py 兼容）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, device_id: str | None = None) -> None:
+        Device.__init__(self, device_id)
         self._mailboxes: dict[str, Mailbox] = {}
         self._pending: list[Email] = []  # emails waiting to be delivered
         self._all_emails: dict[str, Email] = {}  # global email registry
+        # N1c-1：注册设备受控实体
+        # 范围级 DATA 实体 — 邮件系统整体范围，InjectionDecl 引导 bash
+        self.mail_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "mail-system-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[MAIL_INSTRUCTION] 邮件系统（MailSystem）是 bash 间通信的主要渠道。\n"
+                    "通过 send_email 工具（STAGED_MUTATION）发送邮件，"
+                    "邮件在下一 tick 送达收件人邮箱。\n"
+                    "邮件按优先级和截止时间排序：system_notice > human_message > 其他；"
+                    "大附件使用 AttachmentRef 引用而非内嵌内容。"
+                ),
+                source_tag="[MAIL_INSTRUCTION]",
+            ),
+        )
+        # 工具面 TOOL 实体 — 采用 uuid5 派生值（adopt 机制）
+        from my_team.tool_manifest import builtin_manifests
+        _manifests = builtin_manifests()
+        self.send_email_capability = self.register_entity(
+            EntityKind.TOOL, "send_email",
+            entity_id=_manifests["send_email"].capability,
+        )
 
     def register_agent(self, agent_id: str) -> Mailbox:
         """Create and register a mailbox for an agent."""

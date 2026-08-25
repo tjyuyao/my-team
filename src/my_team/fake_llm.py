@@ -79,8 +79,8 @@ class FakeLLMProvider:
         Returns the number of ops completed.
         """
         completed = 0
-        registry = simulation._pending_ops
-        for op in registry._operations.values():
+        registry = simulation.pending_ops
+        for op in registry.iter_ops():
             if op.op_type != OpType.LLM_REQUEST:
                 continue
             if op.status not in {OpStatus.SUBMITTED, OpStatus.PENDING}:
@@ -141,8 +141,8 @@ class FakeToolExecutor:
         Returns the number of ops completed.
         """
         completed = 0
-        registry = simulation._pending_ops
-        for op in registry._operations.values():
+        registry = simulation.pending_ops
+        for op in registry.iter_ops():
             if op.op_type != OpType.TOOL_REQUEST:
                 continue
             if op.status not in {OpStatus.SUBMITTED, OpStatus.PENDING}:

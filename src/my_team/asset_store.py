@@ -10,6 +10,10 @@ Design:
   (SPEC §4.3): {ref_type, path, version, hash, size, mime} — Email
   attachments reference AssetStore objects or SharedKB entries instead
   of copying payloads (T8b wires the email side).
+
+N1c-1: AssetStore 归位为 Device 子类（SPEC §5.4，N1c 设备适配层）。
+注册受控 uuid（范围级 DATA）+ InjectionDecl。
+构造签名保持完全兼容（simulation.py 不变）。
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 
 DEFAULT_MIME = "application/octet-stream"
 
@@ -71,17 +77,37 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-class AssetStore:
+class AssetStore(Device):
     """Content-addressed binary asset store (in-memory, T10).
 
     Persistence (SQLite) and cross-agent transfer are future work — the
     current contract is in-memory put/get/stat with content addressing.
+
+    N1c-1 设备归位：继承 Device，构造时注册受控 uuid
+    （范围级 DATA）并声明 InjectionDecl。
+    构造签名保持原样（simulation.py 兼容）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, device_id: str | None = None) -> None:
+        Device.__init__(self, device_id)
         self._blobs: dict[str, bytes] = {}      # sha256 → payload
         self._meta: dict[str, AssetMeta] = {}    # sha256 → metadata
         self._counter = 0
+        # N1c-1：注册设备受控实体
+        # 范围级 DATA 实体 — 资产库整体范围，InjectionDecl 描述用途
+        self.assets_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "asset-store-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[ASSET_INSTRUCTION] 资产存储（AssetStore）是内容寻址的二进制资产库。\n"
+                    "通过 put 存入字节内容，返回 sha256 摘要；"
+                    "通过 get/stat 按摘要检索。内容不可变且自动去重。\n"
+                    "邮件附件应通过 AttachmentRef 引用资产，而非复制内容。"
+                ),
+                source_tag="[ASSET_INSTRUCTION]",
+            ),
+        )
 
     def put(
         self,

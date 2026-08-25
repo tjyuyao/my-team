@@ -6,6 +6,10 @@ Per SPEC §6:
 - Exclusive mutex locks for writes
 - Optimistic versioning: each write carries read-time version
 - Conflict detection on commit
+
+N1c-1: SharedKB 归位为 Device 子类（SPEC §5.2，N1c 设备适配层）。
+设备注册受控 uuid（范围级 DATA + 工具面 TOOL）+ InjectionDecl，
+构造签名保持完全兼容（simulation.py 不变）。
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 
 # ---------------------------------------------------------------------------
 # Permission model (§6.2)
@@ -387,11 +393,15 @@ class SharedKBResource(BaseModel):
     exists: bool = False
 
 
-class SharedKB:
+class SharedKB(Device):
     """Shared knowledge base with permissions, locking, and versioning.
 
     Coordinates all three subsystems to provide safe concurrent access
     to shared resources.
+
+    N1c-1 设备归位：继承 Device，构造时注册受控 uuid
+    （范围级 DATA + 工具面 TOOL）并声明 InjectionDecl。
+    构造签名保持原样（simulation.py 兼容）。
     """
 
     def __init__(
@@ -399,7 +409,10 @@ class SharedKB:
         permissions: PermissionEngine | None = None,
         lock_manager: LockManager | None = None,
         version_control: VersionControl | None = None,
+        device_id: str | None = None,
     ) -> None:
+        # Device 基类初始化
+        Device.__init__(self, device_id)
         # NOTE: explicit None checks — LockManager defines __len__,
         # so `lock_manager or LockManager()` would replace a valid
         # empty lock manager with a fresh instance.
@@ -407,6 +420,40 @@ class SharedKB:
         self._locks = lock_manager if lock_manager is not None else LockManager()
         self._versions = version_control if version_control is not None else VersionControl()
         self._resources: dict[str, SharedKBResource] = {}
+        # N1c-1：注册设备受控实体
+        # 范围级 DATA 实体 — 知识库整体范围，InjectionDecl 引导 bash
+        self.kb_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "shared-kb-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[KB_INSTRUCTION] 知识库（SharedKB）是团队的共享知识空间。\n"
+                    "通过 kb_read/kb_list/kb_search 工具读取条目，"
+                    "通过 kb_write 工具（STAGED_MUTATION）写入。\n"
+                    "写入需先锁定（lock）并携带读取时的版本号（optimistic locking）。"
+                ),
+                source_tag="[KB_INSTRUCTION]",
+            ),
+        )
+        # 工具面 TOOL 实体 — 采用 uuid5 派生值（adopt 机制）
+        from my_team.tool_manifest import builtin_manifests
+        _manifests = builtin_manifests()
+        self.kb_read_capability = self.register_entity(
+            EntityKind.TOOL, "kb_read",
+            entity_id=_manifests["kb_read"].capability,
+        )
+        self.kb_write_capability = self.register_entity(
+            EntityKind.TOOL, "kb_write",
+            entity_id=_manifests["kb_write"].capability,
+        )
+        self.kb_list_capability = self.register_entity(
+            EntityKind.TOOL, "kb_list",
+            entity_id=_manifests["kb_list"].capability,
+        )
+        self.kb_search_capability = self.register_entity(
+            EntityKind.TOOL, "kb_search",
+            entity_id=_manifests["kb_search"].capability,
+        )
 
     @property
     def permissions(self) -> PermissionEngine:

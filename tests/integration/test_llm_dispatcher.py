@@ -85,7 +85,7 @@ class TestLLMDispatcher:
     def test_dispatcher_completes_llm_op(self):
         sim = Simulation(agent_tree=_make_tree())
         gateway = FakeGateway()
-        dispatcher = LLMDispatcher(sim, gateway, poll_interval=0.05)
+        dispatcher = LLMDispatcher(sim.pending_ops, gateway, poll_interval=0.05)
 
         req_id = self._submit_llm_op(sim)
         assert sim._pending_ops.get_by_id(req_id).status.value == "submitted"
@@ -101,7 +101,7 @@ class TestLLMDispatcher:
         sim = Simulation(agent_tree=_make_tree())
         gateway = FakeGateway()
         gateway._fail = True
-        dispatcher = LLMDispatcher(sim, gateway, poll_interval=0.05)
+        dispatcher = LLMDispatcher(sim.pending_ops, gateway, poll_interval=0.05)
 
         req_id = self._submit_llm_op(sim)
         dispatcher._running = True
@@ -114,7 +114,7 @@ class TestLLMDispatcher:
     def test_dispatcher_ignores_tool_ops(self):
         sim = Simulation(agent_tree=_make_tree())
         gateway = FakeGateway()
-        dispatcher = LLMDispatcher(sim, gateway, poll_interval=0.05)
+        dispatcher = LLMDispatcher(sim.pending_ops, gateway, poll_interval=0.05)
         dispatcher._running = True
 
         # Register a remote tool and submit a tool op
@@ -164,7 +164,7 @@ class TestLLMDispatcher:
     def test_dispatcher_start_stop(self):
         sim = Simulation(agent_tree=_make_tree())
         gateway = FakeGateway()
-        dispatcher = LLMDispatcher(sim, gateway, poll_interval=0.05)
+        dispatcher = LLMDispatcher(sim.pending_ops, gateway, poll_interval=0.05)
         dispatcher.start()
         time.sleep(0.15)
         dispatcher.stop()
@@ -173,7 +173,7 @@ class TestLLMDispatcher:
     def test_dispatcher_processed_count(self):
         sim = Simulation(agent_tree=_make_tree())
         gateway = FakeGateway()
-        dispatcher = LLMDispatcher(sim, gateway, poll_interval=0.05)
+        dispatcher = LLMDispatcher(sim.pending_ops, gateway, poll_interval=0.05)
 
         self._submit_llm_op(sim)
         dispatcher._running = True

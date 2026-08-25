@@ -432,6 +432,14 @@ class PendingOperationRegistry:
             if op.status == OpStatus.COMPLETED
         )
 
+    def iter_ops(self) -> list[PendingOperation]:
+        """Return a snapshot list of all current operations (public).
+
+        Callers must not mutate the returned objects during iteration;
+        use the registry's public mutating methods instead.
+        """
+        return list(self._operations.values())
+
     def summary(self) -> dict[str, Any]:
         """Get a summary of all operations."""
         by_status: dict[str, int] = {}

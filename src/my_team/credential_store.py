@@ -24,6 +24,10 @@ HMAC-SHA256 keystream) and is SIMULATOR-GRADE: it proves the
 "secrets never stored in plaintext" property and keeps secrets out of
 the kernel, but production deployments should point ``file:`` at a
 real KMS / secret manager instead.
+
+N1c-1: CredentialStore 归位为 Device 子类（SPEC §5.5，N1c 设备适配层）。
+注册受控 uuid（范围级 DATA）+ InjectionDecl。
+构造签名保持完全兼容（simulation.py 不变）。
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Protocol, Sequence
+
+from my_team.devices.base import Device, EntityKind, InjectionDecl
 
 _KDF_N = 2**14
 _KDF_R = 8
@@ -297,23 +303,45 @@ class EncryptedFileCredentialBackend:
         self._save_entries(entries)
 
 
-class CredentialStore:
+class CredentialStore(Device):
     """Reference-only credential resolution service (SPEC §7.5).
 
     Ref syntax: ``<kind>:<name>`` where ``kind`` names a registered
     backend; a ref without a recognized ``kind:`` prefix resolves
     through ``default_backend`` when configured.
+
+    N1c-1 设备归位：继承 Device，构造时注册受控 uuid
+    （范围级 DATA）并声明 InjectionDecl。
+    构造签名保持原样（simulation.py 兼容）。
     """
 
     def __init__(
         self,
         backends: Sequence[CredentialBackend] | None = None,
         default_backend: str | None = None,
+        device_id: str | None = None,
     ) -> None:
+        Device.__init__(self, device_id)
         self._backends: dict[str, CredentialBackend] = {}
         self._default_backend = default_backend
         for backend in backends or []:
             self.register(backend)
+        # N1c-1：注册设备受控实体
+        # 范围级 DATA 实体 — 凭证库整体范围（秘密值从不暴露于内核）
+        self.credentials_scope_id = self.register_entity(
+            EntityKind.DATA,
+            "credential-store-scope",
+            injection=InjectionDecl(
+                content=(
+                    "[CREDENTIAL_INSTRUCTION] 凭证存储（CredentialStore）是引用级凭证服务。\n"
+                    "内核代码只见 credential_ref 字符串，"
+                    "秘密值由执行器/插件层按需解析，从不进入 Journal/审计/提示词。\n"
+                    "用 has(ref) 检查凭证是否存在（不返回值），"
+                    "用 resolve(ref) 在执行器边界获取实际值。"
+                ),
+                source_tag="[CREDENTIAL_INSTRUCTION]",
+            ),
+        )
 
     def register(self, backend: CredentialBackend) -> None:
         if backend.kind in self._backends:
