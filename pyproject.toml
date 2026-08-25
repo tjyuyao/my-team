@@ -19,6 +19,9 @@ dev = [
     "pytest-cov>=4.0",
 ]
 
+[project.scripts]
+my-team = "my_team.main:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/my_team"]
 
