@@ -15,9 +15,9 @@ Process = 一套契约：``async respond(event) -> Event | VOID``。
 
 沙箱（固定矩阵，不承载权限）：设备（load_spec 非空）与 agent（实例有
 workdir 属性）默认进沙箱——run() 检测未沙箱（MY_TEAM_SANDBOXED 哨兵）→
-装载状态 pickle 到继承 fd → execv bwrap（只读系统/私有数据区写根/默认
-禁网/ipc 隔离）→ 沙箱内 sandbox_entry re-entry 直接 serve（不重跑
-spawn_main、不重跑入口模块顶层）。
+装载状态 pickle 到继承 fd → execv bwrap（只读系统/挂载矩阵双锚点：家 +
+源码区，按身份类型展开可写性/默认禁网/ipc 隔离）→ 沙箱内 sandbox_entry
+re-entry 直接 serve（不重跑 spawn_main、不重跑入口模块顶层）。
 
 共用 ``BucketDispatcher``：按 source 分桶——同源串行保序、跨源并行。
 """
@@ -118,7 +118,9 @@ class UserModeProcess(mp.Process):
         # emit 可调用即可（如直接实例化时传入收集器），conn 可缺省。
         self._conn = getattr(emit, "conn", None)
         self.max_concurrent_sources = max_concurrent_sources
-        self._load_spec = load_spec  # (identity, module_path, options) | None
+        # (identity, module_path, options, bound_agent) | None；
+        # bound_agent 仅 per-agent 实例非 None（挂载锚点按绑定 agent 解析）
+        self._load_spec = load_spec
 
     async def respond(self, event: Event) -> Event | VOID:
         """处理单个事件，返回产出事件或 VOID（子类实现）。"""
@@ -153,8 +155,9 @@ class UserModeProcess(mp.Process):
         os.set_inheritable(conn_fd, True)  # execv 后 fd 编号保留
         state = self._sandbox_state()
         state["conn_fd"] = conn_fd
-        data_dir = self._data_dir()
-        os.makedirs(data_dir, exist_ok=True)  # bwrap --bind 源必须存在
+        writable, readonly = self._mount_anchors()
+        for anchor in (*writable, *readonly):
+            os.makedirs(anchor, exist_ok=True)  # bwrap --bind 源必须存在
         read_fd, write_fd = os.pipe()
         os.set_inheritable(read_fd, True)
         with os.fdopen(write_fd, "wb", closefd=True) as f:
@@ -163,7 +166,7 @@ class UserModeProcess(mp.Process):
         env[SANDBOX_SENTINEL] = "1"
         env["PYTHONPATH"] = os.pathsep.join(sys.path)  # re-entry 可 import
         env["PYTHONDONTWRITEBYTECODE"] = "1"  # 只读系统下不写 __pycache__
-        os.execvpe(bwrap, _bwrap_args(data_dir, read_fd), env)
+        os.execvpe(bwrap, _bwrap_args(writable, readonly, read_fd), env)
         raise SystemExit("execvpe 失败")  # 理论不可达（exec 成功即替换映像）
 
     def _sandbox_state(self) -> dict:
@@ -182,15 +185,28 @@ class UserModeProcess(mp.Process):
         instance._sentinel = None
         return {"kind": "agent", "instance": instance}
 
-    def _data_dir(self) -> str:
-        """沙箱数据区（唯一写根）：设备 = workdir/data/<identity>（data-dir
-        约定保证 source_file 绝对路径、中间目录名恰为 devices）；agent =
-        workdir/data。"""
+    def _mount_anchors(self) -> tuple[list[str], list[str]]:
+        """挂载矩阵锚点（(可写列表, 只读列表)），按身份类型展开为家 + 源码
+        区两个锚点（静态出生定格，无 per-position 物化）：
+
+        - 设备（load_spec）：家可写（shared = data/<device-id>；per-agent =
+          绑定 agent 的家 data/<bound-agent>，命令落 agent 家），源码区
+          data/devices 只读（加载实现用）；
+        - agent（workdir 属性）：家 data/<agent-id> 可写 + 源码区可写（生产
+          源码；装载权在 Authority，写了也装不了）。
+
+        源码区是系统唯一识别区（bootstrap 只扫这里）；workdir 根仅 data/。
+        """
         if self._load_spec is not None:
-            identity, path, _ = self._load_spec
-            return os.path.join(os.path.dirname(os.path.dirname(path)),
-                                "data", identity)
-        return os.path.join(self.workdir, "data")
+            identity, path, _, bound_agent = self._load_spec
+            workdir = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+            if bound_agent is not None:
+                home = os.path.join(workdir, "data", bound_agent)
+            else:
+                home = os.path.join(workdir, "data", identity)
+            return [home], [os.path.join(workdir, "data", "devices")]
+        return [os.path.join(self.workdir, "data", self.identity),
+                os.path.join(self.workdir, "data", "devices")], []
 
     async def _serve(self):
         dispatcher = BucketDispatcher(self.respond, self._emit,
@@ -222,20 +238,26 @@ class KernelModeDevice:
         raise NotImplementedError
 
 
-def _bwrap_args(data_dir: str, state_fd: int,
+def _bwrap_args(writable: list[str], readonly: list[str], state_fd: int,
                 needs_network: bool = False) -> list[str]:
     """bwrap 固定矩阵命令行（唯一构造点；网络开关编辑边界——本卡全部传
     needs_network=False，默认禁网，声明机制由 network-declaration 卡接）。
 
-    固定矩阵语义：挂载参数只依赖 data_dir，不依赖 position（无 per-position
-    物化）；设备进程永远不是 root（userns 单用户映射）。
+    固定矩阵语义：挂载参数只依赖身份类型的两个锚点（家 + 源码区），不依赖
+    position（无 per-position 物化）；设备进程永远不是 root（userns 单用户
+    映射）。
     """
     args = [
         "bwrap",
         "--ro-bind", "/", "/",          # 系统只读
         "--proc", "/proc",              # 独立 /proc（pidns 内视图）
         "--tmpfs", "/tmp",              # 可写临时区
-        "--bind", data_dir, data_dir,   # 数据区唯一写根
+    ]
+    for anchor in readonly:
+        args += ["--ro-bind", anchor, anchor]  # 源码区只读（设备加载实现用）
+    for anchor in writable:
+        args += ["--bind", anchor, anchor]     # 家（可写锚点）
+    args += [
         "--unshare-user",               # userns：设备进程永远不是 root
         "--unshare-pid",                # pidns：不可见宿主/兄弟进程
         "--unshare-ipc",                # ipcns：封 System V IPC 通道

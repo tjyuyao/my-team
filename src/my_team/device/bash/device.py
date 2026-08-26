@@ -30,6 +30,11 @@ from collections import deque
 
 from my_team.kernel.process import VOID, UserModeProcess
 
+# 设备分界声明（workdir 装载时必读）：per-agent = 执行载体——安装时为每个
+# 绑定 agent 实例化一个进程，实例身份 <device-id>@<agent-id>，挂载家 =
+# 绑定 agent 的家（命令落 agent 家）；cwd 具体语义由 bash-sandbox-adapt 卡接。
+INSTANCE = "per-agent"
+
 RESULT_PREVIEW = 64 * 1024  # bash_result 内容预览上限（缓冲尾部）
 STATUS_CHUNK = 64 * 1024    # bash_status_result 单次续读上限
 

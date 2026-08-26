@@ -42,7 +42,7 @@ def _serve_device(load_spec, conn):
     import importlib.util
     import uuid
 
-    identity, path, options = load_spec
+    identity, path, options, _bound_agent = load_spec
     name = f"team_device_{identity}_{uuid.uuid4().hex[:8]}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)

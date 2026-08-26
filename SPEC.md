@@ -117,42 +117,62 @@ kernel 完成。
 
 ## 工作目录与设备装卸
 
-- **工作目录**：Root（agent）的私有文件系统区域（team 配置
-  `options.workdir`），存放设备实现源码（`devices/*.py`）等运行期产物；
-  源码即持久化形态——重启后重新 bootstrap 即恢复，无需重新生成。
-- **设备源码约定**：导出 `Device`（进程类）与 `TOOLS`（工具定义声明），
-  可选 `SCOPES`（权限范围声明：`{token, default, explanation}`——token 为
-  不透明权限名，default 标记安装时默认公开，explanation 为注入记忆的书面
-  说明）。`Device` 实例在**子进程内构造**（父进程只传装载描述，pickle
-  无关类对象），spawn/fork 启动方式皆可。
-- **装卸**：`install_device`（身份 + 源码路径 + grants 布线声明）请求内核
-  装载，**装卸权经 Authority 裁决**（root 或持有 `org:install`）——动态
-  加载 → Authority 登记 → grants 展开为默认公开 scope 布线 → 注入全部
-  agent（内容按各 agent 的 position 过滤）；`uninstall_device` 卸载——
-  终止进程 → 撤销声明（连带撤销布线）→ 重注入（条目驱逐）。结果一律 ack
-  回告请求方，失败不击穿内核。
-- **bootstrap**：Root 扫描工作目录批量装载；收齐全部回执后向发起者
-  报告结果（agent_result），空目录立即报告不挂起。
+- **工作目录**：数据根（team 配置 `options.workdir`，config 绑定），内含
+  `data/` 容器——设备源码区 `data/devices/*.py`（系统唯一识别区）与各家
+  `data/<identity>/`（agent 与 device 同目录同形制）；源码即持久化形态——
+  重启后重新 bootstrap 即恢复，无需重新生成。
+- **设备源码约定**：导出 `Device`（进程类）、`TOOLS`（工具定义声明）与
+  `INSTANCE`（分界声明：`per-agent` 执行载体 / `shared` 数据服务，必填无
+  默认），可选 `SCOPES`（权限范围声明：`{token, default, explanation}`——
+  token 为不透明权限名，default 标记安装时默认公开，explanation 为注入
+  记忆的书面说明）。`Device` 实例在**子进程内构造**（父进程只传装载描述，
+  pickle 无关类对象），spawn/fork 启动方式皆可。
+- **装卸**：`install_device`（身份 + 源码路径 + grants 布线声明；per-agent
+  另需 `bound_agent` 绑定 agent）请求内核装载，**装卸权经 Authority 裁决**
+  （root 或持有 `org:install`）——动态加载 → Authority 登记 → grants 展开
+  为默认公开 scope 布线 → 注入（shared：全部 agent，内容按各 agent 的
+  position 过滤；per-agent：仅绑定 agent，实例身份 `<device-id>@<agent-id>`，
+  associated 指向实例）；`uninstall_device` 卸载——终止进程 → 撤销声明
+  （连带撤销布线）→ 重注入（条目驱逐）。结果一律 ack 回告请求方，失败
+  不击穿内核。
+- **bootstrap**：Root 扫描工作目录源码区（`data/devices/*.py`）批量装载；
+  收齐全部回执后向发起者报告结果（agent_result），空目录立即报告不挂起。
 - **身份保护**：内核态身份与 agent 身份不可被设备装卸顶替。
 
 ## 工作空间与沙箱（治理）
 
 进程私密性的机械化：目录约定 + FS 级强制（Linux 多用户式）。
 
-- **目录约定（约定即默认，零配置）**：设备数据区 = 其源码所在 workdir 的
-  `data/<identity>/`（"家目录"）；workdir 是 agent 私有区（`devices/`
-  源码 + `data/` 自数据）。访问矩阵：系统路径只读；自己的数据区读写；
-  他人数据区不可写（只读可见；严格不可见需掩蔽 data 父目录，对 agent
-  不可行）；设备进程可读自己的源码（加载实现用）。制造例外：设备源码
-  生产（workdir/devices/ 落盘）是 Root 的初始化动作，经宿主侧完成
-  （演示中由宿主模拟落盘；沙箱内 workdir 只读，agent 进程无法自产源码，
-  合法形态待后续卡/讨论明确）；装好后进程即被隔离。
+- **目录约定（约定即默认，零配置）**：
+  ```
+  workdir/                      # 数据根（config 绑定）
+    data/                       # 数据根容器（沙箱内挂载锚点）
+      devices/<name>.py         # 设备源码（系统唯一识别区；agent 生产、设备只读加载）
+      <identity>/               # 各家（agent 与 device 同目录同形制）
+  ```
+  身份（user）= agent 或 device，每个身份一个私密数据空间（家）。设备源码
+  是数据（一切皆数据），落数据根内、独立于任何家；agent 家里即使有
+  `devices/` 系统也不识别（唯一识别区 = `data/devices`）。identity 校验拒
+  `/`、`..`、`.` 与保留名 `devices`（防源码区冲突与逃逸）。agent 家 =
+  `workdir/data/<agent-id>`（注册时创建，幂等）；设备家 = 安装者数据根的
+  `workdir/data/<device-id>`（装载时创建，幂等）。
+  访问矩阵（FS 层静态出生定格，管"谁碰谁的盘"，不在 Authority 职责内；
+  Authority = 业务布线，动态裁决）：
+  | 身份 | 家 | 源码区 data/devices | 系统 |
+  |---|---|---|---|
+  | agent | 可写 | 可写（生产源码；**装载权在 Authority**，写了也装不了） | 只读 |
+  | device | 可写 | 只读（加载实现用） | 只读 |
+  agent 矩阵不含其它设备家（不可见）→ 设备数据只经接口暴露（调用层 auth
+  裁决），agent 物理碰不到设备数据。制造例外：root agent 生产设备源码落
+  `data/devices`（源码区对 agent 可写；装载权仍在 Authority），装好后进程
+  即被隔离。
 - **沙箱（v0.14 已实现）**：所有设备进程及 agent 默认 bwrap + setrlimit
   （user + pid + net + ipc namespace，无需 root）——系统路径只读挂载、
-  自己的数据区为唯一写根、默认禁网（需网络设备显式声明，声明机制后续卡）、
-  userns/pidns/netns/ipcns 阻断对兄弟进程与内核的信号/内存/网络/System V
-  IPC 攻击（Yama 兜底 ptrace）。**沙箱 = 进程级隔离面，固定矩阵（家 + 只读
-  系统），不承载权限**：没有按 position 的挂载物化，设备进程永远不是 root。
+  挂载矩阵按身份类型展开为两个锚点（家 + 源码区，见目录约定）、默认禁网
+  （需网络设备显式声明，声明机制后续卡）、userns/pidns/netns/ipcns 阻断
+  对兄弟进程与内核的信号/内存/网络/System V IPC 攻击（Yama 兜底 ptrace）。
+  **沙箱 = 进程级隔离面，固定矩阵（家 + 只读系统），不承载权限**：没有按
+  position 的挂载物化，设备进程永远不是 root。
 - **权限与沙箱解耦（调用级）**：跨区数据访问一律走"调用 → 目标设备按
   发起 Agent 的权限裁决"（root 治理数据经数据服务设备查询，不是 root
   进程直接碰文件）。设备间调用（未来）：**设备不能发起调用**，只能作为
@@ -177,8 +197,8 @@ kernel 完成。
 
 - **信任假设**：已安装设备代码为半可信（安装权集中在 root/人事权——
   防御重点是 bug 与资源失控，而非恶意代码）；进程运行于同一 OS 用户
-  （进程间攻击面由沙箱 userns/pidns/netns/ipcns 与 Yama 收敛）；workdir
-  生产者是 Root。
+  （进程间攻击面由沙箱 userns/pidns/netns/ipcns 与 Yama 收敛）；设备源码
+  生产面对 agent 开放（源码区可写），装载权在 Authority——写了也装不了。
 - **声明 ≠ 事实**：`source` 是构造事实（宿主注入；v0.14 出站通道改为
   内核读侧盖章——子进程内不再存在可改写的身份字段）；`origin`（未来
   设备间调用的发起者声明）是声明，信任模型 = 设备是发起者的可信执行

@@ -68,6 +68,9 @@ class ProcessHandle:
         if self._process is None:
             self._open_channel()  # 每次拉起换新通道（旧通道已随旧进程 EOF）
             self._process = self.spawn(self.emit)
+            # 进程实例持身份（agent 挂载锚点推导用；fork 继承 / spawn
+            # pickle 均随实例到达子进程；设备与 load_spec 内身份同值）
+            self._process.identity = self.identity
             self._process.start()
             # spawn 已把 child 端 fd 传进进程；宿主副本必须关闭——否则
             # 子进程死亡（fd 全关）时 parent 端收不到 EOF，reader 不退出。

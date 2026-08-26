@@ -36,7 +36,11 @@ from my_team.kernel.event_validator import (
     validate_event,
 )
 from my_team.kernel.journal import Journal
-from my_team.kernel.process import KernelModeDevice, UserModeProcess, BucketDispatcher
+from my_team.kernel.process import (
+    BucketDispatcher,
+    KernelModeDevice,
+    UserModeProcess,
+)
 from my_team.kernel.process_handle import ProcessHandle
 
 # 进程类型注册表：config "type" → 进程类（构造参数经 options）。
@@ -102,6 +106,9 @@ class AgentOS:
                 agent=True,
                 position=options.get("position"),
             )
+            # agent 家 = workdir/data/<agent-id>：注册时创建（幂等）
+            os.makedirs(os.path.join(options["workdir"], "data", identity),
+                        exist_ok=True)
 
     async def register(self, identity, spawn, *, tools=None, agent=False,
                        lazy=False, position=None, scopes=None):
@@ -119,6 +126,8 @@ class AgentOS:
         handle = ProcessHandle(identity, spawn, event_bus=self.event_bus, lazy=lazy)
         self.entities[identity] = handle
         if agent:
+            if identity == "devices":
+                raise ValueError(f"agent identity 为保留名（源码区）: {identity!r}")
             self._agent_ids.add(identity)
 
     async def _inject(self, agent: str):
@@ -168,22 +177,32 @@ class AgentOS:
         return [s["token"] for s in scopes if s.get("default")]
 
     async def _install(self, event: Event):
-        """装载设备：加载工作目录源码（约定导出 Device、TOOLS、可选
-        SCOPES）→ 确保数据区 workdir/data/<identity> 存在 → 注册（Authority
-        登记 + kernel 物化路由）→ 按 payload 的
-        grants 展开设备的默认公开 scope 布线 → 注入全部 agent（内容按各
-        agent 的 position 过滤）。装卸权经 Authority 裁决（root 或持有
-        org:install）。任何一步失败都回告请求方（ok=False）——设备源码是
-        用户代码，其失败不得击穿内核事件循环；身份类别受保护（内核态/
-        agent 不可被设备顶替）。同名已注册设备先终止旧进程（重装即升级）。"""
+        """装载设备：加载工作目录源码（约定导出 Device、TOOLS、INSTANCE、
+        可选 SCOPES）→ 确保家目录存在 → 注册（Authority 登记 + kernel 物化
+        路由）→ 按 payload 的 grants 展开设备的默认公开 scope 布线 → 注入
+        （shared：全部 agent；per-agent：仅绑定 agent）。装卸权经 Authority
+        裁决（root 或持有 org:install）。任何一步失败都回告请求方（ok=False）
+        ——设备源码是用户代码，其失败不得击穿内核事件循环；身份类别受保护
+        （内核态/agent 不可被设备顶替）。同名已注册设备先终止旧进程（重装
+        即升级）。
+
+        INSTANCE 声明（必填）：per-agent = 执行载体（bash 等），实例身份
+        <device-id>@<agent-id>（需 payload.bound_agent 为已注册 agent），
+        家 = 绑定 agent 的家（命令落 agent 家），工具条目只注入绑定 agent，
+        associated 指向实例身份；shared = 数据服务（SharedKB 等），实例身份
+        <device-id>，家 = data/<device-id>，注入全部 agent（业务按 auth
+        裁决）。重装/卸载语义沿用：identity 唯一、绝不同身份并存。"""
         payload = event["payload"]
         identity = payload.get("identity")
+        instance_identity = identity
         try:
             if not isinstance(identity, str) or not identity:
                 raise ValueError("install_device 缺 identity")
-            if "/" in identity or ".." in identity or identity == ".":
+            if "/" in identity or ".." in identity or identity == "." \
+                    or identity == "devices":
                 raise ValueError(
-                    f"设备 identity 含路径分隔符或 '..': {identity!r}")
+                    f"设备 identity 非法（拒路径分隔符/'..'/'.'与保留名"
+                    f" 'devices'）: {identity!r}")
             workdir = self._device_workdir(payload["source_file"])
             if not await self._authorize(event["source"], "install"):
                 raise ValueError("无设备装卸权（需 root 或 org:install）")
@@ -192,47 +211,68 @@ class AgentOS:
                     isinstance(g, str) and g for g in grants):
                 raise ValueError(
                     "install_device 缺 grants（布线声明：非空 position 列表）")
-            old = self.entities.get(identity)
-            if old is self or isinstance(old, KernelModeDevice):
-                raise ValueError(f"内核态身份不可装卸: {identity!r}")
             agents = await self._agents()
             if identity in agents:
                 raise ValueError(f"agent 身份不可被设备顶替: {identity!r}")
-            tools, scopes = self._load_module(identity, payload["source_file"])
-            # 数据区 = workdir/data/<identity>（"家目录"）：装载时确保存在；
-            # 重装幂等复用；后续失败留空目录可接受（不加回滚）。
-            os.makedirs(os.path.join(workdir, "data", identity), exist_ok=True)
+            tools, scopes, instance_mode = self._load_module(
+                identity, payload["source_file"])
+            if instance_mode == "per-agent":
+                # 实例身份 = <device-id>@<agent-id>；家 = 绑定 agent 的家
+                # （agent 注册时已建，装载不再创建）
+                bound_agent = payload.get("bound_agent")
+                if not isinstance(bound_agent, str) \
+                        or bound_agent not in self._agent_ids:
+                    raise ValueError(
+                        f"per-agent 设备缺有效绑定 agent: {identity!r}")
+                instance_identity = f"{identity}@{bound_agent}"
+                if instance_identity in agents:
+                    raise ValueError(
+                        f"agent 身份不可被设备顶替: {instance_identity!r}")
+            else:
+                bound_agent = None
+                instance_identity = identity
+                # 设备家 = workdir/data/<device-id>：装载时确保存在；重装
+                # 幂等复用；后续失败留空目录可接受（不加回滚）
+                os.makedirs(os.path.join(workdir, "data", identity),
+                            exist_ok=True)
+            old = self.entities.get(instance_identity)
+            if old is self or isinstance(old, KernelModeDevice):
+                raise ValueError(f"内核态身份不可装卸: {instance_identity!r}")
             if isinstance(old, ProcessHandle):
                 # 先摘身份再终止：终止等待期间路由到该身份的事件被校验
                 # 响亮丢弃（target 未注册），旧进程残余产出被拒绝——
                 # 绝不复活同身份进程（绝不同身份并存）
-                del self.entities[identity]
+                del self.entities[instance_identity]
                 await old.terminate(5)
                 # 撤销旧登记的 grants（重装即升级：旧 scope 不得残留）
                 await self.authority.respond({
                     "source": "system", "target": "authority", "kind": "system",
                     "payload": {"command": "unregister_request",
-                                "identity": identity}})
+                                "identity": instance_identity}})
             options = payload.get("options") or {}
             # 壳进程只携带装载描述；Device 实例在子进程内构造
             # （沙箱 re-entry：sandbox_entry._serve_device），spawn/fork 皆可
             await self.register(
-                identity,
+                instance_identity,
                 lambda emit, p=payload["source_file"], o=options,
-                i=identity: UserModeProcess(
-                    emit, o.get("max_concurrent_sources", 0), load_spec=(i, p, o)),
+                i=instance_identity, b=bound_agent: UserModeProcess(
+                    emit, o.get("max_concurrent_sources", 0),
+                    load_spec=(i, p, o, b)),
                 tools=tools, scopes=scopes)
             for position in grants:
                 for token in self._defaults(scopes):
-                    await self._grant(position, identity, token)
-            for agent in agents:
-                await self._inject(agent)
+                    await self._grant(position, instance_identity, token)
+            if instance_mode == "per-agent":
+                await self._inject(bound_agent)  # 条目只给绑定 agent
+            else:
+                for agent in agents:
+                    await self._inject(agent)
             ok, error = True, None
         except Exception as exc:
             ok, error = False, str(exc)
         await self._kernel_emit(KERNEL_IDENTITY,
-                                self._ack(event, "device_installed", identity,
-                                          ok, error))
+                                self._ack(event, "device_installed",
+                                          instance_identity, ok, error))
 
     async def _uninstall(self, event: Event):
         """卸载设备：终止进程 → Authority 撤销声明（连带撤销其全部布线）
@@ -314,31 +354,35 @@ class AgentOS:
 
     @staticmethod
     def _device_workdir(source_file: str) -> str:
-        """校验规范布局并推导 workdir：<workdir>/devices/<name>.py（唯一做法）。
+        """校验规范布局并推导 workdir：<workdir>/data/devices/<name>.py（唯一做法）。
 
         设备数据区 data/<identity> 以 workdir 为锚（约定即默认，零配置）；
         source_file 必须是绝对路径（相对路径会丢失 workdir 锚点，落到内核
-        cwd）；中间目录名必须恰为 "devices"（bootstrap 的扫描布局），其它
-        布局一律拒绝并说明规范布局。
+        cwd）；中间两层目录名必须恰为 data/devices（bootstrap 的扫描布局，
+        设备源码的系统唯一识别区），其它布局一律拒绝并说明规范布局。
         """
         if not os.path.isabs(source_file):
             raise ValueError(
                 f"设备源码须为绝对路径且按规范布局 "
-                f"<workdir>/devices/<name>.py 落盘: {source_file!r}")
-        layout = os.path.dirname(source_file)
-        if os.path.basename(layout) != "devices":
+                f"<workdir>/data/devices/<name>.py 落盘: {source_file!r}")
+        layout = os.path.dirname(source_file)   # <workdir>/data/devices
+        parent = os.path.dirname(layout)
+        if os.path.basename(layout) != "devices" \
+                or os.path.basename(parent) != "data":
             raise ValueError(
-                f"设备源码须按规范布局 <workdir>/devices/<name>.py 落盘: "
+                f"设备源码须按规范布局 <workdir>/data/devices/<name>.py 落盘: "
                 f"{source_file!r}")
-        return os.path.dirname(layout)
+        return os.path.dirname(parent)          # <workdir>
 
     @staticmethod
-    def _load_module(identity: str, path: str) -> tuple[list, list]:
-        """校验并读取设备源码定义（约定导出 Device、TOOLS、可选 SCOPES），
-        返回 (TOOLS, SCOPES)。
+    def _load_module(identity: str, path: str) -> tuple[list, list, str]:
+        """校验并读取设备源码定义（约定导出 Device、TOOLS、INSTANCE，可选
+        SCOPES），返回 (TOOLS, SCOPES, INSTANCE)。
 
         仅父进程裁决用（模块可加载、定义齐全）；Device 实例不在此构造，
         由子进程按装载描述自行加载（传输无关，spawn/fork 皆可）。
+        INSTANCE 声明必填无默认：per-agent（执行载体，每绑定 agent 一实例）
+        | shared（数据服务，共享单实例），违者装载失败响亮报错。
         """
         if not os.path.isfile(path):
             raise FileNotFoundError(f"设备源码不存在: {path!r}")
@@ -347,15 +391,19 @@ class AgentOS:
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
-        for attr in ("Device", "TOOLS"):
+        for attr in ("Device", "TOOLS", "INSTANCE"):
             if not hasattr(module, attr):
                 raise AttributeError(f"设备源码缺导出 {attr!r}: {path!r}")
+        instance_mode = module.INSTANCE
+        if instance_mode not in ("per-agent", "shared"):
+            raise ValueError(
+                f"INSTANCE 声明非法（须 per-agent|shared）: {path!r}")
         scopes = getattr(module, "SCOPES", [])
         if not isinstance(scopes, list) or not all(
                 isinstance(s, dict) and isinstance(s.get("token"), str)
                 and s["token"] for s in scopes):
             raise ValueError(f"SCOPES 声明形状非法: {path!r}")
-        return module.TOOLS, scopes
+        return module.TOOLS, scopes, instance_mode
 
     async def _agents(self) -> list[str]:
         """向 Authority 查询全部 agent 身份（组织事实归 Authority）。"""

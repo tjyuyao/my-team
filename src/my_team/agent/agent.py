@@ -7,8 +7,8 @@
   agent_result。
 - 决策（第一版演示）：任务内容对条目 trigger 做关键词匹配；LLM 决策
   未来接同一分发路径（查条目 → associated → 事件），决策函数可替换。
-- 自举（bootstrap）：扫描自己的工作目录（workdir/devices/*.py），对每个
-  设备源码向内核发 install_device（grants 声明给自己的 position）——
+- 自举（bootstrap）：扫描自己的工作目录源码区（workdir/data/devices/*.py），
+  对每个设备源码向内核发 install_device（grants 声明给自己的 position）——
   Root 从工作目录组装自己的能力；设备源码由 Root 生产（演示中为
   预置/落盘），文件即持久化形态。
 """
@@ -64,7 +64,7 @@ class Agent(UserModeProcess):
         requester = event["source"]
         if self._pending is not None:
             return self._agent_result(requester, ok=False, error="上轮自举未完成")
-        devices_dir = os.path.join(self.workdir, "devices")
+        devices_dir = os.path.join(self.workdir, "data", "devices")
         files = []
         if os.path.isdir(devices_dir):
             files = sorted(f for f in os.listdir(devices_dir)
