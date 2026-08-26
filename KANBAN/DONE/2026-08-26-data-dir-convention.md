@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.14
 source: SPEC.md
 priority: high
@@ -24,3 +25,11 @@ priority: high
 ## 依赖
 
 —（前置卡，被 sandbox-wrapper 消费）
+
+## 完成
+
+- 实现 `8756fad`（`_install`：identity 防 `/`/`..`/`.` 校验 + `_device_workdir`
+  规范布局推导 + 数据区 `data/<identity>` 装载时创建；卸载不删数据）。
+- 审查修补（随收尾提交）：`_device_workdir` 拒绝相对路径（workdir 锚点
+  丢失）；identity 补拒 `.`（防折叠到数据根）。
+- 回归：全量 tmp/check_*.py + demo 全绿。

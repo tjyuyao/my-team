@@ -180,7 +180,7 @@ class AgentOS:
         try:
             if not isinstance(identity, str) or not identity:
                 raise ValueError("install_device 缺 identity")
-            if "/" in identity or ".." in identity:
+            if "/" in identity or ".." in identity or identity == ".":
                 raise ValueError(
                     f"设备 identity 含路径分隔符或 '..': {identity!r}")
             workdir = self._device_workdir(payload["source_file"])
@@ -316,9 +316,14 @@ class AgentOS:
         """校验规范布局并推导 workdir：<workdir>/devices/<name>.py（唯一做法）。
 
         设备数据区 data/<identity> 以 workdir 为锚（约定即默认，零配置）；
-        中间目录名必须恰为 "devices"（bootstrap 的扫描布局），其它布局
-        一律拒绝并说明规范布局。
+        source_file 必须是绝对路径（相对路径会丢失 workdir 锚点，落到内核
+        cwd）；中间目录名必须恰为 "devices"（bootstrap 的扫描布局），其它
+        布局一律拒绝并说明规范布局。
         """
+        if not os.path.isabs(source_file):
+            raise ValueError(
+                f"设备源码须为绝对路径且按规范布局 "
+                f"<workdir>/devices/<name>.py 落盘: {source_file!r}")
         layout = os.path.dirname(source_file)
         if os.path.basename(layout) != "devices":
             raise ValueError(
