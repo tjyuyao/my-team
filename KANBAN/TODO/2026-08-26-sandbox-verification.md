@@ -15,7 +15,7 @@ priority: high
 - 出站通道故事：伪造 source 被读侧盖章覆盖；重装同身份后旧出站队列
   注销；
 - 全量回归（tmp/check_*.py + demo）PASS；
-- 文档与 trust-docs 的最终一致性收口（提交前）。
+- 文档与代码一致性收口（提交前；落文档不入卡）。
 
 ## 验收
 
@@ -24,4 +24,4 @@ priority: high
 ## 依赖
 
 data-dir-convention、sandbox-wrapper、network-declaration、bash-sandbox-adapt、
-outbound-channel、trust-docs（全部已提交）。
+outbound-channel（全部已提交）。
