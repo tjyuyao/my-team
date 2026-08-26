@@ -26,7 +26,11 @@ bash 命令在沙箱内执行（设备进程已在 bwrap 固定矩阵内，其 P
   保留网络面；
 - 四级门控（timeout/deadline/max_deadline/设备终止连坐进程组）与沙箱
   pidns 强杀语义并存：设备终止 → 沙箱 PID1 消亡 → 整 ns 强杀，与进程组
-  连坐互为冗余。
+  连坐互为冗余；
+- **/dev 字符设备不可写（矩阵已知后果，本卡承接）**：`--ro-bind / /` 下
+  沙箱内 `>/dev/null` 等 open-for-write 被拒（Permission denied）；bash
+  设备自身 DEVNULL 为读打开不受影响，但用户命令会踩中——本卡决定选择性
+  rw 绑定（如 `--bind /dev/null /dev/null`）或文档化限制。
 
 ## 验收
 

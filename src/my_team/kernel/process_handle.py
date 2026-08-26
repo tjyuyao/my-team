@@ -82,22 +82,27 @@ class ProcessHandle:
         return self._process
 
     def _start_reader(self):
-        """常驻 reader：child 产出 → 读侧盖章 → event_bus。进程死亡
-        （EOF）后退出；terminate 后再拉起时重建。"""
-        if self._reader is None or not self._reader.is_alive():
-            self._reader = threading.Thread(
-                target=self._read_loop,
-                args=(self._parent, self._parent_sock),
-                name=f"reader-{self.identity}", daemon=True)
-            self._reader.start()
+        """常驻 reader：child 产出 → 读侧盖章 → event_bus。每次拉起新
+        通道（_open_channel）即绑定新 parent 无条件启新 reader——旧通道
+        的 reader 已随旧进程 EOF（或通道 close）退出，不判重（判重存在
+        terminate 后立即 respawn 的窄窗口漏启风险）。"""
+        self._reader = threading.Thread(
+            target=self._read_loop,
+            args=(self._parent, self._parent_sock),
+            name=f"reader-{self.identity}", daemon=True)
+        self._reader.start()
 
     def _read_loop(self, parent, parent_sock):
         try:
             while True:
                 try:
                     event = parent.recv()
-                except EOFError:
-                    return  # 子进程死亡（child 端全关），收尸信号
+                except (EOFError, OSError):
+                    return  # 子进程死亡（child 端全关）或通道已关闭
+                if not isinstance(event, dict):
+                    # 子进程产出非事件：响亮丢弃（协议违规，与校验同口径）
+                    print(f"[protocol] {self.identity} 产出非 dict 事件，丢弃")
+                    continue
                 event["source"] = self.identity  # 读侧盖章（进程内不可改写）
                 self.event_bus.put(event)
         finally:

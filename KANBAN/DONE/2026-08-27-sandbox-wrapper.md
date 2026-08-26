@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.14
 source: SPEC.md
 priority: high
@@ -66,3 +67,13 @@ Connection`；宿主读侧盖章（原 outbound-channel 卡内容）随重写一
 
 data-dir-convention（已提交）；被 bash-sandbox-adapt 依赖；outbound-channel
 内容已并入本卡（读侧盖章）。
+
+## 完成
+
+- 实现 `b83bda6`（方案 B）：传输层换 fd 继承 Connection（宿主 reader
+  读侧盖章）+ bwrap 固定矩阵 re-entry（只读系统/数据区写根/默认禁网/
+  ipcns 隔离/setrlimit）+ probe 豁免沙箱判定。
+- 审查：PASS-with-nits；修补随收尾提交（reader 无条件重建 + 盖章前类型
+  检查 + 注释对齐；SPEC 措辞"不可见→不可写"等）。
+- 遗留（承接卡）：/dev 字符设备不可写 → bash-sandbox-adapt 承接；
+  agent 沙箱内自产源码的合法形态 → 待讨论明确。

@@ -215,7 +215,7 @@ class AgentOS:
                                 "identity": identity}})
             options = payload.get("options") or {}
             # 壳进程只携带装载描述；Device 实例在子进程内构造
-            # （UserModeProcess._run_loaded），spawn/fork 皆可
+            # （沙箱 re-entry：sandbox_entry._serve_device），spawn/fork 皆可
             await self.register(
                 identity,
                 lambda emit, p=payload["source_file"], o=options,
