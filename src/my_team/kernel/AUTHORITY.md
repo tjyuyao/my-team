@@ -47,7 +47,19 @@ Authority 是内核态设备（与 kernel 同进程，可信系统服务），�
    事件响亮拒绝）；root 或持有 org scope 的 position 经 kernel 系统命令
    使用组织能力：`install/uninstall`（需 `org:install`）、`grant/revoke`
    （需 `org:grant`）。org scope 的授予仅 root 可做。`root` 是启动根
-   position（隐式全权）。
+   position（隐式全权）。**root 无特殊**：它只是持有全部 org scope 的
+   普通 position（数据，可被持特权者降权/转移）；权限结构唯一不变量 =
+   **单调自举**——变更权限（含 root 本身）需已持特权者（org:grant 即
+   sudo 式委托）；误降权恢复 = 重装级（Owner 改种子/重建）。
+5. **配置 = 安装镜像（种子）**。config 首次启动翻译为运行期数据（agent
+   注册、root 授予、初始 grants、workdir 绑定）后即弃；此后一切运行期
+   变更都是数据操作（命令 + 动态授权），不存在"编辑配置"的合法形态。
+   现状为过渡态：种子充当幂等安装脚本（每次重启重放）；"种子只生效
+   一次"需运行期状态持久化（开放问题 7，方向）。
+6. **FS 权限物化（方向，未实现）**。沙箱挂载矩阵 = Authority 授予的 FS
+   权限在进程出生时物化（Linux 多用户式）：数据区=家目录、root 越权
+   （uid 0 语义）、跨区访问=显式 grant（数据区是可授予资源）、出生定格
+   （授权变更需重装进程生效）。
 
 ## 3. 调用时认证（富化）——已定
 
@@ -110,8 +122,10 @@ Grant(position, entity)）+ 岗位图 + Authority 调用时裁决。当前实现
    缓解）。
 6. **Authority 侧宽容**——未知 command 返回 VOID（静默吞）。agent 侧
    VOID 宽容是定案；Authority 侧未议（倾向响亮报错）。
-7. **持久化**——三张表全内存，重启靠 setup + bootstrap + 重建布线自愈。
-   无落盘讨论。
+7. **持久化（升格为种子模型的必然前提）**——配置=安装镜像要求"种子
+   只生效一次"，运行期状态（注册/grants/注入）必须跨重启存活；当前三张
+   表全内存，重启重放种子 + workdir（过渡态：种子=幂等安装脚本）。持久化
+   落地后种子才真正只跑一次。方案未定（Journal 重放 vs Authority 快照）。
 8. **注入分级**——legacy grant 带 priority（`<10` 固定 / `≥10` 召回）；
    当前无，注入全量。接 N4 注入管线时引入。
 9. **两层 Grant / 岗位图**——成员层（共享岗位、换人不换岗）与岗位层级
@@ -119,6 +133,9 @@ Grant(position, entity)）+ 岗位图 + Authority 调用时裁决。当前实现
 10. **org scope 词汇**——当前定义了 `install` / `grant`（已用）与
     `register` / `inject` / `agents`（词汇预留，无命令消费）。需要时
     接入。
+11. **数据区跨区 FS 授权（方向）**——数据区作为可授予资源
+    （`data:read`/`data:write`），沙箱物化时消费；随具体需求引入，本轮
+    不实现。
 
 ## 8. 已验证的行为（故事测试）
 
