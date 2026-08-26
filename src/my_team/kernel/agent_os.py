@@ -114,9 +114,16 @@ class AgentOS:
                        lazy=False, position=None, scopes=None):
         """注册进程：Authority 裁决（身份 + 能力声明 + position + scope
         声明）→ kernel 物化路由映射。agent 必须声明 position（布线主体，
-        config options 单一来源），缺省即配错，fail-fast。"""
+        config options 单一来源），缺省即配错，fail-fast。身份统一校验
+        （拒路径分隔符/'.'/'..'与保留名；per-agent 实例身份 device@agent
+        的 '@' 合法、设备名不含 '@'——命名空间由安装侧保证）。"""
         if agent and not position:
             raise ValueError(f"agent 缺少 position: {identity!r}")
+        if "/" in identity or ".." in identity or identity == "." \
+                or identity == "devices":
+            raise ValueError(
+                f"身份非法（拒路径分隔符/'..'/'.'与保留名 'devices'）: "
+                f"{identity!r}")
         await self.authority.respond({
             "source": "system", "target": "authority", "kind": "system",
             "payload": {"command": "register_request", "identity": identity,
@@ -126,8 +133,6 @@ class AgentOS:
         handle = ProcessHandle(identity, spawn, event_bus=self.event_bus, lazy=lazy)
         self.entities[identity] = handle
         if agent:
-            if identity == "devices":
-                raise ValueError(f"agent identity 为保留名（源码区）: {identity!r}")
             self._agent_ids.add(identity)
 
     async def _inject(self, agent: str):
@@ -199,10 +204,10 @@ class AgentOS:
             if not isinstance(identity, str) or not identity:
                 raise ValueError("install_device 缺 identity")
             if "/" in identity or ".." in identity or identity == "." \
-                    or identity == "devices":
+                    or identity == "devices" or "@" in identity:
                 raise ValueError(
-                    f"设备 identity 非法（拒路径分隔符/'..'/'.'与保留名"
-                    f" 'devices'）: {identity!r}")
+                    f"设备 identity 非法（拒路径分隔符/'..'/'.'、保留名"
+                    f" 'devices' 与 '@'（per-agent 实例命名空间））: {identity!r}")
             workdir = self._device_workdir(payload["source_file"])
             if not await self._authorize(event["source"], "install"):
                 raise ValueError("无设备装卸权（需 root 或 org:install）")
@@ -300,7 +305,9 @@ class AgentOS:
                 "source": "system", "target": "authority", "kind": "system",
                 "payload": {"command": "unregister_request", "identity": identity},
             })
-            for agent in agents:
+            # per-agent 实例（device@agent）只重注入绑定 agent；shared 全量
+            targets = [identity.split("@")[1]] if "@" in identity else agents
+            for agent in targets:
                 await self._inject(agent)
             ok, error = True, None
         except Exception as exc:

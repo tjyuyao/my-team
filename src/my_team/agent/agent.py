@@ -58,9 +58,10 @@ class Agent(UserModeProcess):
 
     def _on_bootstrap(self, event):
         """扫描工作目录设备源码 → 逐个请求内核装载（grants 声明给自己的
-        position——自举组装的能力归自己的岗）；全部回执后向发起者
-        报告（agent_result）。无可装载时立即报告，不挂起；上轮未收齐时
-        拒绝重入（防新旧回执混入同一计数器）。"""
+        position——自举组装的能力归自己的岗；bound_agent 声明给自己——
+        per-agent 设备实例绑定本 agent，命令落自己的家；shared 忽略）；
+        全部回执后向发起者报告（agent_result）。无可装载时立即报告，
+        不挂起；上轮未收齐时拒绝重入（防新旧回执混入同一计数器）。"""
         requester = event["source"]
         if self._pending is not None:
             return self._agent_result(requester, ok=False, error="上轮自举未完成")
@@ -77,7 +78,8 @@ class Agent(UserModeProcess):
                 "payload": {"command": "install_device",
                             "identity": filename[:-3],
                             "source_file": os.path.join(devices_dir, filename),
-                            "grants": [self.position]},
+                            "grants": [self.position],
+                            "bound_agent": self.identity},
             })
         if not files:
             self._pending = None

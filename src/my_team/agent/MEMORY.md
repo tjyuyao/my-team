@@ -58,8 +58,8 @@ MemoryEntry:
 - 工具 = 设备能力打包成的工具定义，作为条目存于精炼层——"设备
   记忆注入"的结果（设备装载 + wiring 时写入），不是代码常量。
 - **工作目录驱动 + 热装卸**：设备实现与工具定义（name/description/
-  parameters/trigger）同处工作目录（`devices/*.py`，Root 生产，源码即
-  持久化）；bootstrap 扫描目录 → install_device 装载（grants 声明布线）
+  parameters/trigger）同处数据根（`data/devices/*.py`，Root 生产，源码即
+  持久化）；bootstrap 扫描源码区 → install_device 装载（grants 声明布线）
   → Authority 注入（inject/evict 事件）→ 工具集合随装卸演化，无需重启。
   能力在设备源码，暴露在注入条目。
 - **布线（deny-by-default，多粒度 scope）**：注入内容 = agent 的

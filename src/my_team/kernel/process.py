@@ -245,13 +245,16 @@ def _bwrap_args(writable: list[str], readonly: list[str], state_fd: int,
 
     固定矩阵语义：挂载参数只依赖身份类型的两个锚点（家 + 源码区），不依赖
     position（无 per-position 物化）；设备进程永远不是 root（userns 单用户
-    映射）。
+    映射）。data 根 tmpfs 掩蔽其它家的目录可见性——沙箱内除自己的家与
+    源码区外，数据根下无其它路径（设备数据物理不可见，只经接口暴露）。
     """
+    data_root = os.path.dirname(writable[0])  # 家 = <data_root>/<id>
     args = [
         "bwrap",
         "--ro-bind", "/", "/",          # 系统只读
         "--proc", "/proc",              # 独立 /proc（pidns 内视图）
         "--tmpfs", "/tmp",              # 可写临时区
+        "--tmpfs", data_root,           # 掩蔽数据根下其它家（不可见）
     ]
     for anchor in readonly:
         args += ["--ro-bind", anchor, anchor]  # 源码区只读（设备加载实现用）

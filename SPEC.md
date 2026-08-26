@@ -133,8 +133,9 @@ kernel 完成。
   为默认公开 scope 布线 → 注入（shared：全部 agent，内容按各 agent 的
   position 过滤；per-agent：仅绑定 agent，实例身份 `<device-id>@<agent-id>`，
   associated 指向实例）；`uninstall_device` 卸载——终止进程 → 撤销声明
-  （连带撤销布线）→ 重注入（条目驱逐）。结果一律 ack 回告请求方，失败
-  不击穿内核。
+  （连带撤销布线）→ 重注入（条目驱逐）。**实例身份即装卸身份**（per-agent
+  须以 `<device-id>@<agent-id>` 卸载，换绑 = 新实例，同设备不同绑定并存）。
+  结果一律 ack 回告请求方，失败不击穿内核。
 - **bootstrap**：Root 扫描工作目录源码区（`data/devices/*.py`）批量装载；
   收齐全部回执后向发起者报告结果（agent_result），空目录立即报告不挂起。
 - **身份保护**：内核态身份与 agent 身份不可被设备装卸顶替。
