@@ -160,3 +160,6 @@ Grant(position, entity)）+ 岗位图 + Authority 调用时裁决。当前实现
   （`tmp/check_collision.py`）。
 - 缺 grants：安装失败回告、无残留（`tmp/check_nogrant.py`）。
 - 自举演示：装/卸/重装全程可用（`tmp/demo/run_demo.py`）。
+- 沙箱验证：pidns 防杀兄弟、ipcns 隔离（SysV shmget）、per-position
+  矩阵一致（无 per-position 物化）、伪造 source 读侧盖章覆盖、重装旧
+  通道不残留（`tmp/check_sandbox_verification.py`）。
