@@ -95,14 +95,21 @@ class AgentOS:
                 identity,
                 lambda emit, c=cls, o=options: c(emit, **o),
                 agent=True,
+                position=options.get("position"),
             )
 
-    async def register(self, identity, spawn, *, tools=None, agent=False, lazy=False):
-        """注册进程：Authority 裁决（身份 + 能力声明）→ kernel 物化路由映射。"""
+    async def register(self, identity, spawn, *, tools=None, agent=False,
+                       lazy=False, position=None):
+        """注册进程：Authority 裁决（身份 + 能力声明 + position）→ kernel
+        物化路由映射。agent 必须声明 position（布线主体，config options 单一
+        来源），缺省即配错，fail-fast。"""
+        if agent and not position:
+            raise ValueError(f"agent 缺少 position: {identity!r}")
         await self.authority.respond({
             "source": "system", "target": "authority", "kind": "system",
             "payload": {"command": "register_request", "identity": identity,
-                        "tools": tools or [], "agent": agent},
+                        "tools": tools or [], "agent": agent,
+                        "position": position},
         })
         handle = ProcessHandle(identity, spawn, event_bus=self.event_bus, lazy=lazy)
         self.entities[identity] = handle
@@ -132,7 +139,8 @@ class AgentOS:
 
     async def _install(self, event: Event):
         """装载设备：加载工作目录源码（约定导出 Device 与 TOOLS）→
-        注册（Authority 登记 + kernel 物化路由）→ 注入全部 agent。
+        注册（Authority 登记 + kernel 物化路由）→ 按 payload 声明的 grants
+        布线（grant 表）→ 注入全部 agent（内容按各 agent 的 position 过滤）。
         任何一步失败都回告请求方（ok=False）——设备源码是用户代码，
         其失败不得击穿内核事件循环；身份类别受保护（内核态/agent 不可
         被设备顶替）。同名已注册设备先终止旧进程（重装即升级）。"""
@@ -141,6 +149,11 @@ class AgentOS:
         try:
             if not isinstance(identity, str) or not identity:
                 raise ValueError("install_device 缺 identity")
+            grants = payload.get("grants")
+            if not isinstance(grants, list) or not grants or not all(
+                    isinstance(g, str) and g for g in grants):
+                raise ValueError(
+                    "install_device 缺 grants（布线声明：非空 position 列表）")
             old = self.entities.get(identity)
             if old is self or isinstance(old, KernelModeDevice):
                 raise ValueError(f"内核态身份不可装卸: {identity!r}")
@@ -163,6 +176,12 @@ class AgentOS:
                 i=identity: UserModeProcess(
                     emit, o.get("max_concurrent_sources", 0), load_spec=(i, p, o)),
                 tools=tools)
+            for position in grants:
+                await self.authority.respond({
+                    "source": "system", "target": "authority", "kind": "system",
+                    "payload": {"command": "grant_request",
+                                "position": position, "entity": identity},
+                })
             for agent in agents:
                 await self._inject(agent)
             ok, error = True, None
@@ -173,7 +192,8 @@ class AgentOS:
                                           ok, error))
 
     async def _uninstall(self, event: Event):
-        """卸载设备：终止进程 → Authority 撤销声明 → 重注入（diff 出 evict）。
+        """卸载设备：终止进程 → Authority 撤销声明（连带撤销其全部布线）
+        → 重注入（diff 出 evict）。
         失败（未注册/身份类别/异常）一律回告请求方。"""
         payload = event["payload"]
         identity = payload.get("identity")

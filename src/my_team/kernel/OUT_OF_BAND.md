@@ -9,6 +9,7 @@
 | 位置 | 命令 | 触发路径 | 回执类型 | 失败处理 |
 |---|---|---|---|---|
 | `register` | `register_request` | setup()（agent 拓扑）、_install（设备装载） | VOID（单向登记） | 无 try（启动期，fail-fast） |
+| `_install` | `grant_request` | 设备装载后的布线循环（每 position 一次） | VOID（单向登记） | _install 内 try |
 | `_inject` | `inject_request` | _install/_uninstall 注入循环 | 事件回执（注入条目，转交 `_kernel_emit`） | _install/_uninstall 内 try |
 | `_uninstall` | `unregister_request` | 设备卸载 | VOID | try 内 |
 | `_agents` | `agents_request` | _install/_uninstall 身份判定 + 注入枚举 | 数据回执（agent 列表） | try 内 |
@@ -34,8 +35,8 @@
    两套语义（直调无痕 vs 事件有痕，后者会被 Journal 记录）。第一版
    无 ACL 下为已知边界；未来需在命令级区分"内核专用"与"外部可调"。
 
-3. **全部同步请求-应答。** 5 处全 await，无 fire-and-forget。回执三态：
-   VOID（3）/ 数据（1）/ 事件（1）——仅 `inject_request` 的产物跨回
+3. **全部同步请求-应答。** 6 处全 await，无 fire-and-forget。回执三态：
+   VOID（4）/ 数据（1）/ 事件（1）——仅 `inject_request` 的产物跨回
    事件路径。
 
 4. **失败语义与 fail-fast 一致，但有一个最强形态。** 直调异常沿调用链

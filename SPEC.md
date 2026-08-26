@@ -72,13 +72,21 @@ Process 是一套契约（respond: Event | VOID），用户态（子进程）与
 注入内容、agent 拓扑。kernel 不持有组织数据，只物化执行所需的
 identity → handle 路由映射——注册即向 Authority 申请、物化由 kernel 完成。
 
-- 注册/撤销：`register_request` / `unregister_request`（身份 + 能力声明）。
-- 注入：设备声明的能力汇总为工具条目（type=tool），经 `inject` 事件注入
-  agent 精炼层；设备卸载/撤销声明后重注入，diff 出 `evict`。
+- 注册/撤销：`register_request` / `unregister_request`（身份 + 能力声明 +
+  position）。
+- **布线控制（grant 表）**：`grant_request(position, entity)` 登记可见性；
+  **deny-by-default**——注入内容 = agent 的 position 所布线设备的声明，
+  未布线的设备能力不可见。position 来自 config `options.position`
+  （单一声明源：kernel 注册与 Agent 进程同源派生）；直派形态
+  （agent 以自身为 position）为默认用法。
+- 注入：按布线汇总设备声明的工具条目（type=tool），经 `inject` 事件注入
+  agent 精炼层；设备卸载/撤销布线后重注入，diff 出 `evict`。
 - **Journal 查询权限**（既定原则，最小示例未实现）：Journal 可被 agent
   查询（memory_search 等系统能力条目，associated 指向 journal），查询
   权限经由 Authority 管理——Agent 对 Journal 的读取不是无条件的。
-- 第一版无 ACL/布线控制：全部设备能力注入全部 agent（结构预留）。
+- 演进方向（未实现）：两层 Grant（agent→position 成员授予）、岗位图、
+  grant priority 注入分级（`<10` 固定工作记忆 / `≥10` 触发器召回）——
+  见 `kernel/AUTHORITY.md`。
 
 ## 工作目录与设备装卸
 
@@ -88,10 +96,11 @@ identity → handle 路由映射——注册即向 Authority 申请、物化由 
 - **设备源码约定**：导出 `Device`（进程类）与 `TOOLS`（工具定义声明）。
   `Device` 实例在**子进程内构造**（父进程只传装载描述，pickle 无关
   类对象），spawn/fork 启动方式皆可。
-- **装卸**：Root 经 `install_device`（身份 + 源码路径）请求内核装载——
-  动态加载 → Authority 登记 → 注入全部 agent；`uninstall_device` 卸载——
-  终止进程 → 撤销声明 → 重注入（工具条目驱逐）。结果一律 ack 回告请求方，
-  失败不击穿内核。
+- **装卸**：Root 经 `install_device`（身份 + 源码路径 + grants 布线声明）
+  请求内核装载——动态加载 → Authority 登记 → 按 grants 布线 → 注入全部
+  agent（内容按各 agent 的 position 过滤）；`uninstall_device` 卸载——
+  终止进程 → 撤销声明（连带撤销布线）→ 重注入（工具条目驱逐）。结果一律
+  ack 回告请求方，失败不击穿内核。
 - **bootstrap**：Root 扫描工作目录批量装载；收齐全部回执后向发起者
   报告结果（agent_result），空目录立即报告不挂起。
 - **身份保护**：内核态身份与 agent 身份不可被设备装卸顶替。

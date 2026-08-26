@@ -59,9 +59,12 @@ MemoryEntry:
   记忆注入"的结果（设备装载 + wiring 时写入），不是代码常量。
 - **工作目录驱动 + 热装卸**：设备实现与工具定义（name/description/
   parameters/trigger）同处工作目录（`devices/*.py`，Root 生产，源码即
-  持久化）；bootstrap 扫描目录 → install_device 装载 → Authority 注入
-  （inject/evict 事件）→ 工具集合随装卸演化，无需重启。能力在设备
-  源码，暴露在注入条目。
+  持久化）；bootstrap 扫描目录 → install_device 装载（grants 声明布线）
+  → Authority 注入（inject/evict 事件）→ 工具集合随装卸演化，无需重启。
+  能力在设备源码，暴露在注入条目。
+- **布线（deny-by-default）**：注入内容 = agent 的 position 所布线的
+  设备声明（grant 表）；未布线的设备能力不可见。position 来自 config
+  `options.position`。
 - `tools=` 每次决策从工具条目动态生成：常驻（priority<10）∪
   召回命中（≥10）的 tool 条目，content 原样进工具列表。
 - 分发查条目：tool_call.name → 匹配 tool 条目 content.name →

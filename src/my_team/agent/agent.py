@@ -8,8 +8,9 @@
 - 决策（第一版演示）：任务内容对条目 trigger 做关键词匹配；LLM 决策
   未来接同一分发路径（查条目 → associated → 事件），决策函数可替换。
 - 自举（bootstrap）：扫描自己的工作目录（workdir/devices/*.py），对每个
-  设备源码向内核发 install_device——Root 从工作目录组装自己的能力；
-  设备源码由 Root 生产（演示中为预置/落盘），文件即持久化形态。
+  设备源码向内核发 install_device（grants 声明给自己的 position）——
+  Root 从工作目录组装自己的能力；设备源码由 Root 生产（演示中为
+  预置/落盘），文件即持久化形态。
 """
 
 import os
@@ -22,9 +23,10 @@ FILLERS = ("查询", "请问", "今天", "怎么样", "现在", "的", "呢", "�
 
 
 class Agent(UserModeProcess):
-    def __init__(self, emit, *, workdir):
+    def __init__(self, emit, *, workdir, position):
         super().__init__(emit, 1)  # Agent 串行处理消息
         self.workdir = workdir
+        self.position = position  # 布线主体（config options，与 Authority 一致）
         self.messages = []  # 工作记忆（append-only）
         self.entries = {}  # 精炼层：name → 工具条目
         self._pending = None  # 自举任务（发起者 / 剩余回执数 / 错误）
@@ -55,7 +57,8 @@ class Agent(UserModeProcess):
     # ---- 自举：从工作目录组装能力 ----
 
     def _on_bootstrap(self, event):
-        """扫描工作目录设备源码 → 逐个请求内核装载；全部回执后向发起者
+        """扫描工作目录设备源码 → 逐个请求内核装载（grants 声明给自己的
+        position——自举组装的能力归自己的岗）；全部回执后向发起者
         报告（agent_result）。无可装载时立即报告，不挂起；上轮未收齐时
         拒绝重入（防新旧回执混入同一计数器）。"""
         requester = event["source"]
@@ -73,7 +76,8 @@ class Agent(UserModeProcess):
                 "target": "kernel", "kind": "system",
                 "payload": {"command": "install_device",
                             "identity": filename[:-3],
-                            "source_file": os.path.join(devices_dir, filename)},
+                            "source_file": os.path.join(devices_dir, filename),
+                            "grants": [self.position]},
             })
         if not files:
             self._pending = None
