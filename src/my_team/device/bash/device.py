@@ -6,12 +6,12 @@
 
 import asyncio
 
-from my_team.kernel.process import Process
+from my_team.kernel.process import UserModeProcess
 
 MAX_OUTPUT_BYTES = 64 * 1024
 
 
-class BashDevice(Process):
+class BashDevice(UserModeProcess):
     def __init__(self, emit, *, max_concurrent_sources, cwd=None, timeout=30):
         super().__init__(emit, max_concurrent_sources)
         self.cwd = cwd

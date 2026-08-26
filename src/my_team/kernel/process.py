@@ -1,92 +1,133 @@
-"""Kernel：Process 本体（真实 multiprocessing 进程）。
+"""Kernel：Process 抽象（协议）与两态实现。
 
-子进程自循环：inbox 收事件 → respond() 响应 → emit 回事件总线。
-宿主不直接持有进程对象，经 ProcessHandle 通信。
+Process = 一套契约：``async respond(event) -> Event | VOID``。
+- 返回事件 → emit（产出，source 由宿主注入）；
+- 返回 ``VOID``（"VOID" 哨兵）→ 合法沉默，不上总线；
+- 返回 None → 协议违规，响亮丢弃（None 无法区分"故意沉默"与"忘记返回"）。
 
-并发模型：
-- Agent 串行处理消息；设备并行处理消息。
-- 设备按 source 分桶：同一来源的事件排队串行（保序），
-  不同来源的事件并行（各自 worker）。
-- respond 契约：async，返回产出事件或 VOID；None 属协议违规（响亮丢弃）；source 由宿主注入。
+两态同构（接口完全兼容，传输是唯一差异）：
+- 用户态 ``UserModeProcess``：真实子进程（mp.Process），inbox 经 mp.Queue；
+- 内核态 ``KernelModeDevice``：与 kernel 同进程托管（可信系统服务，
+  well-known 身份，respond 抛错 = kernel 失败）。
 
-与 ProcessHandle 的关系：
-- ProcessHandle = 宿主持有的代理
-- Process = 真实子进程（自己的状态与循环）
+共用 ``BucketDispatcher``：按 source 分桶——同源串行保序、跨源并行。
 """
 
 import asyncio
 import multiprocessing as mp
+from typing import Protocol
 
 from .event_protocol import VOID, Event
 
 
-class Process(mp.Process):
+class Process(Protocol):
+    """Process 契约：respond 处理事件，产出事件或 VOID。"""
+
+    async def respond(self, event: Event) -> Event | VOID: ...
+
+
+class BucketDispatcher:
+    """按 source 分桶的事件分发器（传输无关）。
+
+    - 同源：同一 source 的事件排队串行（FIFO 保序）；
+    - 跨源：不同 source 并行（各自 worker）；
+    - max_concurrent_sources：同时服务的 source 数上限；0 = 无限
+      （超限排队等空位，事件已在 queue 缓冲不丢）。
+    - respond 返回 None 属协议违规：响亮丢弃，不阻断该 source。
+    - emit 为 async 可调用（用户态=入总线，内核态=process_event）。
+    """
+
+    def __init__(self, respond, emit, max_concurrent_sources):
+        self.respond = respond
+        self.emit = emit
+        self.max_concurrent_sources = max_concurrent_sources
+        self._queues: dict[str, asyncio.Queue] = {}
+        self._running: set[str] = set()
+        self._sem: asyncio.Semaphore | None = None
+
+    async def _semaphore(self) -> asyncio.Semaphore | None:
+        # 惰性创建：必须在事件循环内（worker 调用时）
+        if self._sem is None and self.max_concurrent_sources > 0:
+            self._sem = asyncio.Semaphore(self.max_concurrent_sources)
+        return self._sem
+
+    def submit(self, event: Event):
+        """入桶：同源排队；新 source 起 worker。"""
+        source = event["source"]
+        queue = self._queues.setdefault(source, asyncio.Queue())
+        queue.put_nowait(event)
+        if source not in self._running:
+            self._running.add(source)
+            asyncio.create_task(self._worker(source, queue))
+
+    async def _worker(self, source: str, queue: asyncio.Queue):
+        sem = None
+        if self.max_concurrent_sources > 0:
+            sem = await self._semaphore()
+            assert sem is not None
+            await sem.acquire()  # 满则等待（事件已在 queue 缓冲，不丢）
+        try:
+            while True:
+                event = await queue.get()
+                result = await self.respond(event)
+                if result is None:
+                    # 协议违规：None 无法区分"故意沉默"与"忘记返回"，响亮丢弃
+                    print(f"[protocol] respond 返回 None（source={source}），丢弃")
+                    continue
+                if result != VOID:
+                    await self.emit(result)
+                if queue.empty():
+                    return
+        finally:
+            self._running.discard(source)
+            if sem is not None:
+                sem.release()
+
+
+class UserModeProcess(mp.Process):
+    """用户态进程：真实子进程，inbox 经 mp.Queue，同源串行/跨源并行。
+
+    终止 = system 层 payload.command=="terminate" 的事件。
+    """
+
     def __init__(self, emit, max_concurrent_sources):
         super().__init__()
-        self.inbox: mp.Queue[Event] = mp.Queue()   # 宿主 → 进程
-        self.emit = emit  # 进程 → 宿主
-        self.max_concurrent_sources = max_concurrent_sources  # 同时服务的 source 数上限；0 = 无限
+        self.inbox: mp.Queue[Event] = mp.Queue()  # 宿主 → 进程
+        self.emit = emit  # 进程 → 宿主（Emitter，source 由宿主注入）
+        self.max_concurrent_sources = max_concurrent_sources
 
-    async def respond(self, event: Event):
-        """处理单个事件，返回产出事件或 VOID（子类实现）。
-
-        契约：返回合法事件（source 由宿主注入）或 VOID（无话可说，
-        本地消化不上总线）；返回 None 属协议违规，worker 响亮丢弃。
-        """
+    async def respond(self, event: Event) -> Event | VOID:
+        """处理单个事件，返回产出事件或 VOID（子类实现）。"""
         raise NotImplementedError
 
     def run(self):
-        """子进程主循环：asyncio 驱动，按 source 分桶并行处理。
-
-        终止 = system 层 payload.command=="terminate" 的事件。
-        """
+        """子进程主循环：asyncio 驱动，按 source 分桶并行处理。"""
         asyncio.run(self._serve())
 
     async def _serve(self):
-        queues: dict[str, asyncio.Queue] = {}   # source → 事件队列
-        running: set[str] = set()               # 有 worker 在跑的 source
-        sem = (
-            None
-            if self.max_concurrent_sources == 0
-            else asyncio.Semaphore(self.max_concurrent_sources)
-        )
+        dispatcher = BucketDispatcher(self.respond, self._emit, self.max_concurrent_sources)
         while True:
             event = await asyncio.to_thread(self.inbox.get)
             if event.get("kind") == "system" and \
                     event.get("payload", {}).get("command") == "terminate":
                 break
-            source = event["source"]
-            queue = queues.setdefault(source, asyncio.Queue())
-            queue.put_nowait(event)
-            if source not in running:
-                running.add(source)
-                asyncio.create_task(
-                    self._start_worker(source, queue, running, sem)
-                )
+            dispatcher.submit(event)
 
-    async def _start_worker(self, source: str, queue: asyncio.Queue,
-                            running: set[str], sem: asyncio.Semaphore | None):
-        """起一个 source 的 worker；并发 source 数超限时排队等空位。"""
-        if self.max_concurrent_sources > 0:
-            assert sem is not None
-            await sem.acquire()  # 满则等待（事件已在 queue 缓冲，不丢）
-        try:
-            await self._source_worker(source, queue, running)
-        finally:
-            running.discard(source)
-            if sem is not None:
-                sem.release()
+    async def _emit(self, event: Event):
+        """产出事件：入总线（source 由 Emitter 宿主侧注入）。"""
+        self.emit(event)
 
-    async def _source_worker(self, source: str, queue: asyncio.Queue, running: set[str]):
-        """同源串行：一个 source 同一时刻只处理一个事件，完成后取下一个。"""
-        while True:
-            event = await queue.get()
-            result = await self.respond(event)
-            if result is None:
-                # 协议违规：None 无法区分"故意沉默"与"忘记返回"，响亮丢弃
-                print(f"[protocol] respond 返回 None（source={source}），丢弃")
-                continue
-            if result != VOID:
-                self.emit(result)
-            if queue.empty():
-                return
+
+class KernelModeDevice:
+    """内核态设备：与 kernel 同进程托管。
+
+    特殊地位：可信系统服务（Authority/Journal），well-known 身份；
+    无独立进程与生命周期，与 kernel 同生共死。respond 抛错 = kernel
+    失败（fail-fast，不允许带病运行）。respond 契约与用户态完全一致。
+    """
+
+    def __init__(self, identity: str):
+        self.identity = identity
+
+    async def respond(self, event: Event) -> Event | VOID:
+        raise NotImplementedError

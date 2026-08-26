@@ -57,6 +57,10 @@ MemoryEntry:
 
 - 工具 = 设备能力打包成的工具定义，作为条目存于精炼层——"设备
   记忆注入"的结果（设备注册 + wiring 时写入），不是代码常量。
+- **配置驱动 + 热加载**：工具定义（name/description/parameters/trigger）
+  来自 team 配置（数据化）；配置变化 → Authority 重新声明并重注入
+  （inject/evict 事件）→ 工具集合随配置演化，无需重启。能力在设备
+  代码，暴露在配置。
 - `tools=` 每次决策从工具条目动态生成：常驻（priority<10）∪
   召回命中（≥10）的 tool 条目，content 原样进工具列表。
 - 分发查条目：tool_call.name → 匹配 tool 条目 content.name →

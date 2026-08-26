@@ -27,13 +27,13 @@ from my_team.device.llm.vendor.types.provider_events import (
     AssistantErrorEvent,
 )
 from my_team.device.llm.vendor.types.tools import AgentTool
-from my_team.kernel.process import Process
+from my_team.kernel.process import UserModeProcess
 
 LLM_REQUEST = "llm_request"
 LLM_RESULT = "llm_result"
 
 
-class LLMDevice(Process):
+class LLMDevice(UserModeProcess):
     """LLM 服务进程：收 llm_request 事件，调用 provider，产出 llm_result。"""
 
     def __init__(self, emit, provider_factory, max_concurrent_sources):

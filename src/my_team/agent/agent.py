@@ -1,215 +1,90 @@
 """Agent：react 循环的认知主体（内心自持：记忆与决策都在进程内）。
 
 模型：
-- 状态 = messages（工作记忆，append-only）+ memory（精炼层，条目组织）。
-  事件 append 到 messages（为 input cache rate）；决策时从精炼层
-  召回的知识增量 append 到 messages 末尾。
-- 事件到来 → 反应：事件转消息 append → 决策 → 产出事件。永远如此。
-- 无会话/对话/requester 概念：发起者从 messages 条目恢复（触发条目
-  带 source 元数据，LLM 设备协议忽略未知字段）。
-- 工具 = 精炼层的 type=tool 条目（设备记忆注入的结果）：tools= 每次
-  从条目动态生成；tool_call 按条目 associated 分发到设备。
-- 一次只执行一个工具调用。
-- 整理模式（CONSOLIDATING）：messages 超预算或收到整理意图时进入
-  整理回合——tools 收窄为记忆工具集（memory_fold），多轮工具调用
-  在本地执行，直到 LLM 不再调用工具，整理完成。
+- 状态 = messages（工作记忆，append-only）+ entries（精炼层，工具条目）。
+- 工具 = 条目（Authority 注入，来自 team 配置，数据化）：trigger 匹配 →
+  查条目 → 按 associated 分发到设备 → tool_result 回来 → 产出 agent_result。
+- 决策（第一版演示）：任务内容对条目 trigger 做关键词匹配；LLM 决策
+  未来接同一分发路径（查条目 → associated → 事件），决策函数可替换。
+- 热加载：inject/evict 事件维护条目（工具集合随配置演化）。
 """
 
-from __future__ import annotations
-
-from uuid import uuid4
-
-from my_team.device.llm import LLM_REQUEST, LLM_RESULT
 from my_team.kernel.event_protocol import VOID
-from my_team.kernel.process import Process
-
-MEMORY_FOLD_TOOL = {
-    "name": "memory_fold",
-    "description": "把历史折叠为一段结构化摘要（保留任务目标、已完成动作、"
-                    "关键结论与待办）。整理完成后不要再调用工具。",
-    "parameters": {
-        "type": "object",
-        "properties": {"summary": {"type": "string", "description": "折叠后的摘要"}},
-        "required": ["summary"],
-    },
-}
-
-WORK_SYSTEM = ("你是工作 Agent。需要执行命令时调用 bash 工具，"
-               "拿到结果后继续，直到完成任务。")
-CONSOLIDATE_SYSTEM = ("你是整理者。把当前历史折叠为一段结构化摘要（memory_fold），"
-                      "摘要须保留任务目标、已完成动作、关键结论与待办。"
-                      "整理完成后不再调用工具。")
+from my_team.kernel.process import UserModeProcess
 
 AGENT_RESULT = "agent_result"
-MAX_MESSAGES = 30  # 预算阈值：超过即进入整理回合
+FILLERS = ("查询", "请问", "今天", "怎么样", "现在", "的", "呢", "？", "?", " ")
 
 
-class Agent(Process):
-    def __init__(self, emit, llm_pid, model, *, seed_tools=None):
+class Agent(UserModeProcess):
+    def __init__(self, emit):
         super().__init__(emit, 1)  # Agent 串行处理消息
-        self.llm_pid = llm_pid
-        self.model = model
         self.messages = []  # 工作记忆（append-only）
-        self.consolidating = False  # 整理回合标志
-        self.memory = [self._tool_entry(t) for t in (seed_tools or [])]  # 精炼层
-
-    # ---- react 循环 ----
+        self.entries = {}  # 精炼层：name → 工具条目
 
     async def respond(self, event):
-        self._append(event)
-        return self._react(event)
-
-    def _append(self, event):
-        """事件 → wire 消息 append。触发条目附带 source 元数据（恢复发起者）。"""
-        payload = event["payload"]
-        command = payload.get("command")
-        if command == LLM_RESULT:
-            self.messages.append({
-                "role": "assistant",
-                "content": payload.get("content") or "",
-                "tool_calls": payload.get("tool_calls") or [],
-                "ok": payload.get("ok"),
-                "error": payload.get("error"),
-            })
-        elif command == "bash_result":
-            self.messages.append({
-                "role": "tool",
-                "tool_call_id": payload.get("tool_call_id") or "",
-                "content": payload.get("content") or "",
-                "is_error": not payload.get("ok"),
-            })
-        else:  # 触发事件
-            self.messages.append({
-                "role": "user",
-                "content": payload.get("content", ""),
-                "source": event["source"],
-            })
-
-    def _react(self, event):
         command = event["payload"].get("command")
-        if command == LLM_RESULT:
-            return self._on_llm_result()
-        if command == "bash_result":
-            return self._on_tool_result()
-        if command == "consolidate":
-            self.consolidating = True
-        return self._ask_llm()
+        if command == "inject":
+            return self._on_inject(event["payload"])
+        if command == "task":
+            return self._on_task(event)
+        if command == "tool_result":
+            return self._on_tool_result(event)
+        return VOID
 
-    # ---- 精炼层：工具条目 ----
+    # ---- 精炼层维护（Authority 注入 / 热加载） ----
 
-    def _tool_entry(self, tool):
-        return {
-            "entry_id": str(uuid4()),
-            "type": "tool",
-            "content": {
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["parameters"],
-            },
-            "trigger": list(tool.get("trigger") or []),
-            "priority": tool.get("priority", 10),
-            "associated": list(tool["associated"]),
-            "version": 1,
-            "links": [],
-            "deleted_at": None,
-        }
+    def _on_inject(self, payload):
+        for name in payload.get("evict") or []:
+            self.entries.pop(name, None)
+        for entry in payload.get("entries") or []:
+            self.entries[entry["content"]["name"]] = entry
+        return VOID
 
-    def _tools_for_llm(self):
-        """tools= 从工具条目动态生成（未删除的 type=tool 条目）。"""
-        return [e["content"] for e in self.memory
-                if e["type"] == "tool" and e.get("deleted_at") is None]
+    # ---- react 决策 ----
 
-    def _dispatch(self, tool_call):
-        """tool_call.name → 查工具条目 → associated 设备 → 构造该设备协议事件。"""
-        name = tool_call.get("name")
-        entry = next(
-            (e for e in self.memory
-             if e["type"] == "tool" and e["content"]["name"] == name
-             and e.get("deleted_at") is None),
-            None,
-        )
+    def _on_task(self, event):
+        content = event["payload"].get("content", "")
+        self.messages.append({"role": "user", "content": content,
+                              "source": event["source"]})
+        entry = self._match(content)
         if entry is None:
-            return VOID  # 未知工具：无接收者，合法沉默（target 无 "void"）
-        device_pid = entry["associated"][0]
+            return self._agent_result(event["source"], ok=False, error="没有匹配的工具")
+        arguments = event["payload"].get("arguments") or self._extract_args(entry, content)
         return {
-            "target": device_pid,
+            "target": entry["associated"][0],
             "kind": "application",
-            "payload": {
-                "command": "bash_run",  # 设备协议事件，由设备 PROTOCOL 定义
-                "cmd": (tool_call.get("arguments") or {}).get("command", ""),
-                "tool_call_id": tool_call.get("id"),
-            },
+            "payload": {"command": "tool_run", "name": entry["content"]["name"],
+                        "arguments": arguments, "task": event["source"]},
         }
 
-    # ---- 决策 ----
+    def _on_tool_result(self, event):
+        payload = event["payload"]
+        return self._agent_result(payload.get("task"), ok=payload.get("ok"),
+                                  content=payload.get("content"),
+                                  error=payload.get("error"))
 
-    def _ask_llm(self):
-        if not self.consolidating and len(self.messages) > MAX_MESSAGES:
-            self.consolidating = True  # 预算触发整理回合
-        return {
-            "target": self.llm_pid,
-            "kind": "application",
-            "payload": {
-                "command": LLM_REQUEST,
-                "model": self.model,
-                "system": CONSOLIDATE_SYSTEM if self.consolidating else WORK_SYSTEM,
-                "messages": self.messages[-MAX_MESSAGES:],
-                "tools": [MEMORY_FOLD_TOOL] if self.consolidating else self._tools_for_llm(),
-            },
-        }
+    def _agent_result(self, requester, *, ok, content=None, error=None):
+        return {"target": requester, "kind": "application",
+                "payload": {"command": AGENT_RESULT, "ok": ok,
+                            "content": content, "error": error}}
 
-    def _on_llm_result(self):
-        last = self.messages[-1]
-        if not last.get("ok"):
-            self.consolidating = False
-            return self._finish(ok=False, error=last.get("error") or "llm failed")
-        tool_calls = last.get("tool_calls") or []
-        if not tool_calls:
-            if self.consolidating:
-                self.consolidating = False  # 整理回合完成
-                return VOID
-            return self._finish(ok=True, content=last.get("content") or "")
-        call = tool_calls[0]  # 一次一个工具调用
-        if call.get("name") == "memory_fold":
-            return self._apply_fold(call)
-        return self._dispatch(call)
+    # ---- 决策细节（第一版演示：trigger 数据化匹配） ----
 
-    def _on_tool_result(self):
-        return self._ask_llm()  # 工具结果回填 messages，继续决策
-
-    # ---- 记忆工具（本地执行） ----
-
-    def _apply_fold(self, call):
-        """memory_fold：历史折叠为摘要，替换 messages。"""
-        summary = (call.get("arguments") or {}).get("summary", "") or "(folded)"
-        requester = self._work_start_source()
-        folded = len(self.messages)
-        self.messages = [{"role": "user", "content": summary, "source": requester}]
-        self.messages.append({
-            "role": "tool",
-            "tool_call_id": call.get("id"),
-            "content": f"已折叠 {folded} 条历史为摘要。",
-        })
-        return self._ask_llm()  # 继续整理回合
-
-    # ---- 产出 ----
-
-    def _finish(self, *, ok, content=None, error=None):
-        requester = self._work_start_source()
-        return {
-            "target": requester,
-            "kind": "application",
-            "payload": {
-                "command": AGENT_RESULT,
-                "ok": ok,
-                "content": content,
-                "error": error,
-            },
-        }
-
-    def _work_start_source(self):
-        """发起者：最近的触发条目（user 消息带 source 元数据）。"""
-        for message in reversed(self.messages):
-            if message.get("source") is not None:
-                return message["source"]
+    def _match(self, content):
+        """任务内容对条目 trigger 做子串匹配（数据驱动，无硬编码工具名）。"""
+        for entry in self.entries.values():
+            for trigger in entry.get("trigger") or []:
+                if trigger and trigger in content:
+                    return entry
         return None
+
+    def _extract_args(self, entry, content):
+        """演示级参数抽取：剥掉 trigger 与填充词，剩余为参数值。"""
+        stripped = content
+        for trigger in entry.get("trigger") or []:
+            stripped = stripped.replace(trigger, "")
+        for word in FILLERS:
+            stripped = stripped.replace(word, "")
+        stripped = stripped.strip()
+        return {"city": stripped} if stripped else {}
