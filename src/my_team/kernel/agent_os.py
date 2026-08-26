@@ -144,7 +144,8 @@ class AgentOS:
             old = self.entities.get(identity)
             if old is self or isinstance(old, KernelModeDevice):
                 raise ValueError(f"内核态身份不可装卸: {identity!r}")
-            if identity in await self._agents():
+            agents = await self._agents()
+            if identity in agents:
                 raise ValueError(f"agent 身份不可被设备顶替: {identity!r}")
             device_cls, tools = self._load_module(identity, payload["source_file"])
             if isinstance(old, ProcessHandle):
@@ -153,7 +154,7 @@ class AgentOS:
             options = payload.get("options") or {}
             await self.register(identity, lambda emit: device_cls(emit, **options),
                                 tools=tools)
-            for agent in await self._agents():
+            for agent in agents:
                 await self._inject(agent)
             ok, error = True, None
         except Exception as exc:
@@ -173,7 +174,8 @@ class AgentOS:
             old = self.entities.get(identity)
             if old is self or isinstance(old, KernelModeDevice):
                 raise ValueError(f"内核态身份不可装卸: {identity!r}")
-            if identity in await self._agents():
+            agents = await self._agents()
+            if identity in agents:
                 raise ValueError(f"agent 身份不可装卸: {identity!r}")
             if not isinstance(old, ProcessHandle):
                 raise ValueError(f"未注册: {identity!r}")
@@ -183,7 +185,7 @@ class AgentOS:
                 "source": "system", "target": "authority", "kind": "system",
                 "payload": {"command": "unregister_request", "identity": identity},
             })
-            for agent in await self._agents():
+            for agent in agents:
                 await self._inject(agent)
             ok, error = True, None
         except Exception as exc:
