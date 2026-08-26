@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.14
 source: SPEC.md
 priority: medium
@@ -27,3 +28,17 @@ priority: medium
 ## 依赖
 
 sandbox-wrapper（已提交 b83bda6，串行）；被 bash-sandbox-adapt 消费。
+
+## 完成
+
+- 实现：`_bwrap_args` 唯一调用点（`_sandbox_reexec`）经新方法
+  `process._needs_network()` 读声明通道——设备 = load_spec 的
+  options.needs_network（安装 payload options 携带），agent = 构造参数
+  needs_network（`Agent.__init__` 新参数，config options 直通）；沙箱
+  控制字段在 `sandbox_entry._serve_device` 过滤（不进 Device 构造参数）。
+- 审查：PASS-with-nits；修补随收尾提交（基类显式 `needs_network = False`
+  类属性、去掉 `_bwrap_args` 的 needs_network 默认值、options 声明式
+  过滤）。
+- 故事测试 `tmp/check_network.py`：device netoff（未声明→blocked）/neton
+  （声明→connected）、agent_off（未声明→blocked）/agent_on（声明→
+  connected）全过；全量回归 & lint 0。

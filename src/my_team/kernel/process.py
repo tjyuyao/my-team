@@ -122,6 +122,10 @@ class UserModeProcess(mp.Process):
         # bound_agent 仅 per-agent 实例非 None（挂载锚点按绑定 agent 解析）
         self._load_spec = load_spec
 
+    # 沙箱网络声明（进程级资源开关）：设备经 load_spec options 声明，
+    # agent 经构造参数覆盖；基类默认禁网，未声明即 False。
+    needs_network = False
+
     async def respond(self, event: Event) -> Event | VOID:
         """处理单个事件，返回产出事件或 VOID（子类实现）。"""
         raise NotImplementedError
@@ -166,7 +170,8 @@ class UserModeProcess(mp.Process):
         env[SANDBOX_SENTINEL] = "1"
         env["PYTHONPATH"] = os.pathsep.join(sys.path)  # re-entry 可 import
         env["PYTHONDONTWRITEBYTECODE"] = "1"  # 只读系统下不写 __pycache__
-        os.execvpe(bwrap, _bwrap_args(writable, readonly, read_fd), env)
+        os.execvpe(bwrap, _bwrap_args(writable, readonly, read_fd,
+                                       self._needs_network()), env)
         raise SystemExit("execvpe 失败")  # 理论不可达（exec 成功即替换映像）
 
     def _sandbox_state(self) -> dict:
@@ -208,6 +213,14 @@ class UserModeProcess(mp.Process):
         return [os.path.join(self.workdir, "data", self.identity),
                 os.path.join(self.workdir, "data", "devices")], []
 
+    def _needs_network(self) -> bool:
+        """声明通道（默认禁网，显式声明才放行，进程级资源开关非权限
+        scope）：设备经 load_spec 的 options.needs_network（安装 payload
+        options 携带），agent 经构造参数 needs_network。"""
+        if self._load_spec is not None:
+            return bool(self._load_spec[2].get("needs_network", False))
+        return self.needs_network
+
     async def _serve(self):
         dispatcher = BucketDispatcher(self.respond, self._emit,
                                       self.max_concurrent_sources)
@@ -239,9 +252,9 @@ class KernelModeDevice:
 
 
 def _bwrap_args(writable: list[str], readonly: list[str], state_fd: int,
-                needs_network: bool = False) -> list[str]:
-    """bwrap 固定矩阵命令行（唯一构造点；网络开关编辑边界——本卡全部传
-    needs_network=False，默认禁网，声明机制由 network-declaration 卡接）。
+                needs_network: bool) -> list[str]:
+    """bwrap 固定矩阵命令行（唯一构造点；网络开关编辑边界——needs_network
+    声明通道见 ``_needs_network``，默认禁网，仅显式声明进程保留网络面）。
 
     固定矩阵语义：挂载参数只依赖身份类型的两个锚点（家 + 源码区），不依赖
     position（无 per-position 物化）；设备进程永远不是 root（userns 单用户

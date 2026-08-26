@@ -170,8 +170,10 @@ kernel 完成。
 - **沙箱（v0.14 已实现）**：所有设备进程及 agent 默认 bwrap + setrlimit
   （user + pid + net + ipc namespace，无需 root）——系统路径只读挂载、
   挂载矩阵按身份类型展开为两个锚点（家 + 源码区，见目录约定）、默认禁网
-  （需网络设备显式声明，声明机制后续卡）、userns/pidns/netns/ipcns 阻断
-  对兄弟进程与内核的信号/内存/网络/System V IPC 攻击（Yama 兜底 ptrace）。
+  （需显式声明才保留网络面：设备经安装 payload `options.needs_network`、
+  agent 经 config `options.needs_network`——进程级资源开关，非权限
+  scope）、userns/pidns/netns/ipcns 阻断对兄弟进程与内核的信号/内存/网络/
+  System V IPC 攻击（Yama 兜底 ptrace）。
   **沙箱 = 进程级隔离面，固定矩阵（家 + 只读系统），不承载权限**：没有按
   position 的挂载物化，设备进程永远不是 root。
 - **权限与沙箱解耦（调用级）**：跨区数据访问一律走"调用 → 目标设备按

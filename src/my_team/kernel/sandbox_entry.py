@@ -48,7 +48,10 @@ def _serve_device(load_spec, conn):
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
-    device = module.Device(ChildWriter(conn), **options)
+    # needs_network 是沙箱控制字段（process._needs_network 读取），非设备
+    # 构造参数——过滤后 Device 才收自己的 options（不含沙箱开关）。
+    inst_opts = {k: v for k, v in options.items() if k != "needs_network"}
+    device = module.Device(ChildWriter(conn), **inst_opts)
     asyncio.run(device._serve())
 
 

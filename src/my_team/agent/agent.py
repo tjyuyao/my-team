@@ -23,10 +23,11 @@ FILLERS = ("查询", "请问", "今天", "怎么样", "现在", "的", "呢", "�
 
 
 class Agent(UserModeProcess):
-    def __init__(self, emit, *, workdir, position):
+    def __init__(self, emit, *, workdir, position, needs_network=False):
         super().__init__(emit, 1)  # Agent 串行处理消息
         self.workdir = workdir
         self.position = position  # 布线主体（config options，与 Authority 一致）
+        self.needs_network = needs_network  # 沙箱网络声明（进程级资源开关）
         self.messages = []  # 工作记忆（append-only）
         self.entries = {}  # 精炼层：name → 工具条目
         self._pending = None  # 自举任务（发起者 / 剩余回执数 / 错误）
