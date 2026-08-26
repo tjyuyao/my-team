@@ -2,7 +2,14 @@
 
 惰性启动可配置：lazy=True 时首次 deliver 才 spawn 真进程；
 lazy=False 时注册即 spawn（启动慢但首个事件零延迟）。
+
+终止契约：``await terminate(timeout)`` 返回时进程必已死亡——先投
+system 层 terminate 事件（进程自我收尾），异步等待（不阻塞内核事件
+循环），超时强杀（SIGKILL 不可阻塞）后收尸。绝不同身份并存：宿主
+仅以 identity 区分进程，同 identity 双活即协议污染。
 """
+
+import asyncio
 
 from .event_protocol import Event
 from .process import UserModeProcess
@@ -41,12 +48,19 @@ class ProcessHandle:
         """投递事件（进 inbox，惰性拉起）。"""
         return self._ensure_process().inbox.put(event)
 
-    def terminate(self):
-        """终止进程：投 system 层 terminate 事件。"""
-        if self._process is not None:
-            self.deliver({
-                "source": "system", "target": self.identity,
-                "kind": "system", "payload": {"command": "terminate"},
-            })
-            self._process.join(timeout=5)
-            self._process = None
+    async def terminate(self, timeout: float):
+        """终止进程并确保其死亡（异步，不阻塞内核事件循环）。
+
+        投 terminate 事件 → 等进程自行退出 → 超时强杀（kill）→ 收尸。
+        """
+        if self._process is None:
+            return
+        self.deliver({
+            "source": "system", "target": self.identity,
+            "kind": "system", "payload": {"command": "terminate"},
+        })
+        await asyncio.to_thread(self._process.join, timeout)
+        if self._process.is_alive():
+            self._process.kill()
+            await asyncio.to_thread(self._process.join)
+        self._process = None

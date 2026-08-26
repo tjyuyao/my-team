@@ -149,8 +149,11 @@ class AgentOS:
                 raise ValueError(f"agent 身份不可被设备顶替: {identity!r}")
             tools = self._load_module(identity, payload["source_file"])
             if isinstance(old, ProcessHandle):
-                old.terminate()  # join 阻塞内核循环（≤5s），超时后旧进程可能
-                # 存活并同身份并存——第一版已知边界
+                # 先摘身份再终止：终止等待期间路由到该身份的事件被校验
+                # 响亮丢弃（target 未注册），旧进程残余产出被拒绝——
+                # 绝不复活同身份进程（绝不同身份并存）
+                del self.entities[identity]
+                await old.terminate(5)
             options = payload.get("options") or {}
             # 壳进程只携带装载描述；Device 实例在子进程内构造
             # （UserModeProcess._run_loaded），spawn/fork 皆可
@@ -185,8 +188,9 @@ class AgentOS:
                 raise ValueError(f"agent 身份不可装卸: {identity!r}")
             if not isinstance(old, ProcessHandle):
                 raise ValueError(f"未注册: {identity!r}")
-            old.terminate()
+            # 先摘身份再终止（同 _install：终止期间路由/产出均被校验拒绝）
             del self.entities[identity]
+            await old.terminate(5)  # 确保进程死亡（超时强杀），绝不同身份并存
             await self.authority.respond({
                 "source": "system", "target": "authority", "kind": "system",
                 "payload": {"command": "unregister_request", "identity": identity},
