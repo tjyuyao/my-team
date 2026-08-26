@@ -1,12 +1,16 @@
 """Kernel：事件校验规则（协议层）。
 
 事件 = (source, target, kind, payload)。kind 分两级：
-- "system"（内核语义）：payload 须含 command（terminate / install_device /
-  uninstall_device）
+- "system"（内核语义）：payload 须含 command（terminate / install_device / uninstall_device /
+  grant_scope / revoke_scope）
 - "application"（业务语义）：payload 任意，内核不校验
 """
 
-SYSTEM_COMMANDS = {"terminate", "install_device", "uninstall_device"}
+SYSTEM_COMMANDS = {"terminate", "install_device", "uninstall_device",
+                  "grant_scope", "revoke_scope"}
+# 这些系统命令仅可寻址 kernel（terminate 经宿主直投 inbox，不走校验）
+KERNEL_COMMANDS = {"install_device", "uninstall_device", "grant_scope",
+                   "revoke_scope"}
 KIND_LEVELS = {"system", "application"}
 
 
@@ -49,7 +53,7 @@ class KnownKind(EventValidationRule):
 
 
 class SystemCommand(EventValidationRule):
-    """system 层事件必须带已知 command。"""
+    """system 层事件必须带已知 command；装卸/授权类命令仅可寻址 kernel。"""
 
     def validate(self, event):
         if event.get("kind") != "system":
@@ -58,6 +62,10 @@ class SystemCommand(EventValidationRule):
         if command not in SYSTEM_COMMANDS:
             raise EventError(
                 f"未知 system command: {command!r}（合法: {sorted(SYSTEM_COMMANDS)}）"
+            )
+        if command in KERNEL_COMMANDS and event.get("target") != "kernel":
+            raise EventError(
+                f"系统命令 {command!r} 仅可寻址 kernel，got {event.get('target')!r}"
             )
 
 

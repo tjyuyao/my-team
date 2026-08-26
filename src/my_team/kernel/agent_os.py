@@ -25,7 +25,7 @@ import uuid
 
 import yaml
 
-from my_team.kernel.authority import Authority
+from my_team.kernel.authority import ORG_DEVICE, Authority
 from my_team.kernel.event_protocol import VOID, Event
 from my_team.kernel.event_validator import (
     DEFAULT_RULES,
@@ -45,6 +45,9 @@ PROCESS_TYPES: dict[str, type] = {}
 
 KERNEL_IDENTITY = "kernel"
 
+# 内核态来源（kernel/authority/journal）的认证上下文：无 position、无 scopes
+EMPTY_AUTH = {"position": None, "scopes": []}
+
 
 class AgentOS:
     def __init__(self, config_path: str):
@@ -53,6 +56,7 @@ class AgentOS:
         self.entities: dict[str, ProcessHandle | KernelModeDevice | AgentOS] = {}
         self.entities[KERNEL_IDENTITY] = self  # 内核可寻址（install/uninstall）
         self.event_bus: mp.Queue[Event] = mp.Queue()  # 进程产出事件
+        self._agent_ids: set[str] = set()  # agent 身份（路由富化跳过目标）
         self.rules = [
             *DEFAULT_RULES,
             SourceRegistered(self.entities),
@@ -99,20 +103,22 @@ class AgentOS:
             )
 
     async def register(self, identity, spawn, *, tools=None, agent=False,
-                       lazy=False, position=None):
-        """注册进程：Authority 裁决（身份 + 能力声明 + position）→ kernel
-        物化路由映射。agent 必须声明 position（布线主体，config options 单一
-        来源），缺省即配错，fail-fast。"""
+                       lazy=False, position=None, scopes=None):
+        """注册进程：Authority 裁决（身份 + 能力声明 + position + scope
+        声明）→ kernel 物化路由映射。agent 必须声明 position（布线主体，
+        config options 单一来源），缺省即配错，fail-fast。"""
         if agent and not position:
             raise ValueError(f"agent 缺少 position: {identity!r}")
         await self.authority.respond({
             "source": "system", "target": "authority", "kind": "system",
             "payload": {"command": "register_request", "identity": identity,
                         "tools": tools or [], "agent": agent,
-                        "position": position},
+                        "position": position, "scopes": scopes or []},
         })
         handle = ProcessHandle(identity, spawn, event_bus=self.event_bus, lazy=lazy)
         self.entities[identity] = handle
+        if agent:
+            self._agent_ids.add(identity)
 
     async def _inject(self, agent: str):
         """请求 Authority 构造注入事件并路由给 agent（系统工具一条路径）。"""
@@ -128,27 +134,53 @@ class AgentOS:
     # ------------------------------------------------------------------
 
     async def _on_kernel(self, event: Event):
-        """target=kernel 的系统命令（install_device / uninstall_device）。"""
+        """target=kernel 的系统命令（install/uninstall_device、
+        grant/revoke_scope）。"""
         command = event["payload"].get("command")
         if command == "install_device":
             await self._install(event)
         elif command == "uninstall_device":
             await self._uninstall(event)
+        elif command in ("grant_scope", "revoke_scope"):
+            await self._scope(event, grant=command == "grant_scope")
         else:
             print(f"[kernel] 未知内核命令: {command!r}")
 
+    async def _authorize(self, identity: str, scope: str) -> bool:
+        """经 Authority 裁决系统命令权（root 或持 org scope）。"""
+        reply = await self.authority.respond({
+            "source": "system", "target": "authority", "kind": "system",
+            "payload": {"command": "authorize_request",
+                        "identity": identity, "scope": scope}})
+        return reply["payload"]["allowed"]
+
+    async def _auth_context(self, identity: str) -> dict:
+        """调用时认证上下文（富化用）：position + 有效 scopes。"""
+        reply = await self.authority.respond({
+            "source": "system", "target": "authority", "kind": "system",
+            "payload": {"command": "auth_request", "identity": identity}})
+        return reply["payload"]["auth"]
+
+    @staticmethod
+    def _defaults(scopes: list) -> list[str]:
+        """设备声明的默认公开 scope（安装布线展开用）。"""
+        return [s["token"] for s in scopes if s.get("default")]
+
     async def _install(self, event: Event):
-        """装载设备：加载工作目录源码（约定导出 Device 与 TOOLS）→
-        注册（Authority 登记 + kernel 物化路由）→ 按 payload 声明的 grants
-        布线（grant 表）→ 注入全部 agent（内容按各 agent 的 position 过滤）。
-        任何一步失败都回告请求方（ok=False）——设备源码是用户代码，
-        其失败不得击穿内核事件循环；身份类别受保护（内核态/agent 不可
-        被设备顶替）。同名已注册设备先终止旧进程（重装即升级）。"""
+        """装载设备：加载工作目录源码（约定导出 Device、TOOLS、可选
+        SCOPES）→ 注册（Authority 登记 + kernel 物化路由）→ 按 payload 的
+        grants 展开设备的默认公开 scope 布线 → 注入全部 agent（内容按各
+        agent 的 position 过滤）。装卸权经 Authority 裁决（root 或持有
+        org:install）。任何一步失败都回告请求方（ok=False）——设备源码是
+        用户代码，其失败不得击穿内核事件循环；身份类别受保护（内核态/
+        agent 不可被设备顶替）。同名已注册设备先终止旧进程（重装即升级）。"""
         payload = event["payload"]
         identity = payload.get("identity")
         try:
             if not isinstance(identity, str) or not identity:
                 raise ValueError("install_device 缺 identity")
+            if not await self._authorize(event["source"], "install"):
+                raise ValueError("无设备装卸权（需 root 或 org:install）")
             grants = payload.get("grants")
             if not isinstance(grants, list) or not grants or not all(
                     isinstance(g, str) and g for g in grants):
@@ -160,13 +192,18 @@ class AgentOS:
             agents = await self._agents()
             if identity in agents:
                 raise ValueError(f"agent 身份不可被设备顶替: {identity!r}")
-            tools = self._load_module(identity, payload["source_file"])
+            tools, scopes = self._load_module(identity, payload["source_file"])
             if isinstance(old, ProcessHandle):
                 # 先摘身份再终止：终止等待期间路由到该身份的事件被校验
                 # 响亮丢弃（target 未注册），旧进程残余产出被拒绝——
                 # 绝不复活同身份进程（绝不同身份并存）
                 del self.entities[identity]
                 await old.terminate(5)
+                # 撤销旧登记的 grants（重装即升级：旧 scope 不得残留）
+                await self.authority.respond({
+                    "source": "system", "target": "authority", "kind": "system",
+                    "payload": {"command": "unregister_request",
+                                "identity": identity}})
             options = payload.get("options") or {}
             # 壳进程只携带装载描述；Device 实例在子进程内构造
             # （UserModeProcess._run_loaded），spawn/fork 皆可
@@ -175,13 +212,10 @@ class AgentOS:
                 lambda emit, p=payload["source_file"], o=options,
                 i=identity: UserModeProcess(
                     emit, o.get("max_concurrent_sources", 0), load_spec=(i, p, o)),
-                tools=tools)
+                tools=tools, scopes=scopes)
             for position in grants:
-                await self.authority.respond({
-                    "source": "system", "target": "authority", "kind": "system",
-                    "payload": {"command": "grant_request",
-                                "position": position, "entity": identity},
-                })
+                for token in self._defaults(scopes):
+                    await self._grant(position, identity, token)
             for agent in agents:
                 await self._inject(agent)
             ok, error = True, None
@@ -193,13 +227,15 @@ class AgentOS:
 
     async def _uninstall(self, event: Event):
         """卸载设备：终止进程 → Authority 撤销声明（连带撤销其全部布线）
-        → 重注入（diff 出 evict）。
-        失败（未注册/身份类别/异常）一律回告请求方。"""
+        → 重注入（diff 出 evict）。装卸权经 Authority 裁决；失败（未注册/
+        身份类别/异常）一律回告请求方。"""
         payload = event["payload"]
         identity = payload.get("identity")
         try:
             if not isinstance(identity, str) or not identity:
                 raise ValueError("uninstall_device 缺 identity")
+            if not await self._authorize(event["source"], "install"):
+                raise ValueError("无设备装卸权（需 root 或 org:install）")
             old = self.entities.get(identity)
             if old is self or isinstance(old, KernelModeDevice):
                 raise ValueError(f"内核态身份不可装卸: {identity!r}")
@@ -224,9 +260,53 @@ class AgentOS:
                                 self._ack(event, "device_uninstalled", identity,
                                           ok, error))
 
+    async def _scope(self, event: Event, *, grant: bool):
+        """运行期 grant/revoke_scope（人事权操作）：经 Authority 裁决 →
+        登记/撤销 (position, device, token) → 重注入全部 agent → ack。
+        org 设备（人事权本身）的授予仅 root 可做。"""
+        payload = event["payload"]
+        position, device, token = (payload.get("position"),
+                                   payload.get("device"), payload.get("token"))
+        try:
+            if not (isinstance(position, str) and position
+                    and isinstance(device, str) and device
+                    and isinstance(token, str) and token):
+                raise ValueError("grant/revoke_scope 缺 position/device/token")
+            if device == ORG_DEVICE and not await self._authorize(
+                    event["source"], "org"):
+                raise ValueError("org 设备授权仅 root（或其委托）可做")
+            if not await self._authorize(event["source"], "grant"):
+                raise ValueError("无人事权（需 root 或 org:grant）")
+            await self.authority.respond({
+                "source": "system", "target": "authority", "kind": "system",
+                "payload": {"command": "grant_request" if grant
+                            else "revoke_request",
+                            "position": position, "device": device,
+                            "token": token}})
+            for agent in await self._agents():
+                await self._inject(agent)
+            ok, error = True, None
+        except Exception as exc:
+            ok, error = False, str(exc)
+        await self._kernel_emit(KERNEL_IDENTITY, {
+            "target": event["source"], "kind": "application",
+            "payload": {"command": "scope_granted" if grant
+                        else "scope_revoked",
+                        "position": position, "device": device,
+                        "ok": ok, "error": error}})
+
+    async def _grant(self, position: str, device: str, token: str):
+        """Authority 布线登记（kernel 内部：装卸展开与运行期共用一个入口）。"""
+        await self.authority.respond({
+            "source": "system", "target": "authority", "kind": "system",
+            "payload": {"command": "grant_request",
+                        "position": position, "device": device,
+                        "token": token}})
+
     @staticmethod
-    def _load_module(identity: str, path: str) -> list:
-        """校验并读取设备源码定义（约定导出 Device 与 TOOLS），返回 TOOLS。
+    def _load_module(identity: str, path: str) -> tuple[list, list]:
+        """校验并读取设备源码定义（约定导出 Device、TOOLS、可选 SCOPES），
+        返回 (TOOLS, SCOPES)。
 
         仅父进程裁决用（模块可加载、定义齐全）；Device 实例不在此构造，
         由子进程按装载描述自行加载（传输无关，spawn/fork 皆可）。
@@ -241,7 +321,12 @@ class AgentOS:
         for attr in ("Device", "TOOLS"):
             if not hasattr(module, attr):
                 raise AttributeError(f"设备源码缺导出 {attr!r}: {path!r}")
-        return module.TOOLS
+        scopes = getattr(module, "SCOPES", [])
+        if not isinstance(scopes, list) or not all(
+                isinstance(s, dict) and isinstance(s.get("token"), str)
+                and s["token"] for s in scopes):
+            raise ValueError(f"SCOPES 声明形状非法: {path!r}")
+        return module.TOOLS, scopes
 
     async def _agents(self) -> list[str]:
         """向 Authority 查询全部 agent 身份（组织事实归 Authority）。"""
@@ -275,12 +360,32 @@ class AgentOS:
             if record:
                 await self._record(event, "dropped", str(err))
             return
+        if event["target"] != KERNEL_IDENTITY:
+            # 路由前富化：认证上下文进 Journal 的"内核所见"
+            await self._enrich(event)
         if record:
             await self._record(event, "routed", None)
         if event["target"] == KERNEL_IDENTITY:
             await self._on_kernel(event)
         else:
             self._route(event)
+
+    async def _enrich(self, event: Event):
+        """调用时认证（富化）：路由到设备（非 agent）的事件附加调用者的
+        (position, scopes)——宿主侧解析无伪造面，设备按自己的语义裁决。
+        经 Authority 进程内直调，零 IPC。内核态来源无认证上下文。"""
+        if event["target"] in self._agent_ids:
+            return
+        entity = self.entities.get(event["target"])
+        if not isinstance(entity, ProcessHandle):
+            return
+        source = event["source"]
+        source_entity = self.entities.get(source)
+        if source == KERNEL_IDENTITY or \
+                isinstance(source_entity, KernelModeDevice):
+            event["auth"] = EMPTY_AUTH
+            return
+        event["auth"] = await self._auth_context(source)
 
     async def _record(self, event: Event, outcome: str, reason: str | None):
         await self.journal.respond({

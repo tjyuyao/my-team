@@ -62,9 +62,16 @@ MemoryEntry:
   持久化）；bootstrap 扫描目录 → install_device 装载（grants 声明布线）
   → Authority 注入（inject/evict 事件）→ 工具集合随装卸演化，无需重启。
   能力在设备源码，暴露在注入条目。
-- **布线（deny-by-default）**：注入内容 = agent 的 position 所布线的
-  设备声明（grant 表）；未布线的设备能力不可见。position 来自 config
+- **布线（deny-by-default，多粒度 scope）**：注入内容 = agent 的
+  position 的 grants 覆盖的设备/scope（grant 表 `(position, device,
+  token)`）；未布线的设备能力不可见。安装展开为设备默认公开 scope，
+  运行期 grant_scope/revoke_scope 细粒度调整。position 来自 config
   `options.position`。
+- **调用时认证（富化）**：设备收到的事件带调用者的 `auth`（position +
+  有效 scopes，内核宿主侧注入）——设备按自己的语义裁决权限。
+- **书面权限解释**：已授 scope 的 `explanation` 以 type=skill 条目注入
+  记忆（无 trigger，不参与匹配，只作"技能记忆"知识）——与工具说明一起
+  构成"书面的使用方法和权限解释"。
 - `tools=` 每次决策从工具条目动态生成：常驻（priority<10）∪
   召回命中（≥10）的 tool 条目，content 原样进工具列表。
 - 分发查条目：tool_call.name → 匹配 tool 条目 content.name →

@@ -29,7 +29,8 @@ Process 是一套契约（respond: Event | VOID），用户态（子进程）与
 - **source**：宿主侧注入，标识来源——不可冒充。
 - **target**：发送方填写，内核依它路由；必须指向已注册进程。
 - **kind**：`system`（内核语义，payload.command 在白名单：
-  terminate / install_device / uninstall_device）| `application`（业务语义）。
+  terminate / install_device / uninstall_device / grant_scope /
+  revoke_scope）| `application`（业务语义）。
 - **payload**：任意内容。
 
 所有事件路由前经校验；校验失败响亮丢弃并记录，不中断内核循环。
@@ -68,19 +69,36 @@ Process 是一套契约（respond: Event | VOID），用户态（子进程）与
 
 ## 组织（Authority）
 
-组织事实的**权威源**是 Authority（内核态设备）：身份登记与撤销、能力声明、
-注入内容、agent 拓扑。kernel 不持有组织数据，只物化执行所需的
-identity → handle 路由映射——注册即向 Authority 申请、物化由 kernel 完成。
+组织事实的**权威源**是 Authority（内核态设备）：身份登记与撤销、能力与
+权限范围声明、注入内容、agent 拓扑。kernel 不持有组织数据，只物化执行
+所需的 identity → handle 路由映射——注册即向 Authority 申请、物化由
+kernel 完成。
+
+**认证系统（框架自带，Django 式）**：Authority 是认证系统，grant 主体 =
+**position**（组织事实，换人不换岗），授权粒度 = **多粒度 scope**——
+`(position, device, token)`，token 为设备声明的不透明字符串（默认公开 /
+页级只读 / 角色 / 类 api-key 凭证），**语义由设备解释**，Authority 只存
+不解释。
 
 - 注册/撤销：`register_request` / `unregister_request`（身份 + 能力声明 +
-  position）。
-- **布线控制（grant 表）**：`grant_request(position, entity)` 登记可见性；
-  **deny-by-default**——注入内容 = agent 的 position 所布线设备的声明，
-  未布线的设备能力不可见。position 来自 config `options.position`
-  （单一声明源：kernel 注册与 Agent 进程同源派生）；直派形态
-  （agent 以自身为 position）为默认用法。
-- 注入：按布线汇总设备声明的工具条目（type=tool），经 `inject` 事件注入
-  agent 精炼层；设备卸载/撤销布线后重注入，diff 出 `evict`。
+  position + scope 声明）。
+- **布线（grant 表）**：`grant_request` / `revoke_request` 登记
+  `(position, device, token)`；**deny-by-default**——注入内容 = agent 的
+  position 的 grants 覆盖的设备/scope。安装时 `grants: [position...]`
+  展开为设备的**默认公开** scope（设备级便捷）；运行期 `grant_scope` /
+  `revoke_scope` 系统命令细粒度调整（重注入生效）。position 来自 config
+  `options.position`（单一声明源），直派形态为默认用法。
+- **Authority 自身 ACL**：命令面**仅内核可调**（外部事件响亮拒绝）；外部
+  使用经 kernel 系统命令（install/uninstall/grant/revoke），kernel 先查
+  `authorize_request`——position 为 `root`（隐式全权）或持有 org 设备上
+  对应 org scope（人事权，`org:install` / `org:grant` 等）；org scope 的
+  授予仅 root 可做。
+- **调用时认证（富化）**：kernel 路由到设备的事件附加调用者的
+  `auth: {position, scopes}`（宿主侧解析，无伪造面）——设备按自己的语义
+  裁决权限，解释权在设备。
+- 注入：按布线汇总设备声明的工具条目（type=tool）+ 已授 scope 的书面
+  说明（type=skill 条目）——"工具说明 + 技能记忆"作书面的使用与权限解释；
+  设备卸载/撤销布线后重注入，diff 出 `evict`。
 - **Journal 查询权限**（既定原则，最小示例未实现）：Journal 可被 agent
   查询（memory_search 等系统能力条目，associated 指向 journal），查询
   权限经由 Authority 管理——Agent 对 Journal 的读取不是无条件的。
@@ -93,14 +111,17 @@ identity → handle 路由映射——注册即向 Authority 申请、物化由 
 - **工作目录**：Root（agent）的私有文件系统区域（team 配置
   `options.workdir`），存放设备实现源码（`devices/*.py`）等运行期产物；
   源码即持久化形态——重启后重新 bootstrap 即恢复，无需重新生成。
-- **设备源码约定**：导出 `Device`（进程类）与 `TOOLS`（工具定义声明）。
-  `Device` 实例在**子进程内构造**（父进程只传装载描述，pickle 无关
-  类对象），spawn/fork 启动方式皆可。
-- **装卸**：Root 经 `install_device`（身份 + 源码路径 + grants 布线声明）
-  请求内核装载——动态加载 → Authority 登记 → 按 grants 布线 → 注入全部
+- **设备源码约定**：导出 `Device`（进程类）与 `TOOLS`（工具定义声明），
+  可选 `SCOPES`（权限范围声明：`{token, default, explanation}`——token 为
+  不透明权限名，default 标记安装时默认公开，explanation 为注入记忆的书面
+  说明）。`Device` 实例在**子进程内构造**（父进程只传装载描述，pickle
+  无关类对象），spawn/fork 启动方式皆可。
+- **装卸**：`install_device`（身份 + 源码路径 + grants 布线声明）请求内核
+  装载，**装卸权经 Authority 裁决**（root 或持有 `org:install`）——动态
+  加载 → Authority 登记 → grants 展开为默认公开 scope 布线 → 注入全部
   agent（内容按各 agent 的 position 过滤）；`uninstall_device` 卸载——
-  终止进程 → 撤销声明（连带撤销布线）→ 重注入（工具条目驱逐）。结果一律
-  ack 回告请求方，失败不击穿内核。
+  终止进程 → 撤销声明（连带撤销布线）→ 重注入（条目驱逐）。结果一律 ack
+  回告请求方，失败不击穿内核。
 - **bootstrap**：Root 扫描工作目录批量装载；收齐全部回执后向发起者
   报告结果（agent_result），空目录立即报告不挂起。
 - **身份保护**：内核态身份与 agent 身份不可被设备装卸顶替。
