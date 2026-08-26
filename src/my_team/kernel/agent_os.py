@@ -168,7 +168,8 @@ class AgentOS:
 
     async def _install(self, event: Event):
         """装载设备：加载工作目录源码（约定导出 Device、TOOLS、可选
-        SCOPES）→ 注册（Authority 登记 + kernel 物化路由）→ 按 payload 的
+        SCOPES）→ 确保数据区 workdir/data/<identity> 存在 → 注册（Authority
+        登记 + kernel 物化路由）→ 按 payload 的
         grants 展开设备的默认公开 scope 布线 → 注入全部 agent（内容按各
         agent 的 position 过滤）。装卸权经 Authority 裁决（root 或持有
         org:install）。任何一步失败都回告请求方（ok=False）——设备源码是
@@ -179,6 +180,10 @@ class AgentOS:
         try:
             if not isinstance(identity, str) or not identity:
                 raise ValueError("install_device 缺 identity")
+            if "/" in identity or ".." in identity:
+                raise ValueError(
+                    f"设备 identity 含路径分隔符或 '..': {identity!r}")
+            workdir = self._device_workdir(payload["source_file"])
             if not await self._authorize(event["source"], "install"):
                 raise ValueError("无设备装卸权（需 root 或 org:install）")
             grants = payload.get("grants")
@@ -193,6 +198,9 @@ class AgentOS:
             if identity in agents:
                 raise ValueError(f"agent 身份不可被设备顶替: {identity!r}")
             tools, scopes = self._load_module(identity, payload["source_file"])
+            # 数据区 = workdir/data/<identity>（"家目录"）：装载时确保存在；
+            # 重装幂等复用；后续失败留空目录可接受（不加回滚）。
+            os.makedirs(os.path.join(workdir, "data", identity), exist_ok=True)
             if isinstance(old, ProcessHandle):
                 # 先摘身份再终止：终止等待期间路由到该身份的事件被校验
                 # 响亮丢弃（target 未注册），旧进程残余产出被拒绝——
@@ -302,6 +310,21 @@ class AgentOS:
             "payload": {"command": "grant_request",
                         "position": position, "device": device,
                         "token": token}})
+
+    @staticmethod
+    def _device_workdir(source_file: str) -> str:
+        """校验规范布局并推导 workdir：<workdir>/devices/<name>.py（唯一做法）。
+
+        设备数据区 data/<identity> 以 workdir 为锚（约定即默认，零配置）；
+        中间目录名必须恰为 "devices"（bootstrap 的扫描布局），其它布局
+        一律拒绝并说明规范布局。
+        """
+        layout = os.path.dirname(source_file)
+        if os.path.basename(layout) != "devices":
+            raise ValueError(
+                f"设备源码须按规范布局 <workdir>/devices/<name>.py 落盘: "
+                f"{source_file!r}")
+        return os.path.dirname(layout)
 
     @staticmethod
     def _load_module(identity: str, path: str) -> tuple[list, list]:
