@@ -14,9 +14,10 @@ priority: medium
   load_spec → 沙箱参数（不 `--unshare-net`）；agent 经 config
   options.needs_network → `Agent.__init__` 新参数 → spawn lambda →
   UserModeProcess 构造参数（触碰 agent 构造面，非业务零改动）；
-- **编辑边界**：本卡只做参数通道（声明字段 + 传递 + 挂载参数构造），
-  不碰 sandbox-wrapper 的 run()/re-entry exec 骨架（process.py 内
-  不相交的区域）；若实现时边界重叠，改与 wrapper 串行。
+- **编辑边界**：本卡只做参数通道（声明字段 + 传递 + 挂载参数构造——
+  消费 sandbox-wrapper 已预留的 `_bwrap_args(..., needs_network=False)`
+  单函数），不碰 run()/re-entry exec 骨架与传输层（process.py 内
+  wrapper 已提交 b83bda6，基于其上编辑，串行无冲突）。
 
 ## 验收
 
@@ -25,4 +26,4 @@ priority: medium
 
 ## 依赖
 
-∥ sandbox-wrapper；被 bash-sandbox-adapt 消费。
+sandbox-wrapper（已提交 b83bda6，串行）；被 bash-sandbox-adapt 消费。
