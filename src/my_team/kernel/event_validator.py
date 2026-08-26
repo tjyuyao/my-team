@@ -1,11 +1,12 @@
 """Kernel：事件校验规则（协议层）。
 
 事件 = (source, target, kind, payload)。kind 分两级：
-- "system"（内核语义）：payload 须含 command（terminate）
+- "system"（内核语义）：payload 须含 command（terminate / install_device /
+  uninstall_device）
 - "application"（业务语义）：payload 任意，内核不校验
 """
 
-SYSTEM_COMMANDS = {"terminate"}
+SYSTEM_COMMANDS = {"terminate", "install_device", "uninstall_device"}
 KIND_LEVELS = {"system", "application"}
 
 

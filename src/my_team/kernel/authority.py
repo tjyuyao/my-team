@@ -3,15 +3,14 @@
 权威移交：身份与能力声明归 Authority 裁决登记；kernel 只物化路由映射
 （identity → handle），不持有组织数据。
 
-- 注册：register_request（身份 + 工具定义声明 + agent 标志）→ 登记。
+- 注册：register_request（身份 + 工具定义声明 + agent 标志）→ 登记；
+  unregister_request（身份）→ 撤销登记。
 - 注入：inject_request（agent）→ 汇总各设备声明的工具条目，diff 旧注入
   → inject 事件（entries 新增/更新 + evict 移除名单），路由给 agent。
-- 工具定义来自 team 配置（数据化）；热加载 = 配置变化后重新登记声明、
-  重新注入（diff 驱动增删）。
+- agents_request → 当前全部 agent 身份（kernel 装卸设备时据此重注入）。
+- 工具定义来自工作目录设备源码（数据化，随 install/uninstall 演化）。
 - 第一版无 ACL/布线控制：全部设备能力注入给全部 agent（结构预留）。
 """
-
-import uuid
 
 from my_team.kernel.process import VOID, KernelModeDevice
 
@@ -31,8 +30,16 @@ class Authority(KernelModeDevice):
                 "agent": bool(payload.get("agent")),
             }
             return VOID
+        if command == "unregister_request":
+            self._identities.pop(event["payload"]["identity"], None)
+            return VOID
         if command == "inject_request":
             return self._build_inject(event["payload"]["agent"])
+        if command == "agents_request":
+            return {"target": "kernel", "kind": "application",
+                    "payload": {"agents": [identity for identity, info in
+                                           self._identities.items()
+                                           if info["agent"]]}}
         return VOID
 
     def _build_inject(self, agent: str) -> dict:
@@ -58,8 +65,10 @@ class Authority(KernelModeDevice):
 
     @staticmethod
     def _entry(device_id: str, tool: dict) -> dict:
+        # entry_id 稳定：工具定义未变则身份不变（条目身份是引用锚点，
+        # 避免注入 churn 腐蚀 links/associated）。
         return {
-            "entry_id": str(uuid.uuid4()),
+            "entry_id": f"tool:{device_id}:{tool['name']}",
             "type": "tool",
             "content": {
                 "name": tool["name"],

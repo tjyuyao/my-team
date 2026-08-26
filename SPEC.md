@@ -14,11 +14,12 @@ AgentOS：agent 的操作系统，代码中如需简写统一使用 `aos` 而不
 
 ## 设计取向
 
-以**全面的动态性**为回报，接受反直觉的代价：系统层也是数据——工具定义
-（name/description/parameters/trigger）来自 team 配置、热加载生效；
-组织事实归 Authority（权威源），kernel 只物化路由映射；Process 是一套
-契约（respond: Event | VOID），用户态（子进程）与内核态（与 kernel
-同进程）同构、可迁移。每一步都离 AGI 近一步。
+以**全面的动态性**为回报，接受反直觉的代价：系统层也是数据——设备实现
+与工具定义（name/description/parameters/trigger）不在配置中静态声明，
+而由 Root 在工作目录生产、经 install/uninstall 事件热装卸（源码即持久化
+形态）；组织事实归 Authority（权威源），kernel 只物化路由映射并裁决装卸；
+Process 是一套契约（respond: Event | VOID），用户态（子进程）与内核态
+（与 kernel 同进程）同构、可迁移。每一步都离 AGI 近一步。
 
 ## 事件协议
 
@@ -45,10 +46,19 @@ AgentOS：agent 的操作系统，代码中如需简写统一使用 `aos` 而不
 
 ## 实现
 
-- `kernel/agent_os.py`：AgentOS。
+- `kernel/agent_os.py`：AgentOS（含内核可寻址：install/uninstall_device 裁决）。
 - `kernel/process.py`：Process。
 - `kernel/process_handle.py`：ProcessHandle 与 Emitter。
 - `kernel/event_protocol.py`：事件 TypedDict。
 - `kernel/event_validator.py`：校验规则集。
 - `device/llm/`：LLM 设备与请求/响应协议。
 - `main.py`：入口。
+
+## 工作目录
+
+- Root（agent）的私有文件系统区域（team 配置 `options.workdir`），
+  存放设备实现源码（`devices/*.py`）等运行期产物。
+- 设备源码约定导出 `Device`（UserModeProcess 子类）与 `TOOLS`
+  （工具定义声明）；Root 经 bootstrap 扫描目录并逐个 `install_device`
+  装载，`uninstall_device` 热卸载——文件即持久化形态，重启后重新
+  bootstrap 即恢复。

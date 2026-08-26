@@ -6,7 +6,8 @@
 - target: 发送方填，决定发给谁（内核按它路由）；必须指向已注册进程
   （否则校验失败，走 print 路径）
 - kind: 层级——"system"（内核语义）| "application"（业务语义）
-- payload: 任意；system 层约定 command 字段（terminate）
+- payload: 任意；system 层约定 command 字段（terminate / install_device /
+  uninstall_device）
 """
 
 from typing import Any, TypedDict, Union

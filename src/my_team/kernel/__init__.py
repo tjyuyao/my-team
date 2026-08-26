@@ -1,6 +1,6 @@
-"""Kernel — AgentOS（配置驱动）、事件协议、Process 两态、校验、内核态设备。"""
+"""Kernel — AgentOS（工作目录驱动）、事件协议、Process 两态、校验、内核态设备。"""
 
-from my_team.kernel.agent_os import AgentOS, DEVICE_TYPES
+from my_team.kernel.agent_os import AgentOS, PROCESS_TYPES
 from my_team.kernel.authority import Authority
 from my_team.kernel.event_protocol import (
     VOID,
@@ -22,7 +22,7 @@ from my_team.kernel.process_handle import ProcessHandle
 
 __all__ = [
     "AgentOS",
-    "DEVICE_TYPES",
+    "PROCESS_TYPES",
     "Authority",
     "Journal",
     "BucketDispatcher",

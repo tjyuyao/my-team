@@ -56,11 +56,12 @@ MemoryEntry:
 **工具条目（type=tool）的动态性**：
 
 - 工具 = 设备能力打包成的工具定义，作为条目存于精炼层——"设备
-  记忆注入"的结果（设备注册 + wiring 时写入），不是代码常量。
-- **配置驱动 + 热加载**：工具定义（name/description/parameters/trigger）
-  来自 team 配置（数据化）；配置变化 → Authority 重新声明并重注入
-  （inject/evict 事件）→ 工具集合随配置演化，无需重启。能力在设备
-  代码，暴露在配置。
+  记忆注入"的结果（设备装载 + wiring 时写入），不是代码常量。
+- **工作目录驱动 + 热装卸**：设备实现与工具定义（name/description/
+  parameters/trigger）同处工作目录（`devices/*.py`，Root 生产，源码即
+  持久化）；bootstrap 扫描目录 → install_device 装载 → Authority 注入
+  （inject/evict 事件）→ 工具集合随装卸演化，无需重启。能力在设备
+  源码，暴露在注入条目。
 - `tools=` 每次决策从工具条目动态生成：常驻（priority<10）∪
   召回命中（≥10）的 tool 条目，content 原样进工具列表。
 - 分发查条目：tool_call.name → 匹配 tool 条目 content.name →
