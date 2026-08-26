@@ -180,4 +180,7 @@ state：`running` / `done` / `killed` / `expired`（queued 无 id 暴露，不�
   增量扫描机制，后续版本。
 - **bash_list（job 盘点）**：job 归 source，agent 只关心自己的 job，暂缓。
 - **remind（到期提醒）**：与 deadline 语义重叠，已从协议移除，不再考虑。
-- **沙箱**：bwrap + setrlimit（防进程组逃逸与资源失控），未实现。
+- **沙箱**：kernel 层已实现（bwrap 固定矩阵 + 传输层重写 + 统一身份模型）；
+  本设备已声明 `INSTANCE = "per-agent"`（挂载 = 绑定 agent 的家 + 源码区
+  只读）——bash 命令在沙箱内执行的**语义适配**（cwd 落绑定 agent 家、
+  /dev 只读矩阵后果）由 bash-sandbox-adapt 卡承接。
