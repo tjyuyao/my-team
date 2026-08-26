@@ -35,7 +35,7 @@ from my_team.kernel.event_validator import (
     validate_event,
 )
 from my_team.kernel.journal import Journal
-from my_team.kernel.process import KernelModeDevice, BucketDispatcher
+from my_team.kernel.process import KernelModeDevice, UserModeProcess, BucketDispatcher
 from my_team.kernel.process_handle import ProcessHandle
 
 # 进程类型注册表：config "type" → 进程类（构造参数经 options）。
@@ -147,13 +147,19 @@ class AgentOS:
             agents = await self._agents()
             if identity in agents:
                 raise ValueError(f"agent 身份不可被设备顶替: {identity!r}")
-            device_cls, tools = self._load_module(identity, payload["source_file"])
+            tools = self._load_module(identity, payload["source_file"])
             if isinstance(old, ProcessHandle):
                 old.terminate()  # join 阻塞内核循环（≤5s），超时后旧进程可能
                 # 存活并同身份并存——第一版已知边界
             options = payload.get("options") or {}
-            await self.register(identity, lambda emit: device_cls(emit, **options),
-                                tools=tools)
+            # 壳进程只携带装载描述；Device 实例在子进程内构造
+            # （UserModeProcess._run_loaded），spawn/fork 皆可
+            await self.register(
+                identity,
+                lambda emit, p=payload["source_file"], o=options,
+                i=identity: UserModeProcess(
+                    emit, o.get("max_concurrent_sources", 0), load_spec=(i, p, o)),
+                tools=tools)
             for agent in agents:
                 await self._inject(agent)
             ok, error = True, None
@@ -195,11 +201,11 @@ class AgentOS:
                                           ok, error))
 
     @staticmethod
-    def _load_module(identity: str, path: str):
-        """按文件路径加载设备模块（模块名带随机段：重装不命中旧缓存）。
+    def _load_module(identity: str, path: str) -> list:
+        """校验并读取设备源码定义（约定导出 Device 与 TOOLS），返回 TOOLS。
 
-        依赖 fork 启动方式（Device 实例在父进程构造、经进程继承分发）；
-        sys.modules 条目不清理（随机段保证永不冲突）——第一版已知边界。
+        仅父进程裁决用（模块可加载、定义齐全）；Device 实例不在此构造，
+        由子进程按装载描述自行加载（传输无关，spawn/fork 皆可）。
         """
         if not os.path.isfile(path):
             raise FileNotFoundError(f"设备源码不存在: {path!r}")
@@ -208,7 +214,10 @@ class AgentOS:
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
-        return module.Device, module.TOOLS
+        for attr in ("Device", "TOOLS"):
+            if not hasattr(module, attr):
+                raise AttributeError(f"设备源码缺导出 {attr!r}: {path!r}")
+        return module.TOOLS
 
     async def _agents(self) -> list[str]:
         """向 Authority 查询全部 agent 身份（组织事实归 Authority）。"""

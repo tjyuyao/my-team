@@ -74,6 +74,8 @@ identity → handle 路由映射——注册即向 Authority 申请、物化由 
   `options.workdir`），存放设备实现源码（`devices/*.py`）等运行期产物；
   源码即持久化形态——重启后重新 bootstrap 即恢复，无需重新生成。
 - **设备源码约定**：导出 `Device`（进程类）与 `TOOLS`（工具定义声明）。
+  `Device` 实例在**子进程内构造**（父进程只传装载描述，pickle 无关
+  类对象），spawn/fork 启动方式皆可。
 - **装卸**：Root 经 `install_device`（身份 + 源码路径）请求内核装载——
   动态加载 → Authority 登记 → 注入全部 agent；`uninstall_device` 卸载——
   终止进程 → 撤销声明 → 重注入（工具条目驱逐）。结果一律 ack 回告请求方，

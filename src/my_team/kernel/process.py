@@ -88,21 +88,52 @@ class UserModeProcess(mp.Process):
     """用户态进程：真实子进程，inbox 经 mp.Queue，同源串行/跨源并行。
 
     终止 = system 层 payload.command=="terminate" 的事件。
+    动态装载设备（load_spec 非空）：实例在子进程内构造——传输的只是
+    可 pickle 的装载描述（identity/path/options），不是类对象，故
+    spawn/fork 皆可；装载失败 = 进程崩溃（stderr 响亮），属进程级
+    故障而非内核裁决。
     """
 
-    def __init__(self, emit, max_concurrent_sources):
+    def __init__(self, emit, max_concurrent_sources, *, load_spec=None):
         super().__init__()
         self.inbox: mp.Queue[Event] = mp.Queue()  # 宿主 → 进程
         self.emit = emit  # 进程 → 宿主（Emitter，source 由宿主注入）
         self.max_concurrent_sources = max_concurrent_sources
+        self._load_spec = load_spec  # (identity, module_path, options) | None
 
     async def respond(self, event: Event) -> Event | VOID:
         """处理单个事件，返回产出事件或 VOID（子类实现）。"""
         raise NotImplementedError
 
     def run(self):
-        """子进程主循环：asyncio 驱动，按 source 分桶并行处理。"""
-        asyncio.run(self._serve())
+        """子进程主循环：动态装载设备先自举（子进程内加载并构造实例），
+        再按 source 分桶 serve。"""
+        if self._load_spec is not None:
+            self._run_loaded()
+        else:
+            asyncio.run(self._serve())
+
+    def _run_loaded(self):
+        """子进程内装载设备：importlib 加载工作目录源码，构造 Device 实例
+        并接管宿主投递的 inbox 后由其自身 serve。"""
+        import importlib.util
+        import sys
+        import traceback
+        import uuid
+
+        identity, path, options = self._load_spec
+        try:
+            name = f"team_device_{identity}_{uuid.uuid4().hex[:8]}"
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            device = module.Device(self.emit, **options)
+            device.inbox = self.inbox  # 复用宿主投递的队列（其自身新建的弃用）
+            asyncio.run(device._serve())
+        except Exception:
+            traceback.print_exc()
+            raise SystemExit(1)
 
     async def _serve(self):
         dispatcher = BucketDispatcher(self.respond, self._emit, self.max_concurrent_sources)
