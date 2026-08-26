@@ -8,7 +8,7 @@
 
 SYSTEM_COMMANDS = {"terminate", "install_device", "uninstall_device",
                   "grant_scope", "revoke_scope"}
-# 这些系统命令仅可寻址 kernel（terminate 经宿主直投 inbox，不走校验）
+# 这些系统命令仅可寻址 kernel（terminate 经宿主投递进程通道，不走校验）
 KERNEL_COMMANDS = {"install_device", "uninstall_device", "grant_scope",
                    "revoke_scope"}
 KIND_LEVELS = {"system", "application"}

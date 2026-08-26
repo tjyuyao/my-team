@@ -1,7 +1,8 @@
 """Kernel：AgentOS 与事件调度。
 
 统一通信协议：事件 = (source, target, kind, payload)。
-- source: 宿主侧（Emitter）注入进程产出事件，值为该进程身份（不可冒充）
+- source: 宿主读侧盖章（reader 按出站队列归属注入）进程产出事件，值为
+  该进程身份（进程内不存在可改写身份字段）
 - target: 发送方填，决定发给谁（内核按它路由）；必须指向已注册进程
 - kind: "system"（内核语义，payload.command）| "application"（业务语义）
 - payload: 任意；system 层约定 command（terminate/install_device/uninstall_device）
@@ -76,7 +77,7 @@ class AgentOS:
             )
 
     async def _kernel_emit(self, source: str, event: Event):
-        """内核侧产出事件：source 由内核指定（对应用户态 Emitter 的宿主注入）。"""
+        """内核侧产出事件：source 由内核指定（对应用户态的宿主读侧盖章）。"""
         event["source"] = source
         await self._process_event(event)
 

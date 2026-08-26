@@ -52,7 +52,9 @@ Process 是一套契约（respond: Event | VOID），用户态（子进程）与
   终止契约：`await terminate(timeout)` 返回时进程必已死亡——投终止事件、
   异步等待（不阻塞内核循环）、超时强杀后收尸；**绝不同身份并存**（宿主
   仅以 identity 区分进程，同 identity 双活即协议污染）。
-- `Emitter`：进程产出通道，由它注入事件来源。
+- **出站（宿主读侧盖章）**：进程产出经 socketpair（fd 继承）上行，宿主
+  reader 按队列归属盖章注入 source——进程内不存在可改写身份字段；宿主
+  直投（显式 source）保留。
 
 事件只来自进程的产出。
 
@@ -143,12 +145,12 @@ kernel 完成。
   他人数据区不可见；设备进程可读自己的源码（加载实现用）。制造例外：
   agent 写 `devices/*.py` 发生在自己的工作区（数据面操作），装好后进程
   即被隔离。
-- **沙箱（方向，v0.14）**：所有设备进程 bwrap + setrlimit（user + pid
-  namespace，无需 root）——系统路径只读挂载、自己的数据区为唯一写根、
-  默认禁网（需网络设备显式声明）、userns/pidns 阻断对兄弟进程与内核的
-  信号/内存攻击（Yama 兜底 ptrace）。**沙箱 = 进程级隔离面，固定矩阵
-  （家 + 只读系统），不承载权限**：没有按 position 的挂载物化，设备
-  进程永远不是 root。
+- **沙箱（v0.14 已实现）**：所有设备进程及 agent 默认 bwrap + setrlimit
+  （user + pid + ipc namespace，无需 root）——系统路径只读挂载、自己的
+  数据区为唯一写根、默认禁网（需网络设备显式声明，声明机制后续卡）、
+  userns/pidns/ipcns 阻断对兄弟进程与内核的信号/内存/System V IPC 攻击
+  （Yama 兜底 ptrace）。**沙箱 = 进程级隔离面，固定矩阵（家 + 只读系统），
+  不承载权限**：没有按 position 的挂载物化，设备进程永远不是 root。
 - **权限与沙箱解耦（调用级）**：跨区数据访问一律走"调用 → 目标设备按
   发起 Agent 的权限裁决"（root 治理数据经数据服务设备查询，不是 root
   进程直接碰文件）。设备间调用（未来）：**设备不能发起调用**，只能作为
@@ -202,7 +204,8 @@ kernel 完成。
 
 - `kernel/agent_os.py`：AgentOS（含内核可寻址：install/uninstall_device 裁决）。
 - `kernel/process.py`：Process。
-- `kernel/process_handle.py`：ProcessHandle 与 Emitter。
+- `kernel/process_handle.py`：ProcessHandle 与 ChildWriter（出站写入器）。
+- `kernel/sandbox_entry.py`：bwrap 沙箱 re-entry（setrlimit + 设备/agent serve）。
 - `kernel/event_protocol.py`：事件 TypedDict。
 - `kernel/event_validator.py`：校验规则集。
 - `device/llm/`：LLM 设备与请求/响应协议。

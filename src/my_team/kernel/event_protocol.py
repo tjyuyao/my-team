@@ -1,8 +1,8 @@
 """Kernel：事件协议（TypedDict 约定）。
 
 事件 = (source, target, kind, payload)。
-- source: 宿主侧（Emitter）注入进程产出事件，值为该进程身份（宿主
-  注入保证不可冒充）
+- source: 宿主读侧盖章（reader 按出站队列归属注入）进程产出事件，值为
+  该进程身份（进程内不存在可改写身份字段）
 - target: 发送方填，决定发给谁（内核按它路由）；必须指向已注册进程
   （否则校验失败，走 print 路径）
 - kind: 层级——"system"（内核语义）| "application"（业务语义）
