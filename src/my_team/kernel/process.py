@@ -170,6 +170,7 @@ class UserModeProcess(mp.Process):
         env[SANDBOX_SENTINEL] = "1"
         env["PYTHONPATH"] = os.pathsep.join(sys.path)  # re-entry 可 import
         env["PYTHONDONTWRITEBYTECODE"] = "1"  # 只读系统下不写 __pycache__
+        env["MY_TEAM_DATA_DIR"] = writable[0]  # 该进程的数据家（唯一可写锚点）
         os.execvpe(bwrap, _bwrap_args(writable, readonly, read_fd,
                                        self._needs_network()), env)
         raise SystemExit("execvpe 失败")  # 理论不可达（exec 成功即替换映像）
@@ -265,6 +266,9 @@ def _bwrap_args(writable: list[str], readonly: list[str], state_fd: int,
     args = [
         "bwrap",
         "--ro-bind", "/", "/",          # 系统只读
+        "--dev", "/dev",                # devtmpfs：/dev/null 等字符设备可写
+        # （--ro-bind / / 继承的 /dev 在 userns 下只读；--dev 构造新 devtmpfs，
+        # 须置于 --ro-bind / / 之后以覆盖 /dev 挂载点，实测确认顺序有效）
         "--proc", "/proc",              # 独立 /proc（pidns 内视图）
         "--tmpfs", "/tmp",              # 可写临时区
         "--tmpfs", data_root,           # 掩蔽数据根下其它家（不可见）

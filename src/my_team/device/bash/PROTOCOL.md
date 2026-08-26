@@ -25,7 +25,7 @@ Bash 设备是设备进程：承接命令执行请求，以 job 池管理前台/
   完整输出保留在缓冲，可经 bash_status 按 offset 续读。缓冲超上限丢头部，
   旧 offset 失效时 status 返回 reset=true。
 - **无孤儿**：每个 job 独立进程组（start_new_session）；设备被终止时连坐
-  杀全部 job 进程组。限制：命令内部 setsid 可逃出进程组范围（沙箱属后续项）。
+  杀全部 job 进程组（详见下方"沙箱语义"节）。
 
 ## 事件
 
@@ -46,7 +46,7 @@ Bash 设备是设备进程：承接命令执行请求，以 job 池管理前台/
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | cmd | str | 要执行的命令（必填） |
-| cwd | str | 工作目录，可选；缺省继承设备进程工作目录 |
+| cwd | str | 工作目录，可选；缺省 = 数据家（MY_TEAM_DATA_DIR，绑定 agent 的家） |
 | timeout | float | 转后台阈值（秒）；缺省用设备默认；0 = 立即转后台 |
 | deadline | float | 兜底长超时（秒，请求发出起算）；缺省用设备默认；须 ≤ max_deadline |
 
@@ -174,13 +174,51 @@ state：`running` / `done` / `killed` / `expired`（queued 无 id 暴露，不�
 - **输出内存**：每 job 缓冲 ≤ output_cap，完成保留 ≤ completed_cap 条——
   大输出受此约束，内存可控。
 
+## 沙箱语义
+
+bash 设备是 `INSTANCE = "per-agent"` 的设备进程，经 bwrap 固定矩阵沙箱
+启动（`kernel/process.py` `_sandbox_reexec`）。所有 bash 命令作为该进程的
+子进程在同一沙箱内执行（`asyncio.create_subprocess_shell`，继承沙箱上下文）。
+
+**固定矩阵语义**（对所有进程一致，无 per-position 物化）：
+
+- **系统只读**：`--ro-bind / /`，根文件系统只读挂载；
+- **`/dev` = devtmpfs**：`--dev /dev`（置于 `--ro-bind / /` 之后覆盖 /dev
+  挂载点）构造全新 devtmpfs，`/dev/null` 等字符设备可写——bash 命令中
+  `>/dev/null`、`open('/dev/null', 'r+')` 均正常工作；
+- **`/tmp` 可写**：`--tmpfs /tmp`；
+- **数据根掩蔽**：`--tmpfs <data_root>`，沙箱内除自己的家与源码区外，
+  数据根下无其它路径——其它 agent/设备的家物理不可见，设备数据只经接口暴露；
+- **挂载锚点（按身份类型，静态出生定格）**：
+  - 家（绑定 agent 的家 `data/<agent-id>`）**可写**（命令落 agent 家）；
+  - 设备源码区 `data/devices` **只读**（加载实现用）；
+- **默认 cwd = 数据家**：内核在 `_sandbox_reexec` 的 env 里注入
+  `MY_TEAM_DATA_DIR = writable[0]`（绑定 agent 的家）；`BashDevice.__init__`
+  读取后作为 `self.default_cwd`；`bash_run` 命令不指定 `cwd` 时以此为 cwd，
+  指定则用指定值（沙箱矩阵约束其可达范围，系统路径只读，跨家不可见）。
+  环境变量随 bash 子命令继承（设备进程内本就继承，可接受）；
+- **默认禁网**：`--unshare-net`；设备经安装 payload `options.needs_network=true`
+  声明后方保留网络面（进程级资源开关，非权限 scope）；
+- **ns 隔离**：`--unshare-user`（永不 root）、`--unshare-pid`（pidns，不可见
+  宿主/兄弟进程）、`--unshare-ipc`（封 System V IPC）；
+- **`--die-with-parent`**：bwrap 宿主杀死时沙箱连坐。
+
+**进程组连坐与沙箱强杀（互为冗余）**：
+
+bash 设备对每个 job 独立创建进程组（`start_new_session=True`），终止 /
+deadline 到期时以 `killpg(SIGKILL)` 连坐整个进程组（L4 门控）——这是
+**单 job 资源控制手段**，防止 job 子进程成孤儿。
+
+命令内部可调用 `setsid` 逃出当前进程组，但**逃逸不出沙箱**：新会话的进程
+仍在 bwrap 的 pidns 内（隔离的 PID namespace，看不到宿主进程，亦无法信号
+宿主）。设备进程终止 → bwrap（沙箱 PID 1）消亡 → 整个 pidns 内所有进程
+强杀（内核行为，无需应用层干预）；加之 `--die-with-parent` 保证 bwrap
+随宿主内核进程一同消亡。因此四级门控（killpg）与沙箱 pidns 强杀**互为
+冗余**，不冲突：前者精细控制单 job，后者兜底整 ns。
+
 ## 待定项
 
 - **watch（输出 marker 通知）**：输出出现指定字符串即通知——依赖输出流
   增量扫描机制，后续版本。
 - **bash_list（job 盘点）**：job 归 source，agent 只关心自己的 job，暂缓。
 - **remind（到期提醒）**：与 deadline 语义重叠，已从协议移除，不再考虑。
-- **沙箱**：kernel 层已实现（bwrap 固定矩阵 + 传输层重写 + 统一身份模型）；
-  本设备已声明 `INSTANCE = "per-agent"`（挂载 = 绑定 agent 的家 + 源码区
-  只读）——bash 命令在沙箱内执行的**语义适配**（cwd 落绑定 agent 家、
-  /dev 只读矩阵后果）由 bash-sandbox-adapt 卡承接。

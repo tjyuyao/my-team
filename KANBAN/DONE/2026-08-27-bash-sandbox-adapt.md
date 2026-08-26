@@ -1,5 +1,6 @@
 ---
 kind: task
+status: completed
 phase: v0.14
 source: SPEC.md
 priority: medium
@@ -42,3 +43,19 @@ bash 命令在沙箱内执行（设备进程已在 bwrap 固定矩阵内，其 P
 
 sandbox-wrapper（已提交 b83bda6）、network-declaration（待实现，串行在前）；
 被 sandbox-verification 依赖。
+
+## 完成
+
+- 实现：矩阵加 `--dev /dev`（devtmpfs 覆盖 /dev，`>/dev/null` 与
+  `open('/dev/null','r+')` 可用；实测 `--bind /dev/null` 无效，`--dev`
+  有效且须置于 `--ro-bind / /` 之后）；`_sandbox_reexec` env 注入
+  `MY_TEAM_DATA_DIR = writable[0]`（各类身份均为该进程数据家）；
+  bash 设备 `default_cwd = os.environ.get(MY_TEAM_DATA_DIR)`，`bash_run`
+  不指定 cwd 时默认落数据家（沙箱外直接实例化行为不变）；PROTOCOL.md
+  增"沙箱语义"节（setsid 逃逸由 pidns + die-with-parent 收敛，四级门控
+  与沙箱强杀互为冗余）。
+- 审查：PASS-with-nits（主 agent + 独立 subagent 双审）；修补随收尾
+  （恢复 PROTOCOL.md `## 待定项` 节 watch/bash_list/remind 条目、文件
+  末尾空白、测试 [4] 改用帧 ok 字段断言、补 [5] 跨家掩蔽验证）。
+- 故事测试 `tmp/check_bash_sandbox.py`：默认 cwd=数据家、/dev/null 可写、
+  写不出数据区（系统+源码区）、禁网、跨家不可见——全过；全量回归 & lint 0。

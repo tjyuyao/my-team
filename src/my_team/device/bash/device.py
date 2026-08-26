@@ -80,6 +80,7 @@ class BashDevice(UserModeProcess):
         self._pending: dict[str, deque[Job]] = {}  # 同源排队（queued）
         self._source_busy: dict[str, bool] = {}   # 同源串行：source → 有 job 未清空
         self._seq = 0
+        self.default_cwd = os.environ.get("MY_TEAM_DATA_DIR")  # 数据家（沙箱注入）
 
     # ------------------------------------------------------------------
     # 请求分发
@@ -114,7 +115,7 @@ class BashDevice(UserModeProcess):
         now = time.monotonic()
         source = event["source"]
         job = Job(f"j{self._seq}", source, payload.get("tool_call_id"), cmd,
-                  payload.get("cwd"), created_at=now,
+                  payload.get("cwd") or self.default_cwd, created_at=now,
                   deadline_at=now + deadline, timeout=timeout)
         self._seq += 1
         asyncio.create_task(self._deadline_watch(job))
