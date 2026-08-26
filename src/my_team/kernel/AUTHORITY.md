@@ -20,8 +20,8 @@ Authority 是内核态设备（与 kernel 同进程，可信系统服务），�
     `{token, default, explanation}`。**token 是不透明字符串**（页级只读、
     角色、类 api-key 凭证……语义设备自定，Authority 不解释）。
   - `agent`：布尔。True = 认知主体，False = 设备。
-  - `position`：**认证主体**（岗位）。agent 必填；设备可选（二级代理等
-    需参与认证的身份也带 position）。
+  - `position`：**认证主体**（岗位）。仅 agent 注册（权限主体只有
+    Agent；设备是执行载体，无权限身份，见 §2 原则 7）。
 - `_grants: {position → set[(device, token)]}`——布线表（grant 表）。
   授权粒度是 `(position, device, token)`，不限于设备级。
 - `_injected: {agent → {name → entry}}`——上次注入快照，diff 出 evict。
@@ -56,15 +56,22 @@ Authority 是内核态设备（与 kernel 同进程，可信系统服务），�
    变更都是数据操作（命令 + 动态授权），不存在"编辑配置"的合法形态。
    现状为过渡态：种子充当幂等安装脚本（每次重启重放）；"种子只生效
    一次"需运行期状态持久化（开放问题 7，方向）。
-6. **FS 权限物化（方向，未实现）**。沙箱挂载矩阵 = Authority 授予的 FS
-   权限在进程出生时物化（Linux 多用户式）：数据区=家目录、root 越权
-   （uid 0 语义）、跨区访问=显式 grant（数据区是可授予资源）、出生定格
-   （授权变更需重装进程生效）。
+6. **沙箱与权限解耦（方向，v0.14）**。沙箱 = 进程级隔离面，固定矩阵
+   （自己的家 + 只读系统 + 禁网默认 + setrlimit + userns/pidns），
+   **不承载权限**——无按 position 的挂载物化，设备进程永远不是 root。
+   跨区数据访问 = 调用级裁决（目标设备按发起 Agent 的权限）。
+7. **权限主体 = Agent（Linux 用户语义）**。执行动作的一定是发起调用的
+   Agent；设备是执行载体（不注册 position）。需要自主权限的服务 =
+   专门的服务账户 Agent。Agent 间委托 = 请求，被委托者事先具备权限
+   （无权限借出）。富化上下文 = 发起 Agent 的 (position, scopes)。
+   设备间调用（未来）：设备不能发起，只能作为某 Agent 调用的执行延伸，
+   转发携带 origin（发起者声明），被调方按 origin 裁决。
 
 ## 3. 调用时认证（富化）——已定
 
 kernel 路由到设备（非 agent）的事件时，经 Authority 进程内直调解析调用者
-的 `auth = {position, scopes}`，附加到事件上再投递。宿主侧解析、无伪造面、
+（= 发起 Agent；当前直接调用者即 Agent，语义一致）的 `auth = {position,
+scopes}`，附加到事件上再投递。宿主侧解析、无伪造面、
 零 IPC（Authority 与 kernel 同进程）。设备本地做 scopes 成员检查
 （`page:42:read ∈ scopes`）即可裁决。**自查通道未建**（YAGNI）：富化 +
 本地成员检查与自查表达力相同，且更经济；将来若出现"非调用时查询/查其他
@@ -133,9 +140,11 @@ Grant(position, entity)）+ 岗位图 + Authority 调用时裁决。当前实现
 10. **org scope 词汇**——当前定义了 `install` / `grant`（已用）与
     `register` / `inject` / `agents`（词汇预留，无命令消费）。需要时
     接入。
-11. **数据区跨区 FS 授权（方向）**——数据区作为可授予资源
-    （`data:read`/`data:write`），沙箱物化时消费；随具体需求引入，本轮
-    不实现。
+11. **设备间调用与 origin（未来）**——设备不能发起调用，只能作为某
+    Agent 调用的执行延伸；转发携带 origin（最初发起 Agent 的声明），
+    被调方按 origin 裁决；信任模型 = 设备是发起者的可信执行载体。
+    当前无设备间调用用例，机制随需求引入（跨区数据访问走调用级裁决，
+    不做 FS 物化授权）。
 
 ## 8. 已验证的行为（故事测试）
 
