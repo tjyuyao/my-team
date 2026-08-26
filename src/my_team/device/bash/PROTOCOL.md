@@ -46,12 +46,20 @@ Bash 设备是设备进程：承接命令执行请求，以 job 池管理前台/
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | cmd | str | 要执行的命令（必填） |
-| cwd | str | 工作目录，可选 |
+| cwd | str | 工作目录，可选；缺省继承设备进程工作目录 |
 | timeout | float | 转后台阈值（秒）；缺省用设备默认；0 = 立即转后台 |
 | deadline | float | 兜底长超时（秒，请求发出起算）；缺省用设备默认；须 ≤ max_deadline |
 
 校验：`0 ≤ timeout ≤ deadline ≤ max_deadline`，且运行中 job 数 < max_jobs；
 非法即 bash_error（拒绝，不钳制）。
+
+**bash_run 应答矩阵**（请求方据此决定是否等待/何时干预）：
+
+| 应答 | 条件 | 后续 |
+| --- | --- | --- |
+| bash_result | timeout 窗口内完成 | 无（终态已达） |
+| bash_backgrounded（含 job_id） | 超时转后台 / timeout=0 | 尾部 result 事件；此时起可 status/kill/extend |
+| VOID | 同源排队受理（无 job_id） | 启动时 emit backgrounded（含 job_id），此后可控 |
 
 ### bash_error（设备 → 请求方）
 
@@ -105,8 +113,7 @@ expired/killed=false。
 
 offset：上次读取结束位置（**逻辑位置**，自输出开头计；缓冲裁剪对请求方
 透明）；越界（小于已丢头部或超过总长，含缓冲裁剪后失效）返回 reset=true，
-并以响应中的 offset 为当前可读起点续读。排队中 job（state=queued）可查
-状态（无输出）。
+并以响应中的 offset 为当前可读起点续读。
 
 ### bash_status_result（设备 → 请求方）
 
@@ -117,8 +124,10 @@ offset：上次读取结束位置（**逻辑位置**，自输出开头计；缓�
              "tool_call_id": "t1"}}
 ```
 
-state：`queued` / `running` / `done` / `killed` / `expired`。output 为自
-offset 起的增量（≤64KB，truncated 标记未完）；下次续读传回新 offset。
+state：`running` / `done` / `killed` / `expired`（queued 无 id 暴露，不可
+查询）。output 为自 offset 起的增量（≤64KB，truncated 标记未完）；下次
+续读传回新 offset。duration 与 deadline_left 均为自请求发出的剩余语义
+（秒）。
 
 ### bash_kill（请求方 → 设备）
 
@@ -126,8 +135,7 @@ offset 起的增量（≤64KB，truncated 标记未完）；下次续读传回�
 {"payload": {"command": "bash_kill", "job_id": "j0", "tool_call_id": "t1"}}
 ```
 
-杀进程组（排队中 job 则从队列移除）；成功即 VOID（无同步应答），终态
-回执 = 后续 bash_result(killed=true)。
+杀进程组；成功即 VOID（无同步应答），终态回执 = 后续 bash_result(killed=true)。
 
 ### bash_extend（请求方 → 设备）
 
@@ -136,7 +144,22 @@ offset 起的增量（≤64KB，truncated 标记未完）；下次续读传回�
              "tool_call_id": "t1"}}
 ```
 
-延长 deadline（含排队中 job，仍受 max_deadline 硬顶约束）；成功即 VOID。
+延长 deadline（仍受 max_deadline 硬顶约束）；成功即 VOID。
+
+## 设备配置（构造参数，全部必填无默认）
+
+经工作目录装载时由 install_device 的 options 传入；构造时校验不变量
+`timeout < deadline ≤ max_deadline`，违反即装载失败（响亮）。
+
+| 参数 | 说明 |
+| --- | --- |
+| max_concurrent_sources | 跨 source 并发的 respond 上限（0 = 无限；内核进程级） |
+| max_jobs | 同时运行的 job 数上限（跨 source 共享；排队 job 不计入，超限拒绝新请求） |
+| timeout | 默认转后台阈值（秒） |
+| deadline | 默认兜底长超时（秒） |
+| max_deadline | 请求与 extend 均不可突破的硬顶（秒） |
+| output_cap | 每 job 输出缓冲上限（字节，超限丢头部） |
+| completed_cap | 完成保留的 job 条数上限（可回头 status 查询） |
 
 ## 边界（第一版）
 
