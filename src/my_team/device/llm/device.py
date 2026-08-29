@@ -36,8 +36,10 @@ LLM_RESULT = "llm_result"
 class LLMDevice(UserModeProcess):
     """LLM 服务进程：收 llm_request 事件，调用 provider，产出 llm_result。"""
 
-    def __init__(self, emit, provider_factory, max_concurrent_sources):
-        super().__init__(emit, max_concurrent_sources)
+    def __init__(self, emit, *, runtime_root, identity, provider_factory=None,
+                 max_concurrent_sources=0):
+        super().__init__(emit, max_concurrent_sources, runtime_root,
+                         identity=identity)
         self.provider_factory = provider_factory
         self._provider = None
 

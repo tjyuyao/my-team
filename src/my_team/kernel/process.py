@@ -15,8 +15,8 @@ Process = 一套契约：``async respond(event) -> Event | VOID``。
 
 沙箱（固定矩阵，不承载权限）：设备（load_spec 非空）与 agent（实例有
 workdir 属性）默认进沙箱——run() 检测未沙箱（MY_TEAM_SANDBOXED 哨兵）→
-装载状态 pickle 到继承 fd → execv bwrap（只读系统/挂载矩阵双锚点：家 +
-源码区，按身份类型展开可写性/默认禁网/ipc 隔离）→ 沙箱内 sandbox_entry
+装载状态 pickle 到继承 fd → execv bwrap（只读系统 + 私有 home 单锚点，
+默认禁网/ipc 隔离）→ 沙箱内 sandbox_entry
 re-entry 直接 serve（不重跑 spawn_main、不重跑入口模块顶层）。
 
 共用 ``BucketDispatcher``：按 source 分桶——同源串行保序、跨源并行。
@@ -28,6 +28,7 @@ import os
 import pickle
 import shutil
 import sys
+from abc import ABC, abstractmethod
 from typing import Protocol
 
 from .event_protocol import VOID, Event
@@ -37,10 +38,50 @@ from .event_protocol import VOID, Event
 SANDBOX_SENTINEL = "MY_TEAM_SANDBOXED"
 
 
-class Process(Protocol):
-    """Process 契约：respond 处理事件，产出事件或 VOID。"""
+class ProcessBase(ABC):
+    """所有进程（内核态/用户态）的统一基类。
 
-    async def respond(self, event: Event) -> Event | VOID: ...
+    职责：
+    - identity 校验（拒路径分隔符、'.'、'..'、'kernel'）
+    - home_dir 绑定（runtime_root/home/<identity>/）
+    - 路径逃逸检查（_validate_path）
+
+    权限模型：
+    - 普通进程：只能写自己的 home_dir
+    - Maintainer：可额外写被授权设备的 home（maintenance_device）
+    - root：完整 home 路径权限（AgentOS 层裁决，非进程层）
+
+    Maintainer 和 root 的例外由上层（AgentOS）处理，ProcessBase
+    只强制基线约束。
+    """
+
+    def __init__(self, identity: str, runtime_root: str):
+        self._validate_identity(identity)
+        self.identity = identity
+        self._runtime_root = os.path.realpath(runtime_root)
+        self._home_dir = os.path.join(self._runtime_root, "home", identity)
+        os.makedirs(self._home_dir, exist_ok=True)
+
+    @staticmethod
+    def _validate_identity(identity: str):
+        if not identity or "/" in identity or ".." in identity                 or identity in (".", "kernel"):
+            raise ValueError(f"identity 非法: {identity!r}")
+
+    @property
+    def home_dir(self) -> str:
+        return self._home_dir
+
+    def _validate_path(self, path: str):
+        """路径必须在 home_dir 内，拒绝逃逸。"""
+        real = os.path.realpath(path)
+        home = os.path.realpath(self._home_dir)
+        if real != home and not real.startswith(home + os.sep):
+            raise ValueError(
+                f"路径逃逸: {path!r} 不在 {home!r} 内")
+
+    @abstractmethod
+    async def respond(self, event: Event) -> Event | VOID:
+        ...
 
 
 class BucketDispatcher:
@@ -101,7 +142,7 @@ class BucketDispatcher:
                 sem.release()
 
 
-class UserModeProcess(mp.Process):
+class UserModeProcess(ProcessBase, mp.Process):
     """用户态进程：真实子进程，事件经 socketpair Connection，同源串行/跨源并行。
 
     终止 = system 层 payload.command=="terminate" 的事件。
@@ -111,16 +152,23 @@ class UserModeProcess(mp.Process):
     故障而非内核裁决。
     """
 
-    def __init__(self, emit, max_concurrent_sources, *, load_spec=None):
-        super().__init__()
+    def __init__(self, emit, max_concurrent_sources, runtime_root, *,
+                 load_spec=None, identity=None, maintenance_device=None):
+        # ProcessBase init needs identity; for devices, extract from load_spec
+        if identity is None and load_spec is not None:
+            identity = load_spec[0]
+        if identity is None:
+            raise ValueError("identity 必须显式提供或从 load_spec 推导")
+        ProcessBase.__init__(self, identity, runtime_root)
+        mp.Process.__init__(self)
         self.emit = emit  # 产出通道（可调用；子进程内无身份字段）
         # child 端 Connection（收事件）：宿主 socketpair 的进程侧。
         # emit 可调用即可（如直接实例化时传入收集器），conn 可缺省。
         self._conn = getattr(emit, "conn", None)
         self.max_concurrent_sources = max_concurrent_sources
-        # (identity, module_path, options, bound_agent) | None；
-        # bound_agent 仅 per-agent 实例非 None（挂载锚点按绑定 agent 解析）
+        # (identity, module_path, options) | None
         self._load_spec = load_spec
+        self.maintenance_device = maintenance_device
 
     # 沙箱网络声明（进程级资源开关）：设备经 load_spec options 声明，
     # agent 经构造参数覆盖；基类默认禁网，未声明即 False。
@@ -161,7 +209,12 @@ class UserModeProcess(mp.Process):
         state["conn_fd"] = conn_fd
         writable, readonly = self._mount_anchors()
         for anchor in (*writable, *readonly):
-            os.makedirs(anchor, exist_ok=True)  # bwrap --bind 源必须存在
+            # Writable anchors are directories; a read-only implementation
+            # anchor may be the device.py file itself.
+            if os.path.isdir(anchor):
+                os.makedirs(anchor, exist_ok=True)
+            else:
+                os.makedirs(os.path.dirname(anchor), exist_ok=True)
         read_fd, write_fd = os.pipe()
         os.set_inheritable(read_fd, True)
         with os.fdopen(write_fd, "wb", closefd=True) as f:
@@ -192,27 +245,29 @@ class UserModeProcess(mp.Process):
         return {"kind": "agent", "instance": instance}
 
     def _mount_anchors(self) -> tuple[list[str], list[str]]:
-        """挂载矩阵锚点（(可写列表, 只读列表)），按身份类型展开为家 + 源码
-        区两个锚点（静态出生定格，无 per-position 物化）：
+        """Return the process's sole writable private-home anchor.
 
-        - 设备（load_spec）：家可写（shared = data/<device-id>；per-agent =
-          绑定 agent 的家 data/<bound-agent>，命令落 agent 家），源码区
-          data/devices 只读（加载实现用）；
-        - agent（workdir 属性）：家 data/<agent-id> 可写 + 源码区可写（生产
-          源码；装载权在 Authority，写了也装不了）。
-
-        源码区是系统唯一识别区（bootstrap 只扫这里）；workdir 根仅 data/。
+        Device code is home data and is loaded from that same mount.  There is
+        no shared source tree and no per-agent device-home alias.
         """
         if self._load_spec is not None:
-            identity, path, _, bound_agent = self._load_spec
-            workdir = os.path.dirname(os.path.dirname(os.path.dirname(path)))
-            if bound_agent is not None:
-                home = os.path.join(workdir, "data", bound_agent)
-            else:
-                home = os.path.join(workdir, "data", identity)
-            return [home], [os.path.join(workdir, "data", "devices")]
-        return [os.path.join(self.workdir, "data", self.identity),
-                os.path.join(self.workdir, "data", "devices")], []
+            _identity, path, _ = self._load_spec
+            # The device may update state in its home, while its loaded
+            # implementation remains immutable until the process is stopped.
+            return [os.path.dirname(path)], [path]
+        own_home = os.path.join(self.workdir, "data", self.identity)
+        target = getattr(self, "maintenance_device", None)
+        if target:
+            if not isinstance(target, str) or not target or "/" in target \
+                    or ".." in target or target in {".", "kernel"} \
+                    or "@" in target:
+                raise ValueError(f"维护目标 identity 非法: {target!r}")
+            target_home = os.path.join(self.workdir, "data", target)
+            # A maintenance session is materialized as two writable anchors:
+            # the maintainer's home and the specifically authorized device
+            # home.  AgentOS checks that target is unloaded before spawn.
+            return [own_home, target_home], []
+        return [own_home], []
 
     def _needs_network(self) -> bool:
         """声明通道（默认禁网，显式声明才放行，进程级资源开关非权限
@@ -237,7 +292,7 @@ class UserModeProcess(mp.Process):
         self.emit(event)
 
 
-class KernelModeDevice:
+class KernelModeDevice(ProcessBase):
     """内核态设备：与 kernel 同进程托管。
 
     特殊地位：可信系统服务（Authority/Journal），well-known 身份；
@@ -245,8 +300,8 @@ class KernelModeDevice:
     失败（fail-fast，不允许带病运行）。respond 契约与用户态完全一致。
     """
 
-    def __init__(self, identity: str):
-        self.identity = identity
+    def __init__(self, identity: str, runtime_root: str):
+        super().__init__(identity, runtime_root)
 
     async def respond(self, event: Event) -> Event | VOID:
         raise NotImplementedError
@@ -257,8 +312,8 @@ def _bwrap_args(writable: list[str], readonly: list[str], state_fd: int,
     """bwrap 固定矩阵命令行（唯一构造点；网络开关编辑边界——needs_network
     声明通道见 ``_needs_network``，默认禁网，仅显式声明进程保留网络面）。
 
-    固定矩阵语义：挂载参数只依赖身份类型的两个锚点（家 + 源码区），不依赖
-    position（无 per-position 物化）；设备进程永远不是 root（userns 单用户
+    固定矩阵语义：挂载参数只依赖进程的私有 home，不依赖 position；
+    设备进程永远不是 root（userns 单用户
     映射）。data 根 tmpfs 掩蔽其它家的目录可见性——沙箱内除自己的家与
     源码区外，数据根下无其它路径（设备数据物理不可见，只经接口暴露）。
     """

@@ -26,7 +26,7 @@ from my_team.kernel.journal import Journal
 from my_team.kernel.process import (
     BucketDispatcher,
     KernelModeDevice,
-    Process,
+    ProcessBase,
     UserModeProcess,
 )
 from my_team.kernel.process_handle import ProcessHandle
@@ -38,7 +38,7 @@ __all__ = [
     "Journal",
     "BucketDispatcher",
     "KernelModeDevice",
-    "Process",
+    "ProcessBase",
     "UserModeProcess",
     "ProcessHandle",
     "VOID",

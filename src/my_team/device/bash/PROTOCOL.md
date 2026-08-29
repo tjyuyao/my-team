@@ -176,7 +176,7 @@ state：`running` / `done` / `killed` / `expired`（queued 无 id 暴露，不�
 
 ## 沙箱语义
 
-bash 设备是 `INSTANCE = "per-agent"` 的设备进程，经 bwrap 固定矩阵沙箱
+bash 设备是普通设备身份，经 bwrap 固定矩阵沙箱
 启动（`kernel/process.py` `_sandbox_reexec`）。所有 bash 命令作为该进程的
 子进程在同一沙箱内执行（`asyncio.create_subprocess_shell`，继承沙箱上下文）。
 
@@ -187,11 +187,8 @@ bash 设备是 `INSTANCE = "per-agent"` 的设备进程，经 bwrap 固定矩阵
   挂载点）构造全新 devtmpfs，`/dev/null` 等字符设备可写——bash 命令中
   `>/dev/null`、`open('/dev/null', 'r+')` 均正常工作；
 - **`/tmp` 可写**：`--tmpfs /tmp`；
-- **数据根掩蔽**：`--tmpfs <data_root>`，沙箱内除自己的家与源码区外，
-  数据根下无其它路径——其它 agent/设备的家物理不可见，设备数据只经接口暴露；
-- **挂载锚点（按身份类型，静态出生定格）**：
-  - 家（绑定 agent 的家 `data/<agent-id>`）**可写**（命令落 agent 家）；
-  - 设备源码区 `data/devices` **只读**（加载实现用）；
+- **数据根掩蔽**：`--tmpfs <data_root>`，沙箱内仅自己的 private home 可见；
+- **挂载锚点**：设备 home `data/<device-id>` 可写，代码与状态均在此；
 - **默认 cwd = 数据家**：内核在 `_sandbox_reexec` 的 env 里注入
   `MY_TEAM_DATA_DIR = writable[0]`（绑定 agent 的家）；`BashDevice.__init__`
   读取后作为 `self.default_cwd`；`bash_run` 命令不指定 `cwd` 时以此为 cwd，

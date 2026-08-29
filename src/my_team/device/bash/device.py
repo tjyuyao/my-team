@@ -30,11 +30,6 @@ from collections import deque
 
 from my_team.kernel.process import VOID, UserModeProcess
 
-# 设备分界声明（workdir 装载时必读）：per-agent = 执行载体——安装时为每个
-# 绑定 agent 实例化一个进程，实例身份 <device-id>@<agent-id>，挂载家 =
-# 绑定 agent 的家（命令落 agent 家）；cwd 具体语义由 bash-sandbox-adapt 卡接。
-INSTANCE = "per-agent"
-
 RESULT_PREVIEW = 64 * 1024  # bash_result 内容预览上限（缓冲尾部）
 STATUS_CHUNK = 64 * 1024    # bash_status_result 单次续读上限
 
@@ -63,9 +58,11 @@ class Job:
 
 
 class BashDevice(UserModeProcess):
-    def __init__(self, emit, *, max_concurrent_sources, max_jobs,
-                 timeout, deadline, max_deadline, output_cap, completed_cap):
-        super().__init__(emit, max_concurrent_sources)
+    def __init__(self, emit, *, runtime_root, identity, max_concurrent_sources=0,
+                 max_jobs=8, timeout=30.0, deadline=60.0, max_deadline=300.0,
+                 output_cap=65536, completed_cap=64):
+        super().__init__(emit, max_concurrent_sources, runtime_root,
+                         identity=identity)
         if not (timeout < deadline <= max_deadline):
             raise ValueError(
                 f"构造不变量失败: 需 timeout < deadline ≤ max_deadline，"

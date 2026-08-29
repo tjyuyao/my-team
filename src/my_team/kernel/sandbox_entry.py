@@ -40,9 +40,11 @@ def _setrlimit():
 def _serve_device(load_spec, conn):
     """按装载描述在沙箱内装载设备（复用原 run 的装载方式）并 serve。"""
     import importlib.util
+    import inspect
     import uuid
+    from my_team.kernel.process import UserModeProcess
 
-    identity, path, options, _bound_agent = load_spec
+    identity, path, options = load_spec
     name = f"team_device_{identity}_{uuid.uuid4().hex[:8]}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -51,7 +53,41 @@ def _serve_device(load_spec, conn):
     # needs_network 是沙箱控制字段（process._needs_network 读取），非设备
     # 构造参数——过滤后 Device 才收自己的 options（不含沙箱开关）。
     inst_opts = {k: v for k, v in options.items() if k != "needs_network"}
-    device = module.Device(ChildWriter(conn), **inst_opts)
+    # 注入 runtime_root 和 identity（ProcessBase 必需）
+    runtime_root = os.environ.get("MY_TEAM_DATA_DIR", "/tmp")
+    inst_opts["runtime_root"] = os.path.dirname(runtime_root)  # home 的上级
+    inst_opts["identity"] = identity
+    # 查找 Device 类：优先 Device，否则找第一个 UserModeProcess 子类
+    device_cls = getattr(module, "Device", None)
+    if device_cls is None:
+        for attr_name in dir(module):
+            attr = getattr(module, attr_name)
+            if (isinstance(attr, type) and issubclass(attr, UserModeProcess)
+                    and attr is not UserModeProcess):
+                device_cls = attr
+                break
+    if device_cls is None:
+        raise AttributeError(
+            f"设备源码无 Device 类或 UserModeProcess 子类: {path!r}")
+    # 自动填充缺失的默认值（兼容旧设备签名）
+    sig = inspect.signature(device_cls.__init__)
+    for param_name, param in sig.parameters.items():
+        if param_name in ("self", "emit", "runtime_root", "identity"):
+            continue
+        if param_name not in inst_opts and param.default is inspect.Parameter.empty:
+            # 提供保守默认值
+            defaults = {
+                "max_concurrent_sources": 0,
+                "max_jobs": 8,
+                "timeout": 30.0,
+                "deadline": 60.0,
+                "max_deadline": 300.0,
+                "output_cap": 65536,
+                "completed_cap": 64,
+            }
+            if param_name in defaults:
+                inst_opts[param_name] = defaults[param_name]
+    device = device_cls(ChildWriter(conn), **inst_opts)
     asyncio.run(device._serve())
 
 

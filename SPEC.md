@@ -17,8 +17,9 @@ AgentOS：agent 的操作系统，代码中如需简写统一使用 `aos` 而不
 
 以**全面的动态性**为回报，接受反直觉的代价：系统层也是数据——设备实现
 与工具定义（name/description/parameters/trigger）不在配置中静态声明，
-而由 Root 在工作目录生产、经 install/uninstall 事件热装卸（源码即持久化
-形态）；组织事实归 Authority（权威源），kernel 只物化路由映射并裁决装卸；
+而由获授权的维护者写入设备自己的家、经 install/uninstall 事件热装卸（源码
+即设备私家中的持久化形态）；框架不规定 agent 的草稿位置，也不扫描 agent
+目录；组织事实归 Authority（权威源），kernel 只物化路由映射并裁决装卸；
 Process 是一套契约（respond: Event | VOID），用户态（子进程）与内核态
 （与 kernel 同进程）同构、可迁移。每一步都离 AGI 近一步。
 
@@ -118,26 +119,29 @@ kernel 完成。
 ## 工作目录与设备装卸
 
 - **工作目录**：数据根（team 配置 `options.workdir`，config 绑定），内含
-  `data/` 容器——设备源码区 `data/devices/*.py`（系统唯一识别区）与各家
-  `data/<identity>/`（agent 与 device 同目录同形制）；源码即持久化形态——
-  重启后重新 bootstrap 即恢复，无需重新生成。
+  `data/` 容器与各身份的家 `data/<identity>/`（agent 与 device 同目录同
+  形制）。框架不设共享设备源码区，也不扫描 agent 的目录；agent 可以在
+  自己有权的地方自由写草稿。
+- **设备家**：创建 device identity 时由 kernel 建立
+  `workdir/data/<device-id>/`。设备实现是该家中的普通数据（通常为
+  `device.py`），与运行状态同属设备；它是安装/重启时加载的持久化快照。
+  设备 identity 不采用 `per-agent` 实例化，也不存在 `bound_agent` 或
+  `device-id@agent-id` 命名。
 - **设备源码约定**：导出 `Device`（进程类）、`TOOLS`（工具定义声明）与
-  `INSTANCE`（分界声明：`per-agent` 执行载体 / `shared` 数据服务，必填无
-  默认），可选 `SCOPES`（权限范围声明：`{token, default, explanation}`——
-  token 为不透明权限名，default 标记安装时默认公开，explanation 为注入
-  记忆的书面说明）。`Device` 实例在**子进程内构造**（父进程只传装载描述，
-  pickle 无关类对象），spawn/fork 启动方式皆可。
-- **装卸**：`install_device`（身份 + 源码路径 + grants 布线声明；per-agent
-  另需 `bound_agent` 绑定 agent）请求内核装载，**装卸权经 Authority 裁决**
-  （root 或持有 `org:install`）——动态加载 → Authority 登记 → grants 展开
-  为默认公开 scope 布线 → 注入（shared：全部 agent，内容按各 agent 的
-  position 过滤；per-agent：仅绑定 agent，实例身份 `<device-id>@<agent-id>`，
-  associated 指向实例）；`uninstall_device` 卸载——终止进程 → 撤销声明
-  （连带撤销布线）→ 重注入（条目驱逐）。**实例身份即装卸身份**（per-agent
-  须以 `<device-id>@<agent-id>` 卸载，换绑 = 新实例，同设备不同绑定并存）。
-  结果一律 ack 回告请求方，失败不击穿内核。
-- **bootstrap**：Root 扫描工作目录源码区（`data/devices/*.py`）批量装载；
-  收齐全部回执后向发起者报告结果（agent_result），空目录立即报告不挂起。
+  可选 `SCOPES`（权限范围声明：`{token, default, explanation}`——token
+  为不透明权限名，default 标记安装时默认公开，explanation 为注入记忆的
+  书面说明）。`Device` 实例在**子进程内构造**（父进程只传装载描述，pickle
+  无关类对象），spawn/fork 启动方式皆可。
+- **装卸与维护**：`create_identity`（或等价的组织操作）先建立设备 identity
+  与私家；获授权的维护者把实现放入该家后，以 `install_device` 加载该
+  identity。装卸权经 Authority 裁决（root、持有组织装卸权，或持有该设备
+  的专用维护 scope）。运行中设备的实现文件为只读；维护流程是
+  `uninstall_device` → 维护者在目标设备家修改 → `install_device`，每次
+  安装都从私家快照加载。卸载不删除设备家。结果一律 ack 回告请求方，失败
+  不击穿内核。
+- **bootstrap**：启动只恢复已持久化的 identity/install 状态（当前持久化尚
+  未实现）；不得通过扫描共享目录或 agent 家推断设备。空设备集立即报告，
+  不挂起。
 - **身份保护**：内核态身份与 agent 身份不可被设备装卸顶替。
 
 ## 工作空间与沙箱（治理）
@@ -148,34 +152,33 @@ kernel 完成。
   ```
   workdir/                      # 数据根（config 绑定）
     data/                       # 数据根容器（沙箱内挂载锚点）
-      devices/<name>.py         # 设备源码（系统唯一识别区；agent 生产、设备只读加载）
       <identity>/               # 各家（agent 与 device 同目录同形制）
   ```
-  身份（user）= agent 或 device，每个身份一个私密数据空间（家）。设备源码
-  是数据（一切皆数据），落数据根内、独立于任何家；agent 家里即使有
-  `devices/` 系统也不识别（唯一识别区 = `data/devices`）。identity 校验拒
-  `/`、`..`、`.` 与保留名 `devices`（防源码区冲突与逃逸）。agent 家 =
-  `workdir/data/<agent-id>`（注册时创建，幂等）；设备家 = 安装者数据根的
-  `workdir/data/<device-id>`（装载时创建，幂等）。
+  身份（user）= agent 或 device，每个身份一个私密数据空间（家）。设备实现
+  与运行状态均是设备 identity 家中的数据（通常为 `device.py`）；agent 家 =
+  `workdir/data/<agent-id>`（注册时创建，幂等）；设备家 =
+  `workdir/data/<device-id>`（创建 identity 时创建，幂等）。框架不规定 agent
+  草稿位置，也不扫描 agent 目录。identity 校验拒 `/`、`..` 与 `.`，并不得
+  与保留内核身份冲突。
   访问矩阵（FS 层静态出生定格，管"谁碰谁的盘"，不在 Authority 职责内；
   Authority = 业务布线，动态裁决）：
-  | 身份 | 家 | 源码区 data/devices | 系统 |
+  | 身份 | 自己的家 | 其它身份的家 | 系统 |
   |---|---|---|---|
-  | agent | 可写 | 可写（生产源码；**装载权在 Authority**，写了也装不了） | 只读 |
-  | device | 可写 | 只读（加载实现用） | 只读 |
-  agent 矩阵不含其它设备家（不可见）→ 设备数据只经接口暴露（调用层 auth
-  裁决），agent 物理碰不到设备数据。制造例外：root agent 生产设备源码落
-  `data/devices`（源码区对 agent 可写；装载权仍在 Authority），装好后进程
-  即被隔离。
-- **沙箱（v0.14 已实现）**：所有设备进程及 agent 默认 bwrap + setrlimit
+  | agent | 可写 | 不可见 | 只读 |
+  | device（运行中） | 状态可写、实现只读 | 不可见 | 只读 |
+  | device maintainer（目标设备已卸载） | 自己的家 + 获授权目标设备家 | 其它家不可见 | 只读 |
+  设备数据只经接口暴露（调用层 auth 裁决）。维护者的额外挂载是按具体设备
+  授权、由 kernel 在维护会话中物化的沙箱例外，不等价于 root，也不扩展
+  Authority 或其它文件系统权限。
+- **沙箱（v0.14 目标修订）**：所有设备进程及 agent 默认 bwrap + setrlimit
   （user + pid + net + ipc namespace，无需 root）——系统路径只读挂载、
-  挂载矩阵按身份类型展开为两个锚点（家 + 源码区，见目录约定）、默认禁网
+  挂载矩阵按身份类型展开为自己的家（维护会话仅额外挂载授权目标设备家）、默认禁网
   （需显式声明才保留网络面：设备经安装 payload `options.needs_network`、
   agent 经 config `options.needs_network`——进程级资源开关，非权限
   scope）、userns/pidns/netns/ipcns 阻断对兄弟进程与内核的信号/内存/网络/
   System V IPC 攻击（Yama 兜底 ptrace）。
-  **沙箱 = 进程级隔离面，固定矩阵（家 + 只读系统），不承载权限**：没有按
-  position 的挂载物化，设备进程永远不是 root。
+  **沙箱 = 进程级隔离面，不承载 Authority 权限**：正常进程只有自己的家与
+  只读系统；维护会话是唯一按设备授权扩展的挂载例外，设备进程永远不是 root。
 - **权限与沙箱解耦（调用级）**：跨区数据访问一律走"调用 → 目标设备按
   发起 Agent 的权限裁决"（root 治理数据经数据服务设备查询，不是 root
   进程直接碰文件）。设备间调用（未来）：**设备不能发起调用**，只能作为
@@ -201,7 +204,7 @@ kernel 完成。
 - **信任假设**：已安装设备代码为半可信（安装权集中在 root/人事权——
   防御重点是 bug 与资源失控，而非恶意代码）；进程运行于同一 OS 用户
   （进程间攻击面由沙箱 userns/pidns/netns/ipcns 与 Yama 收敛）；设备源码
-  生产面对 agent 开放（源码区可写），装载权在 Authority——写了也装不了。
+  生产由获授权的设备维护者在目标设备卸载期间完成；装载权仍在 Authority。
 - **声明 ≠ 事实**：`source` 是构造事实（宿主注入；v0.14 出站通道改为
   内核读侧盖章——子进程内不再存在可改写的身份字段）；`origin`（未来
   设备间调用的发起者声明）是声明，信任模型 = 设备是发起者的可信执行

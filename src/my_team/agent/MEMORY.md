@@ -57,18 +57,14 @@ MemoryEntry:
 
 - 工具 = 设备能力打包成的工具定义，作为条目存于精炼层——"设备
   记忆注入"的结果（设备装载 + wiring 时写入），不是代码常量。
-- **工作目录驱动 + 热装卸**：设备实现与工具定义（name/description/
-  parameters/trigger）同处数据根（`data/devices/*.py`，Root 生产，源码即
-  持久化）；bootstrap 扫描源码区 → install_device 装载（grants 声明布线）
-  → Authority 注入（inject/evict 事件）→ 工具集合随装卸演化，无需重启。
-  能力在设备源码，暴露在注入条目。
+- **设备生命周期**：设备装载时，其工具与权限说明进入 Agent 的精炼层并
+  通过注入事件进入工作记忆；设备卸载时对应条目产生 evict，从工作记忆
+  与可用工具集合移出。具体装载、卸载与维护实现留待 v0.15。
 - **布线（deny-by-default，多粒度 scope）**：注入内容 = agent 的
   position 的 grants 覆盖的设备/scope（grant 表 `(position, device,
   token)`）；未布线的设备能力不可见。安装展开为设备默认公开 scope，
   运行期 grant_scope/revoke_scope 细粒度调整。position 来自 config
   `options.position`。
-- **调用时认证（富化）**：设备收到的事件带调用者的 `auth`（position +
-  有效 scopes，内核宿主侧注入）——设备按自己的语义裁决权限。
 - **书面权限解释**：已授 scope 的 `explanation` 以 type=skill 条目注入
   记忆（无 trigger，不参与匹配，只作"技能记忆"知识）——与工具说明一起
   构成"书面的使用方法和权限解释"。

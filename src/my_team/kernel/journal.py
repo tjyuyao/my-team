@@ -8,6 +8,7 @@ process_event，避免自指记录）。
 """
 
 import json
+import os
 import sqlite3
 import time
 
@@ -22,8 +23,11 @@ SCHEMA = (
 
 
 class Journal(KernelModeDevice):
-    def __init__(self, path: str):
-        super().__init__("journal")
+    def __init__(self, identity: str, runtime_root: str, path: str):
+        super().__init__(identity, runtime_root)
+        # 路径校验：journal.db 必须在设备 home 内
+        self._validate_path(path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         self._db = sqlite3.connect(path)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute(SCHEMA)

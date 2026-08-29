@@ -2,18 +2,12 @@
 
 模型：
 - 状态 = messages（工作记忆，append-only）+ entries（精炼层，工具条目）。
-- 工具 = 条目（Authority 注入，来自工作目录设备源码，数据化）：trigger
+- 工具 = 条目（Authority 注入，来自已装载设备，数据化）：trigger
   匹配 → 查条目 → 按 associated 分发到设备 → tool_result 回来 → 产出
   agent_result。
 - 决策（第一版演示）：任务内容对条目 trigger 做关键词匹配；LLM 决策
   未来接同一分发路径（查条目 → associated → 事件），决策函数可替换。
-- 自举（bootstrap）：扫描自己的工作目录源码区（workdir/data/devices/*.py），
-  对每个设备源码向内核发 install_device（grants 声明给自己的 position）——
-  Root 从工作目录组装自己的能力；设备源码由 Root 生产（演示中为
-  预置/落盘），文件即持久化形态。
 """
-
-import os
 
 from my_team.kernel.event_protocol import VOID
 from my_team.kernel.process import UserModeProcess
@@ -23,14 +17,13 @@ FILLERS = ("查询", "请问", "今天", "怎么样", "现在", "的", "呢", "�
 
 
 class Agent(UserModeProcess):
-    def __init__(self, emit, *, workdir, position, needs_network=False):
-        super().__init__(emit, 1)  # Agent 串行处理消息
-        self.workdir = workdir
+    def __init__(self, emit, *, runtime_root, identity, position,
+                 needs_network=False):
+        super().__init__(emit, 1, runtime_root, identity=identity)
         self.position = position  # 布线主体（config options，与 Authority 一致）
         self.needs_network = needs_network  # 沙箱网络声明（进程级资源开关）
         self.messages = []  # 工作记忆（append-only）
         self.entries = {}  # 精炼层：name → 工具条目
-        self._pending = None  # 自举任务（发起者 / 剩余回执数 / 错误）
 
     async def respond(self, event):
         command = event["payload"].get("command")
@@ -40,10 +33,6 @@ class Agent(UserModeProcess):
             return self._on_task(event)
         if command == "tool_result":
             return self._on_tool_result(event)
-        if command == "bootstrap":
-            return self._on_bootstrap(event)
-        if command in ("device_installed", "device_uninstalled"):
-            return self._on_device_ack(event)
         return VOID
 
     # ---- 精炼层维护（Authority 注入） ----
@@ -54,59 +43,6 @@ class Agent(UserModeProcess):
         for entry in payload.get("entries") or []:
             self.entries[entry["content"]["name"]] = entry
         return VOID
-
-    # ---- 自举：从工作目录组装能力 ----
-
-    def _on_bootstrap(self, event):
-        """扫描工作目录设备源码 → 逐个请求内核装载（grants 声明给自己的
-        position——自举组装的能力归自己的岗；bound_agent 声明给自己——
-        per-agent 设备实例绑定本 agent，命令落自己的家；shared 忽略）；
-        全部回执后向发起者报告（agent_result）。无可装载时立即报告，
-        不挂起；上轮未收齐时拒绝重入（防新旧回执混入同一计数器）。"""
-        requester = event["source"]
-        if self._pending is not None:
-            return self._agent_result(requester, ok=False, error="上轮自举未完成")
-        devices_dir = os.path.join(self.workdir, "data", "devices")
-        files = []
-        if os.path.isdir(devices_dir):
-            files = sorted(f for f in os.listdir(devices_dir)
-                           if f.endswith(".py") and not f.startswith("_"))
-        self._pending = {"requester": requester, "remaining": len(files),
-                         "errors": []}
-        for filename in files:
-            self.emit({
-                "target": "kernel", "kind": "system",
-                "payload": {"command": "install_device",
-                            "identity": filename[:-3],
-                            "source_file": os.path.join(devices_dir, filename),
-                            "grants": [self.position],
-                            "bound_agent": self.identity},
-            })
-        if not files:
-            self._pending = None
-            return self._agent_result(requester, ok=True, content="无可装载")
-        return VOID
-
-    def _on_device_ack(self, event):
-        """内核回执（install/uninstall）：聚合 pending 自举任务，收齐后
-        向发起者报告结果。错误来自回执的 ok 标志，errors 即唯一真相。"""
-        pending = self._pending
-        if pending is None:
-            return VOID
-        payload = event["payload"]
-        pending["remaining"] -= 1
-        if not payload.get("ok"):
-            pending["errors"].append(
-                f"{payload.get('identity')}: {payload.get('error')}")
-        if pending["remaining"] > 0:
-            return VOID
-        requester = pending["requester"]
-        errors = pending["errors"]
-        self._pending = None
-        return self._agent_result(
-            requester, ok=not errors,
-            content="设备装载完成" if not errors
-            else "装载失败：" + "; ".join(errors))
 
     # ---- react 决策 ----
 
