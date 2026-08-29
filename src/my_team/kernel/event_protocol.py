@@ -10,7 +10,7 @@
   uninstall_device / grant_scope / revoke_scope）
 """
 
-from typing import Any, TypedDict, Union
+from typing import Any, NotRequired, TypedDict, Union
 
 
 class SystemPayload(TypedDict):
@@ -22,6 +22,7 @@ class BaseEvent(TypedDict):
     target: str
     kind: str
     payload: Any
+    receipt: NotRequired[bool]
 
 
 class SystemEvent(BaseEvent):

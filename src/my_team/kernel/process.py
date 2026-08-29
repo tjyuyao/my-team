@@ -134,6 +134,12 @@ class BucketDispatcher:
                     continue
                 if result != VOID:
                     await self.emit(result)
+                elif event.get("receipt"):
+                    await self.emit({
+                        "target": event["source"], "kind": "application",
+                        "payload": {"command": "receipt",
+                                    "event": {"target": event["target"],
+                                              "kind": event["kind"]}}})
                 if queue.empty():
                     return
         finally:
