@@ -8,8 +8,8 @@ on:
 
 jobs:
   quick:
-    # 快速门禁（PR 反馈）：单元层 + 静态检查，单版本跑一次。
-    # 集成层/全量见 test job（发布门槛）。
+    # 快层门禁（PR 反馈）：T1 逻辑层 + 静态检查，亚秒级，单版本跑一次。
+    # T1 = 进程内/内核态直调（无 spawn、无 bwrap）；集成层显式 -m integration。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +27,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Run unit tests (tests/ root; integration excluded)
-        run: uv run pytest tests/ --ignore=tests/integration -q --tb=short
+      - name: Run T1 fast-tier tests (integration excluded)
+        run: uv run pytest tests/ -m "not integration" -q --tb=short
 
       - name: Run ruff
         run: uv run ruff check src tests
@@ -37,7 +37,8 @@ jobs:
         run: uv run mypy src/my_team
 
   test:
-    # 全量矩阵（单元 + 集成 + coverage）：发布前门槛。
+    # 全量矩阵（T1 + T2 集成 + coverage）：发布前门槛。T2 真实 spawn+bwrap，
+    # 有界但不快；快层门禁见 quick job。
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -59,8 +60,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Run full test suite (unit + integration)
-        run: uv run pytest tests/ -v --tb=short
+      - name: Run T1 fast-tier tests
+        run: uv run pytest tests/ -m "not integration" -q --tb=short
 
-      - name: Run coverage
-        run: uv run pytest tests/ --cov=src/my_team --cov-report=term-missing
+      - name: Run T2 integration tests (real spawn + sandbox)
+        run: uv run pytest tests/ -m integration -v --tb=short
+
+      - name: Run coverage (T1 fast tier)
+        run: uv run pytest tests/ -m "not integration" --cov=src/my_team --cov-report=term-missing
