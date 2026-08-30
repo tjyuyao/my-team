@@ -105,7 +105,7 @@ class Authority(KernelModeDevice):
         """调用时认证上下文：调用者的 position 与其有效 scope 列表。"""
         info = self._identities.get(identity)
         position = info["position"] if info else None
-        grants = self._grants.get(position) or set()
+        grants = (self._grants.get(position) or set()) if isinstance(position, str) else set()
         return {"position": position,
                 "scopes": [{"device": device, "token": token}
                            for device, token in sorted(grants)]}
@@ -136,10 +136,10 @@ class Authority(KernelModeDevice):
                 new[tool["name"]] = self._entry(dev_id, tool)
         # skill 条目：已授且已声明的 scope 的书面说明（按设备名排序，确定性）
         for dev_id in sorted(by_device):
-            dev = self._identities.get(dev_id)
-            if dev is None or dev["agent"]:
+            dev_entry = self._identities.get(dev_id)
+            if dev_entry is None or dev_entry["agent"]:
                 continue
-            for scope in dev.get("scopes") or []:
+            for scope in dev_entry.get("scopes") or []:
                 if scope["token"] in by_device[dev_id]:
                     name = f"{dev_id}:{scope['token']}"
                     new[name] = self._perm_entry(dev_id, scope)

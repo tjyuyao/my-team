@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from my_team.device.llm.vendor.types.messages import ImageContent, TextContent, ToolResultMessage, UserMessage
+from my_team.device.llm.vendor.types.messages import (
+    ImageContent,
+    TextContent,
+    ToolResultMessage,
+    UserMessage,
+)
 
 NON_VISION_USER_IMAGE_PLACEHOLDER = (
     "(image omitted: current model does not support image input; image contents are "

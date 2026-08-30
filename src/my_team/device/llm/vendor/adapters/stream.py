@@ -4,13 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from my_team.device.llm.vendor.types.messages import (
-    AssistantMessage,
-    AssistantMessageDiagnostic,
-    TextContent,
-    ThinkingContent,
-    Usage,
-)
 from my_team.device.llm.vendor.adapters._provider_events import (
     ProviderErrorEvent,
     ProviderEvent,
@@ -34,6 +27,13 @@ from my_team.device.llm.vendor.adapters.events import (
     ThinkingStartEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+)
+from my_team.device.llm.vendor.types.messages import (
+    AssistantMessage,
+    AssistantMessageDiagnostic,
+    TextContent,
+    ThinkingContent,
+    Usage,
 )
 
 

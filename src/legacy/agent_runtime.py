@@ -24,8 +24,6 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
-
 from my_team.consolidation import MEMORY_TOOL_NAMES
 from my_team.devices.authority import Authority
 from my_team.devices.base import Device, EntityKind, RegisteredEntity
@@ -46,6 +44,7 @@ from my_team.tool_manifest import (
     ToolManifest,
     ToolManifestError,
 )
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # ToolContext — identity binding for every tool call

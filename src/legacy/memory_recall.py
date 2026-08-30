@@ -27,11 +27,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
-
 from my_team.memory_store import AgentMemory
 from my_team.models.memory import MemoryEntry, MemoryEntryType
 from my_team.transaction import EffectType, StagedEffect, TransactionBuffer
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # RecallConfig（agent 召回状态，属注入状态空间）

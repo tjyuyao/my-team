@@ -17,8 +17,6 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
-
 from my_team.agent_state import AgentState
 from my_team.models.activation import (
     AgentActivation,
@@ -27,6 +25,7 @@ from my_team.models.activation import (
     WakeCondition,
     WakeupEvent,
 )
+from pydantic import BaseModel, Field
 
 #: Returns ``(priority_rank, deadline)`` for an agent's most urgent
 #: active task; ``(-1, None)`` when the agent has no active tasks.

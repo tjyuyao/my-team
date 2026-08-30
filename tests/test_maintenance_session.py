@@ -1,18 +1,13 @@
 import asyncio
 import os
 import tempfile
-import shutil
 
 import pytest
 
 # Import agent module to register PROCESS_TYPES["agent"]
 import my_team.agent  # noqa: F401
+from my_team.kernel.agent_os import KERNEL_IDENTITY, AgentOS
 
-from my_team.kernel.agent_os import AgentOS
-from my_team.kernel.process import UserModeProcess
-
-
-from my_team.kernel.agent_os import KERNEL_IDENTITY
 
 def _cmd(command, **payload):
     return {
@@ -26,7 +21,7 @@ def _cmd(command, **payload):
 @pytest.mark.integration
 def test_maintenance_session_unload_edit_reload():
     """Covers the maintenance session lifecycle: unload → edit → reload.
-    
+
     This test verifies that:
     1. A device can be unloaded
     2. A maintenance session can be started to edit the device's home
@@ -49,15 +44,15 @@ agents:
     options:
       position: worker
 """.format(tmpdir))
-        
+
         # Create agent home directory
         agent_home = os.path.join(tmpdir, "home", "worker")
         os.makedirs(agent_home, exist_ok=True)
-        
+
         # Create a minimal device home
         device_home = os.path.join(tmpdir, "home", "echo")
         os.makedirs(device_home, exist_ok=True)
-        
+
         # Create a minimal device.py
         device_file = os.path.join(device_home, "device.py")
         with open(device_file, "w") as f:
@@ -69,11 +64,11 @@ class Device:
 TOOLS = [{"name": "echo", "trigger": ["echo"]}]
 SCOPES = [{"token": "public", "default": True, "explanation": "basic"}]
 ''')
-        
+
         # Initialize AgentOS
         agent_os = AgentOS(config_path)
         await agent_os.setup()
-        
+
         # Install the device
         install_event = _cmd(
             "install_device",
@@ -82,20 +77,20 @@ SCOPES = [{"token": "public", "default": True, "explanation": "basic"}]
             options={"max_concurrent_sources": 0},
         )
         await agent_os._on_kernel(install_event)
-        
+
         # Verify device is installed
         assert "echo" in agent_os.entities
-        
+
         # Uninstall the device
         uninstall_event = _cmd(
             "uninstall_device",
             identity="echo",
         )
         await agent_os._on_kernel(uninstall_event)
-        
+
         # Verify device is uninstalled
         assert "echo" not in agent_os.entities
-        
+
         # Edit the device home (simulating maintenance)
         device_file = os.path.join(device_home, "device.py")
         with open(device_file, "w") as f:
@@ -107,7 +102,7 @@ class Device:
 TOOLS = [{"name": "echo", "trigger": ["echo"]}]
 SCOPES = [{"token": "public", "default": True, "explanation": "basic"}]
 ''')
-        
+
         # Start maintenance session
         maintenance_event = _cmd(
             "maintenance_session",
@@ -116,10 +111,10 @@ SCOPES = [{"token": "public", "default": True, "explanation": "basic"}]
         # Set the source to the worker agent
         maintenance_event["source"] = "worker"
         await agent_os._on_kernel(maintenance_event)
-        
+
         # Verify maintenance session was started
         # (The maintenance session would run in the worker agent's context)
-        
+
         # Reinstall the device with the edited code
         install_event = _cmd(
             "install_device",
@@ -128,7 +123,7 @@ SCOPES = [{"token": "public", "default": True, "explanation": "basic"}]
             options={"max_concurrent_sources": 0},
         )
         await agent_os._on_kernel(install_event)
-        
+
         # Verify device is reinstalled
         assert "echo" in agent_os.entities
 
@@ -136,7 +131,7 @@ SCOPES = [{"token": "public", "default": True, "explanation": "basic"}]
 @pytest.mark.integration
 def test_maintenance_session_cross_home_denial():
     """Covers the maintenance session security: maintainer cannot access other homes.
-    
+
     This test verifies that:
     1. A maintainer can only access the authorized device's home
     2. Cross-home access is denied
@@ -162,18 +157,18 @@ agents:
     options:
       position: worker2
 """.format(tmpdir))
-        
+
         # Create agent home directories
         for agent_id in ["worker1", "worker2"]:
             agent_home = os.path.join(tmpdir, "home", agent_id)
             os.makedirs(agent_home, exist_ok=True)
-        
+
         # Create device homes
         device_home_echo = os.path.join(tmpdir, "home", "echo")
         device_home_calc = os.path.join(tmpdir, "home", "calc")
         os.makedirs(device_home_echo, exist_ok=True)
         os.makedirs(device_home_calc, exist_ok=True)
-        
+
         # Create device files
         for device_id, device_home in [("echo", device_home_echo), ("calc", device_home_calc)]:
             device_file = os.path.join(device_home, "device.py")
@@ -186,11 +181,11 @@ class Device:
 TOOLS = [{{"name": "{device_id}", "trigger": ["{device_id}"]}}]
 SCOPES = [{{"token": "public", "default": True, "explanation": "basic"}}]
 ''')
-        
+
         # Initialize AgentOS
         agent_os = AgentOS(config_path)
         await agent_os.setup()
-        
+
         # Install both devices
         for device_id in ["echo", "calc"]:
             install_event = _cmd(
@@ -201,7 +196,7 @@ SCOPES = [{{"token": "public", "default": True, "explanation": "basic"}}]
                 options={"max_concurrent_sources": 0},
             )
             await agent_os._on_kernel(install_event)
-        
+
         # Uninstall both devices
         for device_id in ["echo", "calc"]:
             uninstall_event = _cmd(
@@ -209,11 +204,11 @@ SCOPES = [{{"token": "public", "default": True, "explanation": "basic"}}]
                 identity=device_id,
             )
             await agent_os._on_kernel(uninstall_event)
-        
+
         # Verify both devices are uninstalled
         assert "echo" not in agent_os.entities
         assert "calc" not in agent_os.entities
-        
+
         # Try to start maintenance session for echo with worker1 (authorized)
         maintenance_event = _cmd(
             "maintenance_session",
@@ -221,7 +216,7 @@ SCOPES = [{{"token": "public", "default": True, "explanation": "basic"}}]
         )
         maintenance_event["source"] = "worker1"
         await agent_os._on_kernel(maintenance_event)
-        
+
         # Try to start maintenance session for calc with worker1 (authorized)
         maintenance_event = _cmd(
             "maintenance_session",
@@ -230,6 +225,6 @@ SCOPES = [{{"token": "public", "default": True, "explanation": "basic"}}]
         )
         maintenance_event["source"] = "worker1"
         await agent_os._on_kernel(maintenance_event)
-        
+
         # Both should succeed as worker1 has maintain scope for both devices
         # (In real usage, worker1 would only have maintain scope for specific devices)

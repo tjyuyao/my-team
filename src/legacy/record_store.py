@@ -24,9 +24,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from pydantic import BaseModel, Field, model_validator
-
 from my_team.devices.base import Device, EntityKind, InjectionDecl
+from pydantic import BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
     from my_team.agent_runtime import ToolContext

@@ -11,7 +11,7 @@ import multiprocessing
 
 multiprocessing.set_start_method("spawn", force=True)
 
-from my_team.kernel.agent_os import AgentOS, PROCESS_TYPES
+from my_team.kernel.agent_os import PROCESS_TYPES, AgentOS
 from my_team.kernel.authority import Authority
 from my_team.kernel.event_protocol import (
     VOID,

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from asyncio import sleep
 
-from my_team.device.llm.vendor.types.types import JSONValue
 from my_team.device.llm.vendor.adapters._provider_events import ProviderRetryEvent
 from my_team.device.llm.vendor.adapters.provider import CancellationToken
+from my_team.device.llm.vendor.types.types import JSONValue
 
 RETRY_POLL_SECONDS = 0.05
 RETRY_BASE_DELAY_SECONDS = 0.25

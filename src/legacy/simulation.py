@@ -35,8 +35,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from my_team.agent_runtime import (
     ActionResult,
     AgentAction,
@@ -163,6 +161,7 @@ from my_team.transaction import (
     StagedEffect,
     TransactionBuffer,
 )
+from pydantic import BaseModel, Field
 
 
 class SimulationConfig(BaseModel):

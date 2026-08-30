@@ -8,20 +8,6 @@ from typing import Any, cast
 
 import httpx
 
-from my_team.device.llm.vendor.types.messages import (
-    AgentMessage,
-    AssistantMessage,
-    ImageContent,
-    TextContent,
-    ThinkingContent,
-    ToolResultMessage,
-    Usage,
-    UserMessage,
-    assistant_content,
-    message_to_user,
-)
-from my_team.device.llm.vendor.types.tools import AgentTool, ToolCall
-from my_team.device.llm.vendor.types.types import JSONValue
 from my_team.device.llm.vendor.adapters._provider_events import (
     ProviderErrorEvent,
     ProviderEvent,
@@ -48,9 +34,27 @@ from my_team.device.llm.vendor.adapters.events import AssistantMessageEvent
 from my_team.device.llm.vendor.adapters.http import create_async_client
 from my_team.device.llm.vendor.adapters.http_errors import provider_http_error_message
 from my_team.device.llm.vendor.adapters.provider import CancellationToken
-from my_team.device.llm.vendor.adapters.retry import provider_retry_event, retry_delay_seconds, wait_for_retry
+from my_team.device.llm.vendor.adapters.retry import (
+    provider_retry_event,
+    retry_delay_seconds,
+    wait_for_retry,
+)
 from my_team.device.llm.vendor.adapters.stream import canonicalize_provider_stream
 from my_team.device.llm.vendor.adapters.tool_call_ids import portable_tool_call_id
+from my_team.device.llm.vendor.types.messages import (
+    AgentMessage,
+    AssistantMessage,
+    ImageContent,
+    TextContent,
+    ThinkingContent,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
+    assistant_content,
+    message_to_user,
+)
+from my_team.device.llm.vendor.types.tools import AgentTool, ToolCall
+from my_team.device.llm.vendor.types.types import JSONValue
 
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
@@ -104,7 +108,7 @@ class AnthropicProvider:
         raw = self._stream_provider_events(
             model=model, system=system, messages=messages, tools=tools, signal=signal
         )
-        return canonicalize_provider_stream(
+        return canonicalize_provider_stream(  # type: ignore[no-any-return]
             raw, api="anthropic-messages", provider="anthropic", model=model
         )
 

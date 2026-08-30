@@ -25,9 +25,8 @@ import uuid
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from my_team.tool_protocol import ToolRequest, ToolResultContract
+from pydantic import BaseModel, Field
 
 
 class OpStatus(str, Enum):

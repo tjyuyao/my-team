@@ -18,9 +18,8 @@ import uuid
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable
 
-from pydantic import BaseModel, Field
-
 from my_team.devices.base import Device, EntityKind, InjectionDecl
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from my_team.agent_runtime import ToolContext

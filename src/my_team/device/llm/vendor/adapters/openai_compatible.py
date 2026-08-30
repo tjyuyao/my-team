@@ -17,20 +17,6 @@ from typing import Any, Protocol
 
 import httpx
 
-from my_team.device.llm.vendor.types.messages import (
-    AgentMessage,
-    AssistantMessage,
-    AssistantMessageDiagnostic,
-    ImageContent,
-    ThinkingContent,
-    ToolResultMessage,
-    Usage,
-    UserMessage,
-    assistant_content,
-    message_to_user,
-)
-from my_team.device.llm.vendor.types.tools import AgentTool, ToolCall
-from my_team.device.llm.vendor.types.types import JSONValue
 from my_team.device.llm.vendor.adapters._provider_events import (
     ProviderErrorEvent,
     ProviderEvent,
@@ -50,11 +36,32 @@ from my_team.device.llm.vendor.adapters.env import OpenAICompatibleConfig
 from my_team.device.llm.vendor.adapters.events import AssistantMessageEvent
 from my_team.device.llm.vendor.adapters.http import create_async_client
 from my_team.device.llm.vendor.adapters.http_errors import provider_http_error_message
-from my_team.device.llm.vendor.adapters.openai_cache import is_direct_openai_url, openai_prompt_cache_key
+from my_team.device.llm.vendor.adapters.openai_cache import (
+    is_direct_openai_url,
+    openai_prompt_cache_key,
+)
 from my_team.device.llm.vendor.adapters.provider import CancellationToken
-from my_team.device.llm.vendor.adapters.retry import provider_retry_event, retry_delay_seconds, wait_for_retry
+from my_team.device.llm.vendor.adapters.retry import (
+    provider_retry_event,
+    retry_delay_seconds,
+    wait_for_retry,
+)
 from my_team.device.llm.vendor.adapters.stream import canonicalize_provider_stream
 from my_team.device.llm.vendor.adapters.tool_call_ids import portable_tool_call_id
+from my_team.device.llm.vendor.types.messages import (
+    AgentMessage,
+    AssistantMessage,
+    AssistantMessageDiagnostic,
+    ImageContent,
+    ThinkingContent,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
+    assistant_content,
+    message_to_user,
+)
+from my_team.device.llm.vendor.types.tools import AgentTool, ToolCall
+from my_team.device.llm.vendor.types.types import JSONValue
 
 # Models that reject function tools + reasoning_effort on /chat/completions and
 # must use the /v1/responses endpoint instead.
@@ -110,7 +117,7 @@ class OpenAICompatibleProvider:
             signal=signal,
             session_id=session_id,
         )
-        return canonicalize_provider_stream(
+        return canonicalize_provider_stream(  # type: ignore[no-any-return]
             raw,
             api=self._config.api,
             provider=getattr(self._config, "provider_name", "openai-compatible"),

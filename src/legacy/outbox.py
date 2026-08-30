@@ -21,9 +21,8 @@ import uuid
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from my_team.asset_store import AttachmentRef
+from pydantic import BaseModel, Field
 
 
 class OutboxStatus(str, Enum):

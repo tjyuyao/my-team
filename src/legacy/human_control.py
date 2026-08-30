@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from my_team.agent_tree import AgentTree
 from my_team.audit import AuditEventType, AuditLog
 from my_team.ingress import IngressBuffer, IngressEvent
@@ -26,6 +24,7 @@ from my_team.models.email import EmailPriority, EmailType
 from my_team.shared_kb import SharedKB
 from my_team.task_tree import TaskTree
 from my_team.tick_engine import SimulationState, TickEngine
+from pydantic import BaseModel, Field
 
 
 class HumanCommand(BaseModel):

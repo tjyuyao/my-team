@@ -32,10 +32,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-from pydantic import BaseModel, Field
-
 from my_team.devices.base import Device, EntityKind, InjectionDecl
 from my_team.tool_manifest import ToolManifest
+from pydantic import BaseModel, Field
 
 
 class ReceiptAssertion(BaseModel):

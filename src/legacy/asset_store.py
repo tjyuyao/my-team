@@ -22,9 +22,8 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from my_team.devices.base import Device, EntityKind, InjectionDecl
+from pydantic import BaseModel, Field
 
 DEFAULT_MIME = "application/octet-stream"
 

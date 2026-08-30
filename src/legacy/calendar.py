@@ -19,10 +19,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
-
 from my_team.devices.base import Device, EntityKind, InjectionDecl
 from my_team.models.task import TaskPriority
+from pydantic import BaseModel, Field, model_validator
 
 
 class CronSpec(BaseModel):

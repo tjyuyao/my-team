@@ -51,7 +51,7 @@ PROCESS_TYPES: dict[str, type] = {}
 KERNEL_IDENTITY = "kernel"
 
 # 内核态来源（kernel/authority/journal）的认证上下文：无 position、无 scopes
-EMPTY_AUTH = {"position": None, "scopes": []}
+EMPTY_AUTH: dict = {"position": None, "scopes": []}
 
 
 class AgentOS:
@@ -98,7 +98,7 @@ class AgentOS:
     @staticmethod
     def _load(path: str) -> dict:
         with open(path, encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            return yaml.safe_load(f)  # type: ignore[no-any-return]
 
     # ------------------------------------------------------------------
     # 注册（agent 拓扑来自配置）
@@ -209,7 +209,7 @@ class AgentOS:
             "source": "system", "target": "authority", "kind": "system",
             "payload": {"command": "authorize_request",
                         "identity": identity, "scope": scope}})
-        return reply["payload"]["allowed"]
+        return reply["payload"]["allowed"]  # type: ignore[no-any-return]
 
     async def _authorize_device(self, actor: str, device: str) -> bool:
         """Allow root/org installers, kernel, or a maintainer explicitly scoped to device."""
@@ -230,7 +230,7 @@ class AgentOS:
         reply = await self.authority.respond({
             "source": "system", "target": "authority", "kind": "system",
             "payload": {"command": "auth_request", "identity": identity}})
-        return reply["payload"]["auth"]
+        return reply["payload"]["auth"]  # type: ignore[no-any-return]
 
     @staticmethod
     def _defaults(scopes: list) -> list[str]:
@@ -354,7 +354,7 @@ class AgentOS:
         payload = event["payload"]
         target = payload.get("target_device")
         actor = event["source"]
-        
+
         try:
             # 参数校验
             if not isinstance(target, str) or not target:
@@ -362,38 +362,38 @@ class AgentOS:
             if "/" in target or ".." in target or target == "." \
                     or "@" in target:
                 raise ValueError(f"维护目标 identity 非法: {target!r}")
-            
+
             # 维护者不能是设备（不能维护自己的设备）
             actor_entity = self.entities.get(actor)
             if isinstance(actor_entity, ProcessHandle) and \
                     actor_entity._load_spec is not None:
                 raise ValueError(f"设备身份不可作为维护者: {actor!r}")
-            
+
             # 权限裁决：维护者必须持有目标设备的 maintain scope
             if not await self._authorize_device(actor, target):
                 raise ValueError(f"无目标设备维护权: {target!r}")
-            
+
             # 目标设备必须已卸载（未注册）
             if target in self.entities:
                 raise ValueError(f"目标设备仍在运行，必须先卸载: {target!r}")
-            
+
             # 目标设备必须存在（有私家目录）
             target_home = os.path.join(self.runtime_root, "home", target)
             if not os.path.exists(target_home):
                 raise ValueError(f"目标设备私家不存在: {target_home!r}")
-            
+
             # 构造维护会话进程：维护者身份 + 目标设备私家可写
             # 注意：维护者必须是已注册的 agent（有 workdir）
             actor_handle = self.entities.get(actor)
             if not isinstance(actor_handle, ProcessHandle):
                 raise ValueError(f"维护者必须是已注册的 agent: {actor!r}")
-            
+
             # 终止现有维护者进程（如果有）
             old = self.entities.get(actor)
             if isinstance(old, ProcessHandle):
                 del self.entities[actor]
                 await old.terminate(5)
-            
+
             # 注册维护会话进程：使用维护者身份，但设置 maintenance_device
             # 这样 _mount_anchors() 会返回双锚点（维护者家 + 目标设备家）
             async def spawn_maintenance(emit):
@@ -401,18 +401,18 @@ class AgentOS:
                     emit, 0, self.runtime_root,
                     identity=actor, maintenance_device=target)
                 return process
-            
+
             await self.register(
                 actor,
                 spawn_maintenance,
                 agent=True,
                 position=actor_handle._position if hasattr(actor_handle, '_position') else None,
             )
-            
+
             ok, error = True, None
         except Exception as exc:
             ok, error = False, str(exc)
-        
+
         await self._kernel_emit(KERNEL_IDENTITY,
                                 self._ack(event, "maintenance_session_started",
                                           target if ok else actor, ok, error))
@@ -476,6 +476,8 @@ class AgentOS:
             raise FileNotFoundError(f"设备源码不存在: {path!r}")
         name = f"team_device_{identity}_{uuid.uuid4().hex[:8]}"
         spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise FileNotFoundError(f"设备模块 spec 解析失败: {path!r}")
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
@@ -495,7 +497,7 @@ class AgentOS:
             "source": "system", "target": "authority", "kind": "system",
             "payload": {"command": "agents_request"},
         })
-        return reply["payload"]["agents"]
+        return reply["payload"]["agents"]  # type: ignore[no-any-return]
 
     @staticmethod
     def _ack(event: Event, command: str, identity: str, ok: bool,

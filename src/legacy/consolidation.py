@@ -25,14 +25,13 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
-
 from my_team.models.memory import (
     EntryOrigin,
     EntryProvenance,
     MemoryEntry,
     make_skill_entry,
 )
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from my_team.memory_recall import RecallEngine

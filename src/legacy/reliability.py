@@ -15,11 +15,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
-
 from my_team.audit import AuditEventType, AuditLog
 from my_team.shared_kb import LockManager
 from my_team.task_tree import TaskTree
+from pydantic import BaseModel, Field
 
 
 class RetryPolicy(BaseModel):

@@ -1,6 +1,6 @@
 """Kernel：Process 抽象（协议）与两态实现。
 
-Process = 一套契约：``async respond(event) -> Event | VOID``。
+Process = 一套契约：``async respond(event) -> Event | str``。
 - 返回事件 → emit（产出，source 由宿主读侧盖章）；
 - 返回 ``VOID``（"VOID" 哨兵）→ 合法沉默，不上总线；
 - 返回 None → 协议违规，响亮丢弃（None 无法区分"故意沉默"与"忘记返回"）。
@@ -29,7 +29,6 @@ import pickle
 import shutil
 import sys
 from abc import ABC, abstractmethod
-from typing import Protocol
 
 from .event_protocol import VOID, Event
 
@@ -64,7 +63,12 @@ class ProcessBase(ABC):
 
     @staticmethod
     def _validate_identity(identity: str):
-        if not identity or "/" in identity or ".." in identity                 or identity in (".", "kernel"):
+        if (
+            not identity
+            or "/" in identity
+            or ".." in identity
+            or identity in (".", "kernel")
+        ):
             raise ValueError(f"identity 非法: {identity!r}")
 
     @property
@@ -80,7 +84,7 @@ class ProcessBase(ABC):
                 f"路径逃逸: {path!r} 不在 {home!r} 内")
 
     @abstractmethod
-    async def respond(self, event: Event) -> Event | VOID:
+    async def respond(self, event: Event) -> Event | str:
         ...
 
 
@@ -180,7 +184,7 @@ class UserModeProcess(ProcessBase, mp.Process):
     # agent 经构造参数覆盖；基类默认禁网，未声明即 False。
     needs_network = False
 
-    async def respond(self, event: Event) -> Event | VOID:
+    async def respond(self, event: Event) -> Event | str:
         """处理单个事件，返回产出事件或 VOID（子类实现）。"""
         raise NotImplementedError
 
@@ -245,9 +249,10 @@ class UserModeProcess(ProcessBase, mp.Process):
         instance = copy.copy(self)
         instance.emit = None
         instance._conn = None
-        instance._config = {}  # 去 authkey（非 spawn 上下文 pickle 即报错）
-        instance._popen = None
-        instance._sentinel = None
+        # Strip authkey (pickling outside spawn context raises)
+        instance._config = {}  # type: ignore[attr-defined]
+        instance._popen = None  # type: ignore[attr-defined]
+        instance._sentinel = None  # type: ignore[attr-defined]
         return {"kind": "agent", "instance": instance}
 
     def _mount_anchors(self) -> tuple[list[str], list[str]]:
@@ -261,14 +266,14 @@ class UserModeProcess(ProcessBase, mp.Process):
             # The device may update state in its home, while its loaded
             # implementation remains immutable until the process is stopped.
             return [os.path.dirname(path)], [path]
-        own_home = os.path.join(self.workdir, "data", self.identity)
+        own_home = os.path.join(self.workdir, "data", self.identity)  # type: ignore[attr-defined]
         target = getattr(self, "maintenance_device", None)
         if target:
             if not isinstance(target, str) or not target or "/" in target \
                     or ".." in target or target in {".", "kernel"} \
                     or "@" in target:
                 raise ValueError(f"维护目标 identity 非法: {target!r}")
-            target_home = os.path.join(self.workdir, "data", target)
+            target_home = os.path.join(self.workdir, "data", target)  # type: ignore[attr-defined]
             # A maintenance session is materialized as two writable anchors:
             # the maintainer's home and the specifically authorized device
             # home.  AgentOS checks that target is unloaded before spawn.
@@ -309,7 +314,7 @@ class KernelModeDevice(ProcessBase):
     def __init__(self, identity: str, runtime_root: str):
         super().__init__(identity, runtime_root)
 
-    async def respond(self, event: Event) -> Event | VOID:
+    async def respond(self, event: Event) -> Event | str:
         raise NotImplementedError
 
 

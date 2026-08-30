@@ -22,7 +22,9 @@ async def _authority_registration_grants_and_injection():
     import tempfile
     tmpdir = tempfile.mkdtemp()
     authority = Authority("authority", tmpdir)
-    assert await authority.respond(_cmd("register_request", identity="alice", agent=True, position="worker")) == VOID
+    assert await authority.respond(
+        _cmd("register_request", identity="alice", agent=True, position="worker")
+    ) == VOID
     assert await authority.respond(
         _cmd(
             "register_request",
@@ -51,6 +53,11 @@ async def _authority_command_surface_is_kernel_only():
     tmpdir = tempfile.mkdtemp()
     authority = Authority("authority", tmpdir)
     denied = await authority.respond(
-        {"source": "alice", "target": "authority", "kind": "system", "payload": {"command": "agents_request"}}
+        {
+            "source": "alice",
+            "target": "authority",
+            "kind": "system",
+            "payload": {"command": "agents_request"},
+        }
     )
     assert denied["payload"]["command"] == "denied"
