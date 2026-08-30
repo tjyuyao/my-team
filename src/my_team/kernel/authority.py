@@ -70,6 +70,13 @@ class Authority(KernelModeDevice):
             self._grants.get(payload["position"], set()).discard(
                 (payload["device"], payload["token"]))
             return VOID
+        if command == "device_grants_request":
+            identity = event["payload"]["identity"]
+            return {"target": "kernel", "kind": "application",
+                    "payload": {"grants": [
+                        {"position": position, "token": token}
+                        for position, grants in self._grants.items()
+                        for device, token in grants if device == identity]}}
         if command == "authorize_request":
             payload = event["payload"]
             return {"target": "kernel", "kind": "application",

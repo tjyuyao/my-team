@@ -87,17 +87,28 @@ class ProcessHandle:
     def _start_reader(self):
         """常驻 reader：child 产出 → 读侧盖章 → event_bus。每次拉起新
         通道（_open_channel）即绑定新 parent 无条件启新 reader——旧通道
-        的 reader 已随旧进程 EOF（或通道 close）退出，不判重（判重存在
+        的 reader 已随旧进程 EOF（或进程死亡）退出，不判重（判重存在
         terminate 后立即 respawn 的窄窗口漏启风险）。"""
         self._reader = threading.Thread(
             target=self._read_loop,
-            args=(self._parent, self._parent_sock),
+            args=(self._parent, self._parent_sock, self._process),
             name=f"reader-{self.identity}", daemon=True)
         self._reader.start()
 
-    def _read_loop(self, parent, parent_sock):
+    def _read_loop(self, parent, parent_sock, process):
+        """读侧盖章循环：poll 限时 + 进程存活检查，双重兜底 EOF。
+
+        poll(0.2) 保证单次等待有界；进程死亡（bwrap 命名空间链的后代可能
+        继承并持住 child 端 fd，纯 EOF 不可达）时 is_alive 兜底退出，防
+        死孩子堵死宿主读侧。process 按参数捕获：terminate 置 _process=None
+        不影响在途 reader。
+        """
         try:
             while True:
+                if not process.is_alive():
+                    return  # 进程已死（后代持 fd 时 EOF 不可达）→ 退出
+                if not parent.poll(0.2):
+                    continue
                 try:
                     event = parent.recv()
                 except (EOFError, OSError):

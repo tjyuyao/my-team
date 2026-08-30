@@ -329,10 +329,23 @@ class AgentOS:
             # 先摘身份再终止（同 _install：终止期间路由/产出均被校验拒绝）
             del self.entities[identity]
             await old.terminate(5)  # 确保进程死亡（超时强杀），绝不同身份并存
+            # 保留 maintain scope：维护授权必须在卸载期间依然有效（卸载→
+            # 编辑→重载 闭环）。Authority 只存不解释 token，kernel 在此
+            # 解释：卸载撤销全部设备布线，但 maintain 授权跨卸载存续，
+            # 重装时经 SCOPES 默认布线重新写入（set 幂等）。
+            grants_reply = await self.authority.respond({
+                "source": "system", "target": "authority", "kind": "system",
+                "payload": {"command": "device_grants_request",
+                            "identity": identity}})
             await self.authority.respond({
                 "source": "system", "target": "authority", "kind": "system",
                 "payload": {"command": "unregister_request", "identity": identity},
             })
+            for grant in grants_reply["payload"]["grants"]:
+                if grant["token"] == "maintain" \
+                        or grant["token"] == f"maintain:{identity}":
+                    await self._grant(grant["position"], identity,
+                                      grant["token"])
             for agent in agents:
                 await self._inject(agent)
             ok, error = True, None
@@ -363,10 +376,12 @@ class AgentOS:
                     or "@" in target:
                 raise ValueError(f"维护目标 identity 非法: {target!r}")
 
-            # 维护者不能是设备（不能维护自己的设备）
+            # 维护者不能是设备（不能维护自己的设备）：设备进程带 load_spec，
+            # 从宿主 handle 的进程实例取（handle 自身无 load_spec 字段）
             actor_entity = self.entities.get(actor)
-            if isinstance(actor_entity, ProcessHandle) and \
-                    actor_entity._load_spec is not None:
+            actor_proc = getattr(actor_entity, "_process", None)
+            if isinstance(actor_entity, ProcessHandle) and actor_proc is not None \
+                    and actor_proc._load_spec is not None:
                 raise ValueError(f"设备身份不可作为维护者: {actor!r}")
 
             # 权限裁决：维护者必须持有目标设备的 maintain scope
@@ -388,6 +403,12 @@ class AgentOS:
             if not isinstance(actor_handle, ProcessHandle):
                 raise ValueError(f"维护者必须是已注册的 agent: {actor!r}")
 
+            # position 权威源在 Authority（handle 不存）；维护进程重新注册
+            # 为 agent 必须带 position（register 强制）
+            actor_position = (await self._auth_context(actor)).get("position")
+            if not isinstance(actor_position, str):
+                raise ValueError(f"维护者无 position: {actor!r}")
+
             # 终止现有维护者进程（如果有）
             old = self.entities.get(actor)
             if isinstance(old, ProcessHandle):
@@ -396,17 +417,16 @@ class AgentOS:
 
             # 注册维护会话进程：使用维护者身份，但设置 maintenance_device
             # 这样 _mount_anchors() 会返回双锚点（维护者家 + 目标设备家）
-            async def spawn_maintenance(emit):
-                process = UserModeProcess(
+            def spawn_maintenance(emit):
+                return UserModeProcess(
                     emit, 0, self.runtime_root,
                     identity=actor, maintenance_device=target)
-                return process
 
             await self.register(
                 actor,
                 spawn_maintenance,
                 agent=True,
-                position=actor_handle._position if hasattr(actor_handle, '_position') else None,
+                position=actor_position,
             )
 
             ok, error = True, None
